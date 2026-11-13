@@ -32,13 +32,17 @@ Nothing is implemented yet. See `plan.md` for build order and open research.
   - **Share:** unblocks the human's input while the agent keeps its lock. Both act at once.
 
 ## Event log
-- Each session has an append-only log of everything: human input, agent commands, app start/exit, messages, screenshots. Pointer motion is coalesced.
-- Human actions since the agent's last command are attached to the agent's next response (any command or poll message), so the agent knows what changed under it.
+- Each session has an append-only, timestamped log of everything: human input, agent commands, app start/exit, window map/unmap, messages, screenshots.
+- Every event has one of two delivery tiers:
+  - **Wake:** ends a blocking `poll` (or emits a `--follow` line). Defaults: human message (including drawings), lock revoked, app exited or crashed, session about to expire.
+  - **Passive:** never wakes anything. It queues up and rides along with the next delivery. Defaults: human input (pointer motion, clicks, keys, scrolls), window map/unmap/title changes, output changes.
+- Any delivery carries every queued passive event since the agent's last one, compactly summarized (coalesced motion, with timestamps). A delivery is either a wake event or the response to any agent command. So the agent always knows what changed under it.
+- `poll --wake`/`--passive` can move event kinds between tiers. Use this tier split anywhere new event kinds appear, rather than ad-hoc rules.
 - Frames are not persisted by default and there's no scrubbing UI. The log is designed so frame history could be added later.
 
 ## Messaging
-- `guilab poll` blocks until the next human message, prints it and exits. `--follow` streams one line per event instead, for Monitor-style tools.
-- A message has text, image attachments (written to files, path given), and the human's actions since the agent's last command.
+- `guilab poll` blocks until the next wake event, prints it with the queued passive events, and exits. `--follow` streams one line per wake event instead, for Monitor-style tools.
+- A human message has text, image attachments (written to files, path given), and the queued passive events.
 - `guilab say` posts agent → human messages (text, optional images) into the viewer's chat.
 
 ## Viewer

@@ -27,7 +27,7 @@ Per-session display, xdg-shell, single tiled toplevel filling the output, popups
 Per-session Xwayland with `-x`, X windows in `tree`, input to them.
 
 ## 5. Event log
-Per-session log, motion coalescing, human actions attached to the agent's next response, `log`.
+Per-session log, wake/passive tiers, motion coalescing, passive events attached to the next delivery, `log`.
 
 ## 6. Viewer
 `show`/`hide`/`--show`, session tabs, zoom/pan/pinch, human input forwarding, lock UI (revoke/share). Test the viewer by running it inside a guilab session (or with the gui-testing skill before that's possible).
