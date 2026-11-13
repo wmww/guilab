@@ -9,14 +9,17 @@ Nothing is implemented yet. See `plan.md` for build order and open research.
 - **smithay** compositor in-process. guilab *is* the compositor, so screenshots read our own buffers, input is injected directly (touch included), and frame timing is under our control.
 - Reuse existing code for tricky logic (popup placement/constraints, Xwayland WM, grabs) rather than writing our own: smithay helpers first, then anvil (MIT), then cosmic-comp/niri.
 - **egui** for the viewer, drawn with the same renderer as the compositor so the app's frames are just textures.
-- GLES renderer on a DRM render node, pixman software fallback.
+- GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer always needs GL (egui has no software renderer); Mesa llvmpipe covers GPU-less machines.
+- Details and verified APIs: `smithay.md` (core compositor), `host-and-xwayland.md` (Xwayland, viewer window, egui).
 - Public repo. MIT by default; switching to GPL is fine if borrowing from cosmic-comp/niri needs it.
 
 ## Server
-- Runs without any parent Wayland connection. The viewer window is optional: `--show` at startup, `guilab show`/`hide` at runtime. Opening or closing the host connection must never affect sessions.
+- Runs without any parent Wayland connection. The viewer window is optional: `--show` at startup, `guilab show`/`hide` at runtime. Opening or closing the host connection must never affect sessions. Host disconnects or protocol errors close the viewer only, and never stop the server. `show` sends the CLI's own `WAYLAND_DISPLAY`, since the auto-started server's environment may be stale.
 - While the viewer is hidden, the server's own clock drives frame callbacks, so apps behave the same either way.
 - Starts automatically on the first CLI command that needs it. Sessions have a TTL like guibox. Ending a session kills everything spawned in it.
-- **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session.
+- **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session. Each session is its own smithay state type (`Display<Session>`, handlers on `Session`), not one shared state with lookups. X11Wm needs an event loop whose data is the session, so each session probably gets its own nested calloop inside the server's loop (see the notes).
+- **Window policy:** the first toplevel fills the output (tiled states, no decorations). Dialogs (with a parent) and later toplevels float centered on top. X override-redirect windows (menus, tooltips) go in their own position.
+- Key repeat is off by default, so a held key in an agent input chain doesn't auto-repeat.
 - **Session resolution:** `--session NAME` > `$GUILAB_SESSION` > the session created from the cwd's git worktree root > the only session, if there's exactly one. A new session defaults to the worktree's name. Goal: one agent per worktree, each with its own session, and no naming needed.
 
 ## IPC
@@ -58,6 +61,7 @@ Drawing flow:
 - Starting to draw (any tool) freezes a screenshot of the session (whole output, no cursor) and the drawing goes over it.
 - "Queue" shrinks it to a thumbnail next to the input box. A queued thumbnail can be deleted. All queued screenshots go with the next message.
 - Sending a message while a drawing is still open sends that drawing with it.
+- Keep annotation + queuing (and the chat feed, if it fits naturally) in its own crate(s), easy to copy into another egui app: depends only on egui and image types, takes a screenshot in, gives annotated images, text annotations and queue events out. No compositor, IPC or session types.
 - Each screenshot reaches the agent as one composited image file. Text annotations either get baked into the image, or sent as text with a position, or both. Decide by testing: give fresh, context-free sub-agents each format and see which they understand better.
 
 ## Screenshots
