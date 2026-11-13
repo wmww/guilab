@@ -2,7 +2,8 @@
 //!
 //! Transport: one Unix socket per server (`socket_path()`), line-delimited JSON.
 //! Each line from the client is a [`Request`]; the server answers each with one
-//! [`Response`] line, in order. Reply payloads are the typed structs below, sent
+//! [`Response`] line. Send the next request only after the reply: a screenshot reply is
+//! deferred, so pipelined replies could arrive out of order. Reply payloads are the typed structs below, sent
 //! as `Response::data` so the CLI can print them with `--json` as-is.
 
 use std::{

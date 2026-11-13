@@ -2,26 +2,12 @@
 
 Each step ends usable and tested. Record research findings in notes, then delete this file once v1 is done.
 
-## 0. Research (before writing code)
-Find out what smithay (and cosmic-comp/niri/anvil) already provide, so we don't write tricky logic ourselves:
-- xdg popups: positioner constraints, grabs, PopupManager
-- Xwayland: smithay's X11Wm. What anvil/cosmic-comp do around it (override-redirect windows, menus, focus)
-- headless GLES on a render node with no KMS; pixman fallback; dmabuf support for clients
-- several `Display`s in one calloop event loop (one per session)
-- presenting to a host compositor on demand without smithay's winit backend: sctk client plus our own buffers (dmabuf or shm)
-- egui on smithay's GlesRenderer (state of the smithay-egui crate, or egui_glow directly)
-- virtual keyboard (xkb keymap), pointer, touch and gestures on a smithay seat
-- detecting "app finished drawing" for settled screenshots
-- licenses of anything we'd copy
-
-## 1. Skeleton
-Cargo workspace, `guilab` binary, server daemon with autostart, control socket with the JSON protocol, session resolution, `new`/`end`/`ls`, TTL, cleanup.
-
-## 2. Headless compositor
-Per-session display, xdg-shell, single tiled toplevel filling the output, popups, own frame clock, `run`/`kill`/`ps`, `tree`, `screenshot` (PNG, settle wait), `output` resize/scale.
+## 0-2. Done
+Research (notes `smithay.md`, `host-and-xwayland.md`), skeleton (workspace, daemon, autostart, JSON socket, session resolution, TTL, cleanup) and headless compositor (per-session display and nested loop, xdg-shell with the window policy, popups, frame clock, dmabuf, pixman fallback, `run`/`kill`/`ps`/`tree`/`screenshot`/`output`). Tested against GTK4, Qt6 (PySide6), kitty, weston demos, in parallel sessions; see `code-map.md`.
 
 ## 3. Input and locking
 `lock`/`unlock` with tokens, the `input` action chain (pointer, buttons, scroll, keys, type, touch, surface-local coordinates), clipboard.
+Also test with real input what step 2 couldn't: popup grabs (click outside dismisses the chain), a Qt `QMenu` (Qt opens none without an input serial: `tests/it/apps/qt_app.py --menu`), GTK context menus, focus moving between floating windows.
 
 ## 4. Xwayland
 Per-session Xwayland with `-x`, X windows in `tree`, input to them.

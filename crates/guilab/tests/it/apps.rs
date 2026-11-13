@@ -95,3 +95,21 @@ fn parallel_sessions_are_isolated() {
     assert_eq!(read_png(&sa).0, 320);
     assert_eq!(read_png(&sb).0, 300);
 }
+
+#[test]
+fn qt_renders_tiled() {
+    if std::process::Command::new("python3").args(["-c", "import PySide6.QtWidgets"]).status().map(|s| !s.success()).unwrap_or(true) {
+        eprintln!("skipping: PySide6 missing");
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "500x400"]);
+    lab.run(&["run", "--", &app("qt_app.py")]);
+    let t = lab.wait_tree("s1", 15, |t| t.as_array().is_some_and(|a| !a.is_empty()));
+    assert_eq!(t[0]["title"], "guilab qt test");
+    assert_eq!(rect(&t[0]), (0, 0, 500, 400));
+    let shot = lab.path("qt.png");
+    assert_eq!(lab.json(&["screenshot", "-o", &shot])["settled"], true);
+    // Qt's default light theme: mostly light pixels, i.e. it drew (no server-side decorations).
+    assert!(lit_fraction(&shot) > 0.9);
+}

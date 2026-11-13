@@ -168,7 +168,7 @@ impl Session {
             })
             .map_err(|e| e.error)?;
 
-        // Globals. See notes/code-map.md for why each is (or isn't) here.
+        // Globals. See notes/smithay.md for the chosen set and what is skipped.
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);

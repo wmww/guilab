@@ -1,6 +1,6 @@
 # Xwayland, host viewer window, egui
 
-Research results for plan steps 4 and 6. Versions checked: smithay 0.7.0 (crates.io) and git main, sctk 0.20.0, egui/egui_glow 0.35, Xwayland 24.1.
+Research results for plan steps 4 and 6. Versions checked: smithay 0.7.0 (crates.io) and git main (we now use the pinned master rev; APIs below may have shifted slightly), sctk 0.20.0, egui/egui_glow 0.35, Xwayland 24.1.
 
 ## Licenses
 - MIT, free to copy: smithay and anvil, smithay-egui, sctk, calloop-wayland-source. egui is MIT/Apache.
@@ -46,10 +46,8 @@ handle.insert_source(xw, move |ev, _, st| match ev {
 - `tree` data: `window_id()`, `title()`, `class()`, `instance()`, `geometry()`, `is_override_redirect()`, `window_type()`, `pid()`.
 - Glue total: roughly 300-500 lines. Skip cosmic's key/button "eavesdropping" (global shortcuts) and xrdb.
 
-### Gotcha: several sessions under one state type (affects the multi-Display design)
-`XWaylandShellHandler::xwayland_shell_state(&mut self)` has no display or session argument. Its `by_serial` map is keyed by the surface serial, which each Xwayland counts from 1, so sessions sharing one map would collide. Every smithay `*_state(&mut self)` getter has the same shape. The same goes for `X11Wm::start_wm(LoopHandle<'static, D>, ..)`, which inserts sources whose callback gets `&mut D`. Options:
-- **Per-session state type**: each session has its own `Display<SessionState>` and its own calloop `EventLoop<SessionState>`, nested in the server loop (calloop `EventLoop` is `AsFd`) and dispatched with `&mut session`. All getters then become trivial. This is cleanest if it fits the other research.
-- **One D with a "current session" field**: smithay calls `XwmHandler::xwm_state(xwm_id)` before `xwayland_shell_state()` in both paths that use it (the X event handler and the commit hook), so `xwm_state` can set the current session. This works, but it's fragile.
+### Per-session state (resolved)
+`XWaylandShellHandler::xwayland_shell_state(&mut self)` and every other smithay `*_state()` getter take no session argument, and `X11Wm::start_wm(LoopHandle<'static, D>, ..)` inserts sources whose callbacks get `&mut D`. That's why each session is its own state type with its own nested `EventLoop<Session>` (built; see `code-map.md`): pass `session.handle` to `start_wm` and `XWayland::spawn`'s source. Remember: no calloop `Timer` inside a session loop.
 
 ## 2. Host viewer window: sctk on its own connection, presenting dmabufs from the headless renderer
 Verified with a throwaway program (sctk 0.20 + smithay 0.7 GlesRenderer on renderD128 + egui_glow 0.35, shown in headless sway): zero-copy, correct output, Intel CCS 2-plane modifier.

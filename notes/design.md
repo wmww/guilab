@@ -2,7 +2,7 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Nothing is implemented yet. See `plan.md` for build order and open research.
+Plan steps 1-2 (skeleton, headless compositor) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
@@ -16,8 +16,10 @@ Nothing is implemented yet. See `plan.md` for build order and open research.
 ## Server
 - Runs without any parent Wayland connection. The viewer window is optional: `--show` at startup, `guilab show`/`hide` at runtime. Opening or closing the host connection must never affect sessions. Host disconnects or protocol errors close the viewer only, and never stop the server. `show` sends the CLI's own `WAYLAND_DISPLAY`, since the auto-started server's environment may be stale.
 - While the viewer is hidden, the server's own clock drives frame callbacks, so apps behave the same either way.
-- Starts automatically on the first CLI command that needs it. Sessions have a TTL like guibox. Ending a session kills everything spawned in it.
-- **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session. Each session is its own smithay state type (`Display<Session>`, handlers on `Session`), not one shared state with lookups. X11Wm needs an event loop whose data is the session, so each session probably gets its own nested calloop inside the server's loop (see the notes).
+- Starts automatically on the first CLI command that needs it, and then exits after 10 minutes without sessions. `guilab server --stop` stops it (ending all sessions).
+- Sessions end after an idle TTL (default 30 minutes without commands targeting them; `new --ttl SECS`, 0 = never). Ending a session kills everything spawned in it, including double-forked daemons.
+- Each session has its own dir, which is also its apps' `XDG_RUNTIME_DIR` (Wayland socket, app logs, screenshots). Apps don't see the user's D-Bus, audio or compositor.
+- **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session. Each session is its own smithay state type (`Display<Session>`, handlers on `Session`), not one shared state with lookups, and has its own calloop loop (data = the session) nested in the server's loop, which is what X11Wm and smithay's per-display getters need.
 - **Window policy:** the first toplevel fills the output (tiled states, no decorations). Dialogs (with a parent) and later toplevels float centered on top. X override-redirect windows (menus, tooltips) go in their own position.
 - Key repeat is off by default, so a held key in an agent input chain doesn't auto-repeat.
 - **Session resolution:** `--session NAME` > `$GUILAB_SESSION` > the session created from the cwd's git worktree root > the only session, if there's exactly one. A new session defaults to the worktree's name. Goal: one agent per worktree, each with its own session, and no naming needed.
@@ -72,14 +74,15 @@ Drawing flow:
 - Built for agents first. No compatibility with xdotool/wdotool. Ship a short skill doc.
 - **Input data is positional args and flags, never JSON**, so it's terse and needs no quoting. Input actions chain within one command (like wdotool) so held buttons and modifiers work.
 - Output is compact text made for agents to read. `--json` gives structured output for scripts.
+- All coordinates agents see or give are output pixels, i.e. screenshot pixels, at any scale.
 - Errors are short and say what to do.
 - Rough command set (to be refined during implementation):
-  - server: `server [--show]`, `show`, `hide`
-  - sessions: `new [NAME] [-s WxH] [--scale S] [-x]`, `end`, `ls`
+  - server: `server [--show] [--stop] [--idle-exit SECS]`, `show`, `hide`
+  - sessions: `new [NAME] [-s WxH] [--scale S] [--ttl SECS] [-x]`, `end`, `ls`; `-S NAME` / `--session NAME` on any command
   - apps: `run -- CMD...`, `kill [ID]`, `ps` (with exit status). No restart or watch mode: `build && guilab kill && guilab run ...` is enough.
-  - control: `lock`, `unlock`, `output --size WxH --scale S`
+  - control: `lock`, `unlock`, `output [-s WxH] [--scale S]` (no args: show)
   - input chain: `input [--surface ID] ACTION...`. Actions: `move X Y`, `down/up/click [BTN]`, `scroll DX DY`, `key CHORD`, `keydown/keyup KEY`, `type TEXT`, `touch down|move|up ID [X Y]`, `on SURFACE` (switches coordinates to that surface's local space), `sleep MS`
-  - inspect: `tree` (toplevels, popups, subsurfaces, X windows: IDs, app_id/title, geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]`, `log`
+  - inspect: `tree` (toplevels topmost first, with popups and subsurfaces nested, X windows: IDs, app_id/title, pid, geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir), `log`
   - clipboard: `clip get`, `clip set`
   - messaging: `poll [--follow]`, `say TEXT [--image PATH]`
 
