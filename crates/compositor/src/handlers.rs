@@ -1,0 +1,250 @@
+//! smithay handler traits for `Session` (except xdg-shell, see `shell.rs`).
+
+use std::time::Instant;
+
+use smithay::{
+    backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
+    delegate_dispatch2,
+    input::{
+        Seat, SeatHandler, SeatState,
+        dnd::DndGrabHandler,
+        pointer::{CursorImageStatus, PointerHandle},
+    },
+    reexports::{
+        calloop::Interest,
+        wayland_server::{
+            Client, Resource,
+            protocol::{wl_buffer, wl_surface::WlSurface},
+        },
+    },
+    utils::{Logical, Point},
+    wayland::{
+        buffer::BufferHandler,
+        compositor::{
+            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            add_blocker, add_pre_commit_hook, get_parent, is_sync_subsurface, with_states,
+        },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf},
+        fractional_scale::{FractionalScaleHandler, with_fractional_scale},
+        idle_inhibit::IdleInhibitHandler,
+        keyboard_shortcuts_inhibit::{KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor},
+        output::OutputHandler,
+        pointer_constraints::{PointerConstraintsHandler, with_pointer_constraint},
+        seat::WaylandFocus,
+        selection::{
+            SelectionHandler,
+            data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus},
+            ext_data_control,
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState, set_primary_focus},
+            wlr_data_control,
+        },
+        shm::{ShmHandler, ShmState},
+        text_input::TextInputActivation,
+        xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
+        xdg_foreign::{XdgForeignHandler, XdgForeignState},
+    },
+};
+
+use crate::session::{ClientState, Session};
+
+/// Stable per-session surface id, stored in each surface's data map (shown by `tree`).
+pub struct SurfaceId(pub u32);
+
+pub fn surface_id(surface: &WlSurface) -> Option<u32> {
+    with_states(surface, |s| s.data_map.get::<SurfaceId>().map(|i| i.0))
+}
+
+impl CompositorHandler for Session {
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+
+    fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        // Xwayland's client will carry XWaylandClientData here once Xwayland lands.
+        &client.get_data::<ClientState>().expect("unknown client data").compositor_state
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        let id = self.next_surface_id;
+        self.next_surface_id += 1;
+        with_states(surface, |s| {
+            s.data_map.insert_if_missing(|| SurfaceId(id));
+        });
+        // Don't sample dmabufs the client is still rendering into (from anvil).
+        add_pre_commit_hook::<Self, _>(surface, |state, _dh, surface| {
+            let dmabuf = with_states(surface, |s| {
+                match s.cached_state.get::<SurfaceAttributes>().pending().buffer.as_ref() {
+                    Some(BufferAssignment::NewBuffer(b)) => get_dmabuf(b).cloned().ok(),
+                    _ => None,
+                }
+            });
+            if let Some(dmabuf) = dmabuf
+                && let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ)
+                && let Some(client) = surface.client()
+            {
+                let res = state.handle.insert_source(source, move |_, _, s: &mut Session| {
+                    let dh = s.dh.clone();
+                    s.client_compositor_state(&client).blocker_cleared(s, &dh);
+                    Ok(())
+                });
+                if res.is_ok() {
+                    add_blocker(surface, blocker);
+                }
+            }
+        });
+    }
+
+    fn commit(&mut self, surface: &WlSurface) {
+        on_commit_buffer_handler::<Self>(surface);
+        self.last_commit = Instant::now();
+        tracing::trace!(surface = surface_id(surface), "commit");
+        if !is_sync_subsurface(surface) {
+            let mut root = surface.clone();
+            while let Some(p) = get_parent(&root) {
+                root = p;
+            }
+            if let Some(w) = self.window_for_surface(&root) {
+                w.on_commit();
+            }
+        }
+        self.popups.commit(surface);
+        self.shell_commit(surface);
+    }
+}
+
+impl BufferHandler for Session {
+    fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {}
+}
+
+impl ShmHandler for Session {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
+    }
+}
+
+impl DmabufHandler for Session {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+    fn dmabuf_imported(&mut self, _: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
+        if self.gpu.borrow_mut().import_dmabuf(&dmabuf) {
+            let _ = notifier.successful::<Self>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
+impl OutputHandler for Session {}
+
+impl SeatHandler for Session {
+    // Xwayland will need an enum target here (X11Surface does its own SetInputFocus).
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&WlSurface>) {
+        let client = target.and_then(|s| self.dh.get_client(s.id()).ok());
+        set_data_device_focus(&self.dh, seat, client.clone());
+        set_primary_focus(&self.dh, seat, client);
+    }
+
+    fn cursor_image(&mut self, _: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+    }
+}
+
+// Needed by cursor-shape (which covers tablet tools too).
+impl smithay::input::tablet::TabletSeatHandler for Session {
+    type ToolFocus = WlSurface;
+}
+
+impl SelectionHandler for Session {
+    type SelectionUserData = ();
+}
+impl DataDeviceHandler for Session {
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
+    }
+}
+impl WaylandDndGrabHandler for Session {}
+impl DndGrabHandler for Session {}
+impl PrimarySelectionHandler for Session {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
+    }
+}
+impl wlr_data_control::DataControlHandler for Session {
+    fn data_control_state(&mut self) -> &mut wlr_data_control::DataControlState {
+        &mut self.wlr_data_control_state
+    }
+}
+impl ext_data_control::DataControlHandler for Session {
+    fn data_control_state(&mut self) -> &mut ext_data_control::DataControlState {
+        &mut self.ext_data_control_state
+    }
+}
+
+impl PointerConstraintsHandler for Session {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |c| {
+                if let Some(c) = c {
+                    c.activate()
+                }
+            });
+        }
+    }
+    fn cursor_position_hint(&mut self, _: &WlSurface, _: &PointerHandle<Self>, _: Point<f64, Logical>) {}
+}
+
+impl TextInputActivation for Session {}
+
+impl FractionalScaleHandler for Session {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // One output per session, so its scale is always the right one.
+        let scale = self.output.current_scale().fractional_scale();
+        with_states(&surface, |s| with_fractional_scale(s, |f| f.set_preferred_scale(scale)));
+    }
+}
+
+impl XdgActivationHandler for Session {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+    fn request_activation(&mut self, _: XdgActivationToken, data: XdgActivationTokenData, surface: WlSurface) {
+        let w = self.space.elements().find(|w| w.wl_surface().as_deref() == Some(&surface)).cloned();
+        if data.timestamp.elapsed().as_secs() < 10
+            && let Some(w) = w
+        {
+            self.focus_window(&w);
+        }
+    }
+}
+
+impl XdgForeignHandler for Session {
+    fn xdg_foreign_state(&mut self) -> &mut XdgForeignState {
+        &mut self.xdg_foreign_state
+    }
+}
+
+impl KeyboardShortcutsInhibitHandler for Session {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        // We have no compositor shortcuts; grant it.
+        inhibitor.activate();
+    }
+}
+
+impl IdleInhibitHandler for Session {
+    fn inhibit(&mut self, _: WlSurface) {}
+    fn uninhibit(&mut self, _: WlSurface) {}
+}
+
+delegate_dispatch2!(Session);
