@@ -33,7 +33,7 @@ Per-session log, wake/passive tiers, motion coalescing, passive events attached 
 `show`/`hide`/`--show`, session tabs, zoom/pan/pinch, human input forwarding, lock UI (revoke/share). Test the viewer by running it inside a guilab session (or with the gui-testing skill before that's possible).
 
 ## 7. Chat and drawing
-`poll`/`poll --follow`/`say`, chat panel, drawing on screenshots, attachments.
+`poll`/`poll --follow`/`say`, bottom feed (messages + agent command log), drawing toolbar, queued screenshots. Run the sub-agent test to pick how annotation text is delivered.
 
 ## 8. Ship
 Skill doc. Port guibox's use cases as integration tests (GTK, Qt, a browser, an X11 app). Then replace the gui-testing skill.

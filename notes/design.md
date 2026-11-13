@@ -46,11 +46,19 @@ Nothing is implemented yet. See `plan.md` for build order and open research.
 - `guilab say` posts agent → human messages (text, optional images) into the viewer's chat.
 
 ## Viewer
-- Tabs, one per session.
-- The viewer's size never changes the session's output size; the output size changes only via the CLI or an explicit control. Scroll to zoom, drag to pan, touchpad pinch/pan.
-- The human uses the app directly through the viewer, unless locked out.
-- Chat panel per session.
-- Drawing: when the human starts drawing, the server grabs a screenshot (whole output, no cursor) and the drawing goes over it. Sending attaches the composited image.
+Start with basic functionality. Don't build UI or features we aren't sure we need.
+
+Layout:
+- **Top:** one tab per session.
+- **Main area:** the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. Scroll to zoom, drag to pan, touchpad pinch/pan. The human uses the app directly here, unless locked out. Lock controls (revoke/share) live here too.
+- **Left edge:** a narrow drawing toolbar for diagramming, not art. One fixed-width pen, box, ellipse, line, arrow, text (as a tool or by double-click), and a few colors. Nothing more.
+- **Bottom:** the message input, plus a feed of the conversation: human messages, agent `say` output, and each agent command as a log line, so you can see what the agent is doing. A drag handle resizes it.
+
+Drawing flow:
+- Starting to draw (any tool) freezes a screenshot of the session (whole output, no cursor) and the drawing goes over it.
+- "Queue" shrinks it to a thumbnail next to the input box. A queued thumbnail can be deleted. All queued screenshots go with the next message.
+- Sending a message while a drawing is still open sends that drawing with it.
+- Each screenshot reaches the agent as one composited image file. Text annotations either get baked into the image, or sent as text with a position, or both. Decide by testing: give fresh, context-free sub-agents each format and see which they understand better.
 
 ## Screenshots
 - Agent screenshots take options: target (output or surface), cursor on/off, and settle-wait on/off. The default waits for the app to finish drawing, includes no cursor, and captures the whole output.
