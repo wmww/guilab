@@ -13,7 +13,7 @@ Issues live in `issues/` (unless specified, "issue" means one of these markdown 
 - Refactor freely as needed. don't trust that existing code/comments/notes are necessarily correct, or existing design decisions are optimal.
 - Unless otherwise asked, commit when you've completed your task. Don't pull/push.
 - Include the "Co-Authored-By: <model>" in your commits, but not the link to a Claude session.
-- Commit to the current branch unless asked, don't make feature branches.
+- Commit to the current branch unless asked, don't make feature branches (task branches in worktrees, merged and deleted when done, are fine).
 - Keep prose, comments, errors, and commit messages compact unless extra detail is genuinely useful.
 - When talking directly to humans, write especially simply and concisely. Avoid details or jargon unless critical for correctness.
 - Avoid recording dates or time estimates unless asked, remember you can always recover dates from git
