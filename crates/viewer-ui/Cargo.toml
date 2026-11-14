@@ -1,0 +1,18 @@
+[package]
+name = "guilab-viewer-ui"
+description = "guilab's viewer UI: session view, editor and chat glue, flights. Pure egui, no smithay, so it's tested headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+tracing.workspace = true
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+guilab-image.workspace = true
+guilab-editor.workspace = true
+guilab-chat.workspace = true
+guilab-kit.workspace = true
+guilab-proto.workspace = true

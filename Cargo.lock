@@ -868,6 +868,7 @@ dependencies = [
  "guilab-image",
  "guilab-kit",
  "guilab-proto",
+ "guilab-viewer-ui",
  "libc",
  "rustix 1.1.6",
  "smithay",
@@ -876,6 +877,19 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+]
+
+[[package]]
+name = "guilab-viewer-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "guilab-chat",
+ "guilab-editor",
+ "guilab-image",
+ "guilab-kit",
+ "guilab-proto",
+ "tracing",
 ]
 
 [[package]]

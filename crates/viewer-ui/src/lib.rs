@@ -17,8 +17,11 @@
 //!
 //! Zoom is in host physical pixels per image pixel, so 100% is pixel-exact at any scale.
 
+pub mod input;
+pub mod sizing;
 mod thumbs;
 mod view;
+pub mod viz;
 pub mod workspace;
 
 use std::{collections::HashMap, sync::Arc};
@@ -30,8 +33,8 @@ use guilab_image::{Asset, AssetId, Doc, Fonts, Image, ImageId, Store};
 use guilab_kit::{MenuBar, Theme, ThemePref, WindowButton};
 
 use crate::{
-    host::{CursorImage, HostCursor, HostInput, WindowOp},
-    sizing::{self, Resizing},
+    input::{CursorImage, HostCursor, HostInput, WindowOp},
+    sizing::Resizing,
 };
 use thumbs::ThumbSource;
 use workspace::{Att, Open, Request, Workspace};

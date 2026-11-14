@@ -9,7 +9,7 @@ use guilab_kit::Theme;
 use super::workspace::{Open, open_doc};
 use super::{Action, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
 use crate::{
-    host::{Gesture, HostCursor, HostInput},
+    input::{Gesture, HostCursor, HostInput},
     sizing::{self, Resizing},
 };
 

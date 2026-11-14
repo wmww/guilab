@@ -14,10 +14,7 @@ mod clipboard;
 pub mod gfx;
 pub mod host;
 pub mod portal;
-pub mod sizing;
 pub mod source;
-pub mod ui;
-pub mod viz;
 
 use std::{
     hash::{Hash, Hasher},
@@ -34,7 +31,7 @@ pub use egui;
 pub use guilab_chat::{Item as FeedItem, Status};
 pub use host::{BufferKind, Connected, CursorImage, HostCursor, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
-pub use ui::{Action, Input, ViewerUi};
+pub use guilab_viewer_ui::{self as ui, Action, Input, ViewerUi};
 
 /// A session for one draw.
 pub struct SessionFrame<'a> {

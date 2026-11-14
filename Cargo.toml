@@ -13,6 +13,7 @@ guilab-proto = { path = "crates/proto" }
 guilab-compositor = { path = "crates/compositor" }
 guilab-server = { path = "crates/server" }
 guilab-viewer = { path = "crates/viewer" }
+guilab-viewer-ui = { path = "crates/viewer-ui" }
 guilab-image = { path = "crates/image" }
 guilab-kit = { path = "crates/kit" }
 guilab-editor = { path = "crates/editor" }
