@@ -264,8 +264,8 @@ impl Overlay {
         }
         // Key stream, newest at the bottom: big bold labels in equal-width boxes (wider
         // for symbol keys), growing for chords.
-        let font = 34.0;
-        let key_color = Color32::from_rgb(190, 140, 255);
+        let font = 42.5;
+        let key_color = Color32::from_rgb(200, 145, 255);
         let mut y = view.max.y - 14.0;
         for (label, t, _) in self.keys.iter().rev() {
             let age = now - t;
