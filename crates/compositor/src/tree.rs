@@ -14,7 +14,12 @@ use smithay::{
     },
 };
 
-use crate::{handlers::surface_id, session::Session, shell::toplevel_ids, xwayland::is_or};
+use crate::{
+    handlers::surface_id,
+    session::Session,
+    shell::{has_buffer, toplevel_ids},
+    xwayland::is_or,
+};
 
 impl Session {
     /// Logs windows opening, closing and changing title since the last call (each frame).
@@ -101,6 +106,10 @@ impl Session {
             let mut popups: Vec<(WlSurface, Option<WlSurface>, TreeNode)> = Vec::new();
             for (popup, offset) in PopupManager::popups_for_surface(&surface) {
                 let ps = popup.wl_surface().clone();
+                // Not on screen until its first buffer (geometry may still be empty).
+                if !has_buffer(&ps) {
+                    continue;
+                }
                 let pgeo = popup.geometry();
                 let loc = geo.loc + offset;
                 let mut n = self.node(&ps, NodeKind::Popup, Rectangle::new(loc, pgeo.size), scale);

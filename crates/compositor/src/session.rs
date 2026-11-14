@@ -183,6 +183,8 @@ pub struct Session {
     /// Toplevels as last seen by `track_windows`: (surface id, title).
     /// Toplevels as of the last frame: id, title, client pid.
     pub(crate) seen_windows: Vec<(u32, Option<String>, Option<u32>)>,
+    /// When keyboard focus last moved to an X window (keys wait for X to catch up).
+    pub(crate) x_focus_at: Option<Instant>,
     /// The human's touchpad gesture in progress (logged when it ends).
     pub(crate) gesture: Option<guilab_proto::EventData>,
 }
@@ -352,6 +354,7 @@ impl Session {
             log: EventLog::default(),
             seen_windows: Vec::new(),
             gesture: None,
+            x_focus_at: None,
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();

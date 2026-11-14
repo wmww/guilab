@@ -23,6 +23,10 @@ use crate::{
 
 /// Interval between the steps of glides and gestures.
 const STEP: Duration = Duration::from_millis(16);
+/// Keys wait this long after keyboard focus moved to an X window: our SetInputFocus (X11
+/// connection) and the keys (Wayland connection) reach Xwayland on different sockets, so
+/// keys sent at once can arrive first and go to the old X focus.
+const X_FOCUS_WAIT: Duration = Duration::from_millis(100);
 /// Longest wait for a clicked-away menu to close before keys (see `popup_may_close`).
 const MENU_WAIT: Duration = Duration::from_millis(500);
 /// Pause between keymap swaps when typing into an X client (see `type_text`).
@@ -116,6 +120,10 @@ impl Session {
                         return Ok(Some(STEP));
                     }
                     chain.menu_wait = Duration::ZERO;
+                    if keyboard && let Some(left) = self.x_focus_at.and_then(|t| X_FOCUS_WAIT.checked_sub(t.elapsed())) {
+                        chain.steps.push_front(Step::Act(i, a));
+                        return Ok(Some(left.max(Duration::from_millis(1))));
+                    }
                     let mut later = Vec::new();
                     self.act(chain, &a, &mut later).map_err(|e| action_err(i, &a, e))?;
                     for s in later.into_iter().rev() {

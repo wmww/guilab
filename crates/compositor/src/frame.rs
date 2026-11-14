@@ -18,6 +18,8 @@ use smithay::{
     wayland::{compositor::send_surface_state, fractional_scale::with_fractional_scale, presentation::Refresh},
 };
 
+use smithay::desktop::PopupManager;
+
 use crate::{
     session::Session,
     shell::{has_buffer, has_pending_configure},
@@ -125,6 +127,8 @@ impl Session {
         if mapped.is_empty() && x_windows == 0 {
             return Settle::NoWindow;
         }
+        // A popup (menu) that hasn't drawn its first frame yet.
+        drawing |= mapped.iter().any(|t| PopupManager::popups_for_surface(t.wl_surface()).any(|(p, _)| !has_buffer(p.wl_surface())));
         let acked = now.duration_since(self.last_configure) >= CONFIGURE_WAIT
             || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
         // The app from the last `run` hasn't shown a window yet (another one is up).

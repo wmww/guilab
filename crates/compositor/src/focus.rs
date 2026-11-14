@@ -99,6 +99,9 @@ impl From<KbFocus> for WlSurface {
 
 impl KeyboardTarget<Session> for KbFocus {
     fn enter(&self, seat: &Seat<Session>, data: &mut Session, keys: Vec<KeysymHandle<'_>>, serial: Serial) {
+        if self.is_x11() {
+            data.x_focus_at = Some(std::time::Instant::now());
+        }
         self.inner().enter(seat, data, keys, serial)
     }
     fn leave(&self, seat: &Seat<Session>, data: &mut Session, serial: Serial) {
