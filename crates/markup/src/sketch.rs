@@ -71,6 +71,8 @@ struct Drawing {
     /// The mark being dragged out.
     active: Option<Mark>,
     editing: Option<Editing>,
+    /// Undone marks, most recent last; cleared by a new mark.
+    redo: Vec<Mark>,
     /// Move tool: the mark being dragged, and the image point it was last dragged to.
     moving: Option<(usize, Pos2)>,
     /// On-screen backing of each text mark as last painted (hit testing), by mark index.
@@ -157,8 +159,18 @@ impl Sketch {
     }
 
     pub fn undo(&mut self) {
-        if let Some(d) = &mut self.drawing {
-            d.marks.pop();
+        if let Some(d) = &mut self.drawing
+            && let Some(m) = d.marks.pop()
+        {
+            d.redo.push(m);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(d) = &mut self.drawing
+            && let Some(m) = d.redo.pop()
+        {
+            d.marks.push(m);
         }
     }
 
@@ -189,7 +201,7 @@ impl Sketch {
     fn finish(&mut self) -> Option<Annotated> {
         let mut d = self.drawing.take()?;
         if let Some(e) = d.editing.take() {
-            push_text(&mut d.marks, e);
+            push_text(&mut d, e);
         }
         let shot = d.shot?;
         let notes = d
@@ -246,11 +258,21 @@ impl Sketch {
         }
         ui.separator();
         let can_undo = self.drawing.as_ref().is_some_and(|d| !d.marks.is_empty());
-        let (rect, resp) = ui.allocate_exact_size(size, if can_undo { Sense::click() } else { Sense::hover() });
-        let col = if can_undo { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
-        undo_icon(ui.painter(), rect.shrink(7.0), col);
-        if resp.on_hover_text("Undo (Ctrl+Z)").clicked() {
-            self.undo();
+        let can_redo = self.drawing.as_ref().is_some_and(|d| !d.redo.is_empty());
+        for (redo, can, tip) in [(false, can_undo, "Undo (Ctrl+Z)"), (true, can_redo, "Redo (Ctrl+Shift+Z)")] {
+            let (rect, resp) = ui.allocate_exact_size(size, if can { Sense::click() } else { Sense::hover() });
+            if can && resp.hovered() {
+                ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
+            let col = if can { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+            undo_icon(ui.painter(), rect.shrink(7.0), col, redo);
+            if resp.on_hover_text(tip).clicked() {
+                if redo {
+                    self.redo();
+                } else {
+                    self.undo();
+                }
+            }
         }
     }
 
@@ -261,7 +283,7 @@ impl Sketch {
         let zoom = view.rect.width() / view.size[0].max(1) as f32;
         let xf = Xf { offset: view.rect.min.to_vec2(), zoom };
         let resp = ui.interact(view.clip, self.id.with("canvas"), Sense::click_and_drag());
-        let (pressed, released, pos, double, moves, undo) = ui.input_mut(|i| {
+        let (pressed, released, pos, double, moves, (undo, redo)) = ui.input_mut(|i| {
             let moves: Vec<Pos2> = i.events.iter().filter_map(|e| if let Event::PointerMoved(p) = e { Some(*p) } else { None }).collect();
             (
                 i.pointer.primary_pressed(),
@@ -269,7 +291,11 @@ impl Sketch {
                 i.pointer.interact_pos(),
                 i.pointer.button_double_clicked(egui::PointerButton::Primary),
                 moves,
-                i.consume_key(Modifiers::COMMAND, Key::Z),
+                // consume_key ignores Shift, so take Ctrl+Shift+Z (redo) first.
+                {
+                    let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
+                    (i.consume_key(Modifiers::COMMAND, Key::Z), redo)
+                },
             )
         });
         let on_image = |p: Pos2| view.clip.contains(p) && view.rect.contains(p);
@@ -277,8 +303,13 @@ impl Sketch {
             let q = xf.invert(p);
             pos2(q.x.clamp(0.0, view.size[0] as f32), q.y.clamp(0.0, view.size[1] as f32))
         };
-        if undo && self.drawing.as_ref().is_some_and(|d| d.editing.is_none()) {
-            self.undo();
+        if self.drawing.as_ref().is_some_and(|d| d.editing.is_none()) {
+            if undo {
+                self.undo();
+            }
+            if redo {
+                self.redo();
+            }
         }
 
         // Move tool: drag the mark under the press (elsewhere the host pans the view).
@@ -290,7 +321,7 @@ impl Sketch {
                 if let Some(d) = &mut self.drawing
                     && let Some(e) = d.editing.take()
                 {
-                    push_text(&mut d.marks, e);
+                    push_text(d, e);
                 }
                 let hit = self.mark_at(p);
                 if let (Some(d), Some(i)) = (&mut self.drawing, hit) {
@@ -322,12 +353,12 @@ impl Sketch {
             let q = to_img(p);
             let d = self.drawing.get_or_insert_with(|| {
                 self.want_shot = true;
-                Drawing { shot: None, scale: view.scale, marks: Vec::new(), active: None, editing: None, moving: None, text_rects: Vec::new() }
+                Drawing { shot: None, scale: view.scale, marks: Vec::new(), active: None, editing: None, redo: Vec::new(), moving: None, text_rects: Vec::new() }
             });
             // A press elsewhere ends text editing (a press on the box itself isn't ours).
             let near_edit = d.editing.as_ref().is_some_and(|e| (e.pos - q).length() * zoom < 6.0);
             if !near_edit && let Some(e) = d.editing.take() {
-                push_text(&mut d.marks, e);
+                push_text(d, e);
             }
             let kind = match self.tool {
                 Tool::Pen => Some(Kind::Pen(vec![q])),
@@ -364,6 +395,7 @@ impl Sketch {
                 let m = d.active.take().unwrap();
                 if !m.is_tiny(MIN_MARK / zoom) {
                     d.marks.push(m);
+                    d.redo.clear();
                 }
             }
         }
@@ -457,7 +489,7 @@ impl Sketch {
             d.editing = None;
         } else if enter || te.lost_focus() {
             let e = d.editing.take().unwrap();
-            push_text(&mut d.marks, e);
+            push_text(d, e);
         }
     }
 
@@ -517,10 +549,11 @@ impl Sketch {
     }
 }
 
-fn push_text(marks: &mut Vec<Mark>, e: Editing) {
+fn push_text(d: &mut Drawing, e: Editing) {
     let text = e.text.trim_end().to_string();
     if !text.trim().is_empty() {
-        marks.push(Mark { kind: Kind::Text(e.pos, text), color: e.color });
+        d.marks.push(Mark { kind: Kind::Text(e.pos, text), color: e.color });
+        d.redo.clear();
     }
 }
 
@@ -545,13 +578,15 @@ fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32) {
             }
         }
         Tool::Pen => {
-            let pts: Vec<Pos2> = (0..=12)
-                .map(|i| {
-                    let f = i as f32 / 12.0;
-                    pos2(r.left() + f * r.width(), r.center().y + (f * 6.5).sin() * r.height() * 0.3)
-                })
-                .collect();
-            p.add(Shape::line(pts, s));
+            // A pencil, tip at the bottom left.
+            let u = vec2(1.0, -1.0).normalized();
+            let n = vec2(u.y, -u.x) * 2.6;
+            let tip = r.left_bottom() + vec2(0.5, -0.5);
+            let len = r.width() * 1.3;
+            let (a, b) = (tip + u * 5.0, tip + u * len);
+            p.add(Shape::closed_line(vec![tip, a + n, b + n, b - n, a - n], s));
+            p.line_segment([a + n, a - n], s);
+            p.line_segment([b - u * 3.5 + n, b - u * 3.5 - n], s);
         }
         Tool::Box => {
             p.rect_stroke(r.shrink(1.0), 0.0, s, egui::StrokeKind::Middle);
@@ -573,17 +608,21 @@ fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32) {
     }
 }
 
-fn undo_icon(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.6, c);
-    let center = r.center() + vec2(1.0, 1.0);
-    let rad = r.width() * 0.42;
-    let pts: Vec<Pos2> = (0..=16)
-        .map(|i| {
-            let a = std::f32::consts::PI * (-0.9 + 1.4 * i as f32 / 16.0);
-            center + vec2(a.cos(), a.sin()) * rad
-        })
-        .collect();
-    let start = pts[0];
-    p.add(Shape::line(pts, s));
-    p.add(Shape::convex_polygon(vec![start + vec2(-4.0, -1.0), start + vec2(3.0, -4.0), start + vec2(2.0, 3.0)], c, Stroke::NONE));
+/// A hooked arrow: the head on the left pointing left, the tail curving back under it.
+/// Mirrored for redo.
+fn undo_icon(p: &egui::Painter, r: Rect, c: Color32, mirror: bool) {
+    let s = Stroke::new(1.7, c);
+    let m = |q: Pos2| if mirror { pos2(r.left() + r.right() - q.x, q.y) } else { q };
+    let y0 = r.top() + r.height() * 0.3;
+    let rad = r.height() * 0.32;
+    let cx = r.right() - rad;
+    let mut pts = vec![pos2(r.left() + 3.0, y0)];
+    pts.extend((0..=12).map(|i| {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+        pos2(cx + a.cos() * rad, y0 + rad + a.sin() * rad)
+    }));
+    pts.push(pos2(r.left() + r.width() * 0.35, y0 + 2.0 * rad));
+    p.add(Shape::line(pts.into_iter().map(m).collect(), s));
+    let tip = pos2(r.left() - 0.5, y0);
+    p.add(Shape::convex_polygon(vec![m(tip), m(tip + vec2(5.0, -4.0)), m(tip + vec2(5.0, 4.0))], c, Stroke::NONE));
 }

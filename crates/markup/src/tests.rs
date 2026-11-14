@@ -137,6 +137,13 @@ fn move_tool_drags_marks() {
     run(vec![Event::PointerMoved(pos2(100.0, 100.0)), Event::PointerMoved(pos2(100.0, 152.0))], &mut sketch);
     run(vec![button(pos2(100.0, 152.0), false)], &mut sketch);
     assert!(sketch.drawing_open() && sketch.tool == Tool::Move);
+    // Ctrl+Z undoes, Ctrl+Shift+Z redoes.
+    let key = |modifiers| Event::Key { key: egui::Key::Z, physical_key: None, pressed: true, repeat: false, modifiers };
+    run(vec![key(Modifiers::COMMAND)], &mut sketch);
+    assert_eq!(sketch.mark_at(pos2(100.0, 152.0)), None, "undone");
+    run(vec![key(Modifiers::COMMAND | Modifiers::SHIFT)], &mut sketch);
+    run(vec![], &mut sketch);
+    assert_eq!(sketch.mark_at(pos2(100.0, 152.0)), Some(0), "redone");
     let out = sketch.take_all();
     let px = |x: usize, y: usize| out[0].image.pixels[y * 400 + x];
     assert_eq!(px(100, 150), RED, "moved here");
