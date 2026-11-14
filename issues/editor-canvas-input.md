@@ -1,0 +1,15 @@
+# Editor canvas: input ownership and the `visible` flag will force hacks in the viewer
+
+**Land before phase 6.** The canvas API (`crates/editor/src/lib.rs:102` `Canvas`, `canvas.rs:190`) works in the demo host, which has nothing else in the view. The viewer has menus, resize handles, toasts, lock states and (in phase 7) flights over the same area.
+
+## Problems
+1. **No way to block input without hiding.** `Canvas.visible = false` (canvas.rs:204) turns off both painting and input. But the viewer must drop presses without hiding the image in several cases: the frame a press outside an open menu closes it (today `menu_was_open`, viewer/src/ui.rs:397), and later probably while dialogs are up. Hiding for one frame means a flicker. Add `input: bool` (paint, no input). Keep `visible` for flights.
+2. **Hiding mid-gesture leaves a stuck gesture.** With `visible = false` the release never arrives. `press` then ignores every press while a gesture isn't `Idle` (canvas.rs:391), until some later release. When the canvas goes hidden or input-less, cancel the gesture (`cancel_gesture`, so `abandon` still fires).
+3. **Ownership ignores other widgets on the same layer.** A press counts as the canvas's when `layer_id_at(p)` is the canvas's layer (canvas.rs:246). So a widget on the same layer, such as the viewer's resize handles (`sizing.rs`, in the view, live view only), gets the press *and* the canvas starts a gesture too. With the Move tool on the live view, a handle drag also pans. Meanwhile the claim `ui.interact(clip, .., click_and_drag)` (canvas.rs:241) is registered unconditionally, even with `Tool::Interact`, and over the whole clip. If it's registered after the handles, egui's hit test gives it their clicks and drags.
+   Shape: register the claim early, only when `tool != Interact`. Treat a press as the canvas's only if egui's hit test says the claim is hovered (`resp.hovered()`, which accounts for later widgets and other layers), instead of the hand-rolled layer check. Keep reading raw events for ordering. Document that the host draws its own controls (handles, buttons) after `canvas()`.
+4. **The text field isn't clipped to the canvas.** The typing `Area` is `Order::Foreground`, `constrain(false)` and unclipped (text.rs:196). Near an edge or when panned, the field paints over the toolbar, chat panel and menus. Clip it to `clip` (set the clip rect inside the area). Also consider `Order::Middle`, so menus and tooltips stay on top.
+
+## Contract notes to write into the API docs (phase-6 traps)
+- `Xf.zoom` is screen *points* per canvas px. The viewer's `Zoom` is host *physical* pixels per session pixel, so `Xf.zoom = zoom / pixels_per_point`.
+- Any host overlay drawn over the canvas (the phase-7 glow) must be a painter layer or `Area::interactable(false)`. Otherwise `layer_id_at` (and so ownership) stops the canvas getting presses under it.
+- `Xf::fit` (lib.rs:93) returns zoom 0 for an empty screen rect (a collapsed panel). `invert` then makes NaN/inf points, which end up in elements and fail `Body::check` at send. Clamp the zoom to a small minimum, and have `canvas()` do nothing when `clip` is empty.
