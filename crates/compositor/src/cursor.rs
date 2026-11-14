@@ -29,6 +29,23 @@ pub struct CursorImage {
 /// A theme cursor by (icon, scale bits); None if the theme lacks it.
 pub(crate) type NamedCursor = ((CursorIcon, u64), Option<Arc<CursorImage>>);
 
+/// The apps' cursor. `status` changes only through `set_cursor_status`, which bumps `seq`.
+pub(crate) struct CursorState {
+    /// What the apps want the cursor to be.
+    pub status: CursorImageStatus,
+    pub seq: u64,
+    /// `status`'s surface rendered (lazily, once per `seq`).
+    pub image: Option<Arc<CursorImage>>,
+    /// A named cursor loaded from the theme, by (icon, scale bits).
+    pub named: Option<NamedCursor>,
+}
+
+impl Default for CursorState {
+    fn default() -> Self {
+        CursorState { status: CursorImageStatus::default_named(), seq: 0, image: None, named: None }
+    }
+}
+
 pub enum AppCursor {
     Named(CursorIcon),
     Hidden,
@@ -38,7 +55,7 @@ pub enum AppCursor {
 impl Session {
     /// Called on every commit: keeps the hotspot right and notes image changes.
     pub(crate) fn cursor_commit(&mut self, surface: &WlSurface) -> bool {
-        let CursorImageStatus::Surface(cursor) = &self.cursor_status else { return false };
+        let CursorImageStatus::Surface(cursor) = &self.cursor.status else { return false };
         let mut root = surface.clone();
         while let Some(p) = get_parent(&root) {
             root = p;
@@ -55,36 +72,36 @@ impl Session {
                 }
             });
         }
-        self.cursor_seq += 1;
+        self.cursor.seq += 1;
         true
     }
 
     pub(crate) fn set_cursor_status(&mut self, status: CursorImageStatus) {
-        if status != self.cursor_status {
-            self.cursor_status = status;
-            self.cursor_seq += 1;
+        if status != self.cursor.status {
+            self.cursor.status = status;
+            self.cursor.seq += 1;
         }
     }
 
     /// Changes whenever [`Self::app_cursor`] would return something different.
     pub fn cursor_seq(&self) -> u64 {
-        self.cursor_seq
+        self.cursor.seq
     }
 
     /// The app's cursor. Surface cursors are rendered lazily (only when asked, and only
     /// once per change). A surface without content counts as hidden.
     pub fn app_cursor(&mut self) -> AppCursor {
-        let surface = match &self.cursor_status {
+        let surface = match &self.cursor.status {
             CursorImageStatus::Hidden => return AppCursor::Hidden,
             CursorImageStatus::Named(i) => return AppCursor::Named(*i),
             CursorImageStatus::Surface(s) => s.clone(),
         };
-        if let Some(c) = &self.cursor_image
-            && c.seq == self.cursor_seq
+        if let Some(c) = &self.cursor.image
+            && c.seq == self.cursor.seq
         {
             return AppCursor::Image(c.clone());
         }
-        let scale = self.output.current_scale().fractional_scale();
+        let scale = self.scale();
         let rendered = match self.gpu.borrow_mut().render_surface(&surface, scale) {
             Ok(r) => r,
             Err(e) => {
@@ -93,13 +110,13 @@ impl Session {
             }
         };
         let Some(r) = rendered else {
-            self.cursor_image = None;
+            self.cursor.image = None;
             return AppCursor::Hidden;
         };
         let hotspot = with_states(&surface, |s| s.data_map.get::<CursorImageSurfaceData>().map(|a| a.lock().unwrap().hotspot)).unwrap_or_default();
         let hotspot = ((hotspot.x as f64 * scale).round() as i32 - r.origin.0, (hotspot.y as f64 * scale).round() as i32 - r.origin.1);
-        let img = Arc::new(CursorImage { seq: self.cursor_seq, width: r.width, height: r.height, rgba: r.rgba, hotspot, scale });
-        self.cursor_image = Some(img.clone());
+        let img = Arc::new(CursorImage { seq: self.cursor.seq, width: r.width, height: r.height, rgba: r.rgba, hotspot, scale });
+        self.cursor.image = Some(img.clone());
         AppCursor::Image(img)
     }
 
@@ -110,14 +127,14 @@ impl Session {
             AppCursor::Hidden => None,
             AppCursor::Image(i) => Some(i),
             AppCursor::Named(icon) => {
-                let scale = self.output.current_scale().fractional_scale();
-                if let Some((k, img)) = &self.named_cursor
+                let scale = self.scale();
+                if let Some((k, img)) = &self.cursor.named
                     && *k == (icon, scale.to_bits())
                 {
                     return img.clone();
                 }
                 let img = load_named(icon, scale).map(Arc::new);
-                self.named_cursor = Some(((icon, scale.to_bits()), img.clone()));
+                self.cursor.named = Some(((icon, scale.to_bits()), img.clone()));
                 img
             }
         }
@@ -126,7 +143,7 @@ impl Session {
     /// Draws the cursor at the pointer into `rgba` (the output's pixels, `w` x `h`).
     pub(crate) fn draw_cursor(&mut self, w: u32, h: u32, rgba: &mut [u8]) {
         let Some(c) = self.cursor_pixels() else { return };
-        let scale = self.output.current_scale().fractional_scale();
+        let scale = self.scale();
         let p = self.pointer_location();
         let (x0, y0) = ((p.x * scale).round() as i64 - c.hotspot.0 as i64, (p.y * scale).round() as i64 - c.hotspot.1 as i64);
         for cy in 0..c.height as i64 {

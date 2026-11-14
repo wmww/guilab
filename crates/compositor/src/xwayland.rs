@@ -74,7 +74,7 @@ impl Session {
     /// Spawns Xwayland; `xw.state` becomes Ready or Failed once it has started.
     pub(crate) fn start_xwayland(&mut self) -> anyhow::Result<()> {
         let log = std::fs::File::create(self.dir.join("xwayland.log")).context("creating xwayland.log")?;
-        let envs = [("XDG_RUNTIME_DIR".to_string(), self.dir.to_string_lossy().into_owned()), (TAG_VAR.to_string(), self.tag())];
+        let envs = [("XDG_RUNTIME_DIR".to_string(), self.dir.to_string_lossy().into_owned()), (TAG_VAR.to_string(), self.tag.clone())];
         let mut spawned = None;
         for n in DISPLAYS {
             match XWayland::spawn(&self.dh, n, envs.clone(), std::iter::empty::<&str>(), true, Stdio::null(), log.try_clone()?, |_| ()) {
@@ -216,7 +216,7 @@ impl XwmHandler for Session {
         }
         let w = Window::new_x11_window(x.clone());
         let floats = x.is_transient_for().is_some() || x.is_modal() || x.window_type().is_some_and(|t| t != WmWindowType::Normal);
-        let tiled = !floats && !self.space.elements().chain(self.unmapped.iter()).any(is_tiled);
+        let tiled = self.should_tile(&w, !floats);
         tracing::debug!(xid = x.window_id(), class = x.class(), tiled, "placing X window");
         w.user_data().insert_if_missing(WindowState::default);
         w.user_data().get::<WindowState>().unwrap().tiled.set(tiled);
@@ -358,8 +358,7 @@ impl XwmHandler for Session {
     fn new_selection(&mut self, _: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
         match selection {
             SelectionTarget::Clipboard => {
-                self.clip_mimes = Some(mime_types.clone());
-                self.clip_seq += 1;
+                self.clip.set_owner(Some(mime_types.clone()));
                 set_data_device_selection(&self.dh, &self.seat, mime_types, SelData::X11);
             }
             SelectionTarget::Primary => set_primary_selection(&self.dh, &self.seat, mime_types, SelData::X11),
@@ -372,7 +371,7 @@ impl XwmHandler for Session {
             SelectionTarget::Clipboard => {
                 if current_data_device_selection_userdata(&self.seat).is_some_and(|d| matches!(*d, SelData::X11)) {
                     clear_data_device_selection(&self.dh, &self.seat);
-                    self.clip_mimes = None;
+                    self.clip.set_owner(None);
                 }
             }
             SelectionTarget::Primary => {

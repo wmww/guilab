@@ -112,7 +112,7 @@ impl Session {
                     let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
                     kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
                     tracing::debug!(?placed, "typing keymap");
-                    self.extra_keys = placed;
+                    self.input.extra_keys = placed;
                 }
                 Step::Act(i, a) => {
                     // Keys right after a click that may close a menu: give the app a moment
@@ -124,7 +124,7 @@ impl Session {
                         return Ok(Some(STEP));
                     }
                     chain.menu_wait = Duration::ZERO;
-                    if keyboard && let Some(left) = self.x_focus_at.and_then(|t| X_FOCUS_WAIT.checked_sub(t.elapsed())) {
+                    if keyboard && let Some(left) = self.input.x_focus_at.and_then(|t| X_FOCUS_WAIT.checked_sub(t.elapsed())) {
                         chain.steps.push_front(Step::Act(i, a));
                         return Ok(Some(left.max(Duration::from_millis(1))));
                     }
@@ -142,7 +142,7 @@ impl Session {
 
     /// State after `chain` finished.
     pub fn input_info(&self, chain: &Chain) -> InputInfo {
-        let scale = self.output.current_scale().fractional_scale();
+        let scale = self.scale();
         let p = self.pointer_location();
         let under = self.surface_under(p).and_then(|(s, _)| surface_id(&s));
         let focus = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| f.wl_surface().and_then(|s| surface_id(&s)));
@@ -169,7 +169,7 @@ impl Session {
     }
 
     fn to_logical(&self, px: f64) -> f64 {
-        px / self.output.current_scale().fractional_scale()
+        px / self.scale()
     }
 
     /// Agent keys need a focused window (else they go nowhere, silently). The human's
@@ -195,7 +195,7 @@ impl Session {
         let x11 = self.seat.get_keyboard().and_then(|k| k.current_focus()).is_some_and(|f| f.is_x11());
         let spare = self.keymap.spare_count();
         let held = self.seat.get_keyboard().map(|kb| kb.pressed_keys()).unwrap_or_default();
-        let mut active = self.extra_keys.clone();
+        let mut active = self.input.extra_keys.clone();
         let mut swaps = 0;
         let mut i = 0;
         while i < syms.len() {
@@ -328,7 +328,7 @@ impl Session {
             }
             Action::Type { text } => self.type_text(text, src, later)?,
             Action::TouchDown { id, x, y } => {
-                if self.held.touches.contains_key(id) {
+                if self.input.held.touches.contains_key(id) {
                     return Err(format!("finger {id} is already down"));
                 }
                 let pos = self.point(chain, *x, *y)?;
@@ -336,7 +336,7 @@ impl Session {
                 self.inject(InputEvent::TouchFrame, src);
             }
             Action::TouchMove { id, x, y, ms } => {
-                let Some(from) = self.held.touches.get(id).copied() else {
+                let Some(from) = self.input.held.touches.get(id).copied() else {
                     return Err(format!("finger {id} isn't down (use touch down {id} X Y first)"));
                 };
                 let to = self.point(chain, *x, *y)?;
@@ -354,7 +354,7 @@ impl Session {
                 }
             }
             Action::TouchUp { id } => {
-                if !self.held.touches.contains_key(id) {
+                if !self.input.held.touches.contains_key(id) {
                     return Err(format!("finger {id} isn't down"));
                 }
                 self.inject(InputEvent::TouchUp { slot: *id }, src);
@@ -362,7 +362,7 @@ impl Session {
             }
             Action::Tap { x, y } => {
                 let pos = self.point(chain, *x, *y)?;
-                let slot = (0..).find(|s| !self.held.touches.contains_key(s)).unwrap();
+                let slot = (0..).find(|s| !self.input.held.touches.contains_key(s)).unwrap();
                 for ev in [InputEvent::TouchDown { slot, pos }, InputEvent::TouchFrame, InputEvent::TouchUp { slot }, InputEvent::TouchFrame] {
                     self.inject(ev, src);
                 }

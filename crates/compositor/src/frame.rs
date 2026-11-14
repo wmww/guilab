@@ -37,7 +37,7 @@ impl Session {
             send_frames_surface_tree(icon, &output, now, None, |_, _| Some(output.clone()));
         }
         // Cursor surfaces too, so animated cursors run.
-        if let CursorImageStatus::Surface(c) = &self.cursor_status {
+        if let CursorImageStatus::Surface(c) = &self.cursor.status {
             send_frames_surface_tree(c, &output, now, None, |_, _| Some(output.clone()));
         }
         self.space.refresh();
@@ -124,7 +124,7 @@ impl Session {
         {
             return c;
         }
-        let s = self.output.current_scale().fractional_scale();
+        let s = self.scale();
         let p = self.pointer_location();
         let c = self.sample_rgb(p.x * s, p.y * s, 4);
         self.under_pointer = Some((key, now, c));
@@ -136,7 +136,7 @@ impl Session {
         guilab_proto::OutputInfo {
             width: size.w as u32,
             height: size.h as u32,
-            scale: self.output.current_scale().fractional_scale(),
+            scale: self.scale(),
         }
     }
 

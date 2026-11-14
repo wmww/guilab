@@ -58,11 +58,6 @@ const DROP_ENV: &[&str] = &[
 ];
 
 impl Session {
-    /// The tag every app process of this session carries in its environment.
-    pub fn tag(&self) -> String {
-        self.tag.clone()
-    }
-
     pub fn spawn(&mut self, argv: &[String], cwd: &Path, env: &[(String, String)]) -> anyhow::Result<ProcInfo> {
         let Some(prog) = argv.first() else { bail!("nothing to run") };
         self.procs.next_id += 1;
@@ -78,7 +73,7 @@ impl Session {
             .env("WAYLAND_DISPLAY", SOCKET_NAME)
             .env("XDG_SESSION_TYPE", "wayland")
             .env("GUILAB_SESSION", &self.name)
-            .env(TAG_VAR, self.tag())
+            .env(TAG_VAR, &self.tag)
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out);
@@ -120,13 +115,22 @@ impl Session {
         let info = ProcInfo { id, pid, argv: argv.to_vec(), state: ProcState::Running, log };
 
         // Exit notification via pidfd (fd-based, so it works in the nested session loop).
-        let fd = pidfd_open(Pid::from_child(&child), PidfdFlags::empty())?;
-        self.handle
-            .insert_source(Generic::new(fd, Interest::READ, Mode::Level), move |_, _, s: &mut Session| {
-                s.reap(id);
-                Ok(PostAction::Remove)
-            })
-            .map_err(|e| e.error)?;
+        let watched = pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).map_err(anyhow::Error::from).and_then(|fd| {
+            self.handle
+                .insert_source(Generic::new(fd, Interest::READ, Mode::Level), move |_, _, s: &mut Session| {
+                    s.reap(id);
+                    Ok(PostAction::Remove)
+                })
+                .map_err(|e| anyhow::Error::from(e.error))
+        });
+        if let Err(e) = watched {
+            // Untracked, it would outlive the session.
+            let mut child = child;
+            signal_group(pid, Signal::KILL);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.context(format!("watching {prog}")));
+        }
         self.procs.list.push(Proc { info: info.clone(), child: Some(child), kill_at: None, killed: false });
         self.settle.note_spawn(id);
         Ok(info)
@@ -205,7 +209,7 @@ impl Session {
     /// SIGTERMs everything in the session. Returns the children (still to be reaped)
     /// and the tag; the caller SIGKILLs leftovers after `KILL_GRACE`.
     pub fn shutdown(&mut self) -> (Vec<Child>, String) {
-        let tag = self.tag();
+        let tag = self.tag.clone();
         let mut children = Vec::new();
         for p in &mut self.procs.list {
             if let Some(c) = p.child.take() {
@@ -219,6 +223,24 @@ impl Session {
         }
         signal_tagged(&tag, Signal::TERM);
         (children, tag)
+    }
+}
+
+/// A safety net for sessions dropped without `shutdown()` (which takes all of this), e.g.
+/// when `new` fails after the bus started: nothing it spawned may outlive it.
+impl Drop for Session {
+    fn drop(&mut self) {
+        for p in &mut self.procs.list {
+            if let Some(mut c) = p.child.take() {
+                signal_group(p.info.pid, Signal::KILL);
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        if let Some((mut bus, _)) = self.bus.take() {
+            let _ = bus.kill();
+            let _ = bus.wait();
+        }
     }
 }
 

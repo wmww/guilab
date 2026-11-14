@@ -10,7 +10,7 @@
 
 use std::{
     cell::RefCell,
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -19,7 +19,7 @@ use std::{
 use anyhow::Context;
 use smithay::{
     desktop::{PopupManager, Space, Window},
-    input::{Seat, SeatState, keyboard::{Keycode, Keysym, XkbConfig, xkb}, pointer::CursorImageStatus},
+    input::{Seat, SeatState, keyboard::{XkbConfig, xkb}},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, LoopHandle, Mode as CMode, PostAction, generic::Generic},
@@ -29,7 +29,7 @@ use smithay::{
             backend::{ClientData, ClientId, DisconnectReason},
         },
     },
-    utils::{Clock, Monotonic, Transform},
+    utils::{Clock, Logical, Monotonic, Point, Transform},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
@@ -61,7 +61,6 @@ use smithay::{
 use guilab_proto::log::EventLog;
 
 use crate::{
-    input::Held,
     keys::Keymap,
     procs::Procs,
     render::{Frame, Gpu},
@@ -82,7 +81,7 @@ pub struct SessionConfig {
 }
 
 #[derive(Default)]
-pub struct ClientState {
+pub(crate) struct ClientState {
     pub compositor_state: CompositorClientState,
 }
 impl ClientData for ClientState {
@@ -100,83 +99,65 @@ pub struct Session {
     /// Unique per session instance; apps carry it as `GUILAB_TAG` (see procs.rs).
     pub tag: String,
     pub dir: PathBuf,
-    pub handle: LoopHandle<'static, Session>,
-    pub dh: DisplayHandle,
-    pub gpu: SharedGpu,
-    pub clock: Clock<Monotonic>,
+    pub(crate) handle: LoopHandle<'static, Session>,
+    pub(crate) dh: DisplayHandle,
+    pub(crate) gpu: SharedGpu,
+    pub(crate) clock: Clock<Monotonic>,
 
-    pub compositor_state: CompositorState,
-    pub xdg_shell_state: XdgShellState,
-    pub xdg_decoration_state: XdgDecorationState,
-    pub shm_state: ShmState,
-    pub dmabuf_state: DmabufState,
-    pub dmabuf_global: Option<DmabufGlobal>,
-    pub output_manager_state: OutputManagerState,
-    pub seat_state: SeatState<Session>,
-    pub data_device_state: DataDeviceState,
-    pub primary_selection_state: PrimarySelectionState,
-    pub wlr_data_control_state: WlrDataControlState,
-    pub ext_data_control_state: ExtDataControlState,
-    pub xdg_activation_state: XdgActivationState,
-    pub xdg_foreign_state: XdgForeignState,
-    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
-    pub presentation_state: PresentationState,
-    pub xwayland_shell_state: XWaylandShellState,
+    // `_` fields: states kept alive with the session, never read.
+    pub(crate) compositor_state: CompositorState,
+    pub(crate) xdg_shell_state: XdgShellState,
+    _xdg_decoration_state: XdgDecorationState,
+    pub(crate) shm_state: ShmState,
+    pub(crate) dmabuf_state: DmabufState,
+    _dmabuf_global: Option<DmabufGlobal>,
+    _output_manager_state: OutputManagerState,
+    pub(crate) seat_state: SeatState<Session>,
+    pub(crate) data_device_state: DataDeviceState,
+    pub(crate) primary_selection_state: PrimarySelectionState,
+    pub(crate) wlr_data_control_state: WlrDataControlState,
+    pub(crate) ext_data_control_state: ExtDataControlState,
+    pub(crate) xdg_activation_state: XdgActivationState,
+    pub(crate) xdg_foreign_state: XdgForeignState,
+    pub(crate) keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    _presentation_state: PresentationState,
+    pub(crate) xwayland_shell_state: XWaylandShellState,
 
-    pub seat: Seat<Session>,
-    /// What the apps want the cursor to be; change it with `set_cursor_status`.
-    pub cursor_status: CursorImageStatus,
-    pub(crate) cursor_seq: u64,
-    pub(crate) cursor_image: Option<std::sync::Arc<crate::cursor::CursorImage>>,
-    /// A named cursor loaded from the theme, by (icon, scale bits).
-    pub(crate) named_cursor: Option<crate::cursor::NamedCursor>,
-    pub output: Output,
-    pub space: Space<Window>,
-    pub popups: PopupManager,
+    pub(crate) seat: Seat<Session>,
+    pub(crate) cursor: crate::cursor::CursorState,
+    pub(crate) output: Output,
+    pub(crate) space: Space<Window>,
+    pub(crate) popups: PopupManager,
     /// Toplevels created but not yet placed (placed at their initial configure / first buffer).
-    pub unmapped: Vec<Window>,
+    pub(crate) unmapped: Vec<Window>,
 
     pub frame: Frame,
     pub frame_seq: u64,
 
-    pub procs: Procs,
-    pub next_surface_id: u32,
+    pub(crate) procs: Procs,
+    pub(crate) next_surface_id: u32,
     pub(crate) settle: crate::settle::Times,
     /// Something may have changed what's on screen since the last render (client
     /// requests, commands, input). Idle sessions skip rendering.
-    pub dirty: bool,
+    pub(crate) dirty: bool,
 
-    pub keymap: Keymap,
-    /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
-    pub extra_keys: Vec<(Keysym, Keycode)>,
-    pub held: Held,
-    /// Clients have key repeat on (see `input::set_repeat`).
-    pub key_repeat: bool,
+    pub(crate) keymap: Keymap,
+    pub(crate) input: crate::input::InputState,
     /// Input that reached the apps, for the viewer to show.
-    pub viz: guilab_proto::viz::VizLog,
+    pub(crate) viz: guilab_proto::viz::VizLog,
     /// Cache for `color_under_pointer`: (viz end, frame seq), when sampled, the color.
     pub(crate) under_pointer: Option<UnderPointer>,
-    /// A button was pressed while a popup grab was active (see `popup_may_close`).
-    pub click_in_grab: bool,
-    /// Mime types of a client-owned clipboard selection (None: empty or ours).
-    pub clip_mimes: Option<Vec<String>>,
-    /// Bumped whenever the clipboard gets a new owner or content (the viewer bridges it).
-    pub clip_seq: u64,
+    pub clip: crate::clipboard::Clipboard,
     /// Icon surface of an active drag.
-    pub dnd_icon: Option<WlSurface>,
-    pub xw: Xw,
+    pub(crate) dnd_icon: Option<WlSurface>,
+    pub(crate) xw: Xw,
     /// The session's event log (the server adds commands, messages, lock changes).
     pub log: EventLog,
-    /// Toplevels as last seen by `track_windows`: (surface id, title).
-    /// Toplevels as of the last frame: id, title, client pid.
+    /// Toplevels as of the last frame (`track_windows`): id, title, client pid.
     pub(crate) seen_windows: Vec<(u32, Option<String>, Option<u32>)>,
-    /// When keyboard focus last moved to an X window (keys wait for X to catch up).
-    pub(crate) x_focus_at: Option<Instant>,
     /// The session's private D-Bus daemon and its address (see bus.rs); None without
     /// dbus-daemon.
     pub(crate) bus: Option<(std::process::Child, String)>,
-    /// The human's touchpad gesture in progress (logged when it ends).
-    pub(crate) gesture: Option<guilab_proto::EventData>,
 }
 
 impl Session {
@@ -293,11 +274,11 @@ impl Session {
             clock,
             compositor_state,
             xdg_shell_state,
-            xdg_decoration_state,
+            _xdg_decoration_state: xdg_decoration_state,
             shm_state,
             dmabuf_state,
-            dmabuf_global,
-            output_manager_state,
+            _dmabuf_global: dmabuf_global,
+            _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
             primary_selection_state,
@@ -306,13 +287,10 @@ impl Session {
             xdg_activation_state,
             xdg_foreign_state,
             keyboard_shortcuts_inhibit_state,
-            presentation_state,
+            _presentation_state: presentation_state,
             xwayland_shell_state,
             seat,
-            cursor_status: CursorImageStatus::default_named(),
-            cursor_seq: 0,
-            cursor_image: None,
-            named_cursor: None,
+            cursor: Default::default(),
             output,
             space,
             popups: PopupManager::default(),
@@ -324,21 +302,15 @@ impl Session {
             settle: crate::settle::Times::new(),
             dirty: true,
             keymap,
-            extra_keys: Vec::new(),
-            held: Held::default(),
-            key_repeat: false,
+            input: Default::default(),
             viz: Default::default(),
             under_pointer: None,
-            click_in_grab: false,
-            clip_mimes: None,
-            clip_seq: 0,
+            clip: Default::default(),
             dnd_icon: None,
             xw: Xw::default(),
             log: EventLog::default(),
             seen_windows: Vec::new(),
-            gesture: None,
             bus: None,
-            x_focus_at: None,
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();
@@ -358,10 +330,6 @@ impl Session {
         self.dir.join(SOCKET_NAME)
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// Call after dispatching the session loop.
     pub fn flush(&mut self) {
         if let Err(e) = self.dh.flush_clients() {
@@ -372,6 +340,39 @@ impl Session {
     /// Mapped windows (not counting X menus and tooltips).
     pub fn windows(&self) -> usize {
         self.space.elements().filter(|w| !crate::xwayland::is_or(w)).count()
+    }
+
+    /// Something outside may have changed what's on screen (a command, client requests):
+    /// render at the next tick.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Input that reached the apps, for the viewer's overlay.
+    pub fn viz(&self) -> &guilab_proto::viz::VizLog {
+        &self.viz
+    }
+
+    /// A note for the viewer's input overlay (e.g. an agent's output change).
+    pub fn note(&mut self, text: String) {
+        self.viz.push(true, guilab_proto::viz::VizKind::Note(text));
+    }
+
+    /// The output scale (output pixels per logical pixel).
+    pub fn scale(&self) -> f64 {
+        self.output.current_scale().fractional_scale()
+    }
+
+    /// Output pixels (what agents and screenshots use) of a global logical point, rounded.
+    pub fn to_px(&self, p: Point<f64, Logical>) -> (i32, i32) {
+        let s = self.scale();
+        ((p.x * s).round() as i32, (p.y * s).round() as i32)
+    }
+
+    /// The global logical point at output pixel (x, y).
+    pub fn from_px(&self, x: f64, y: f64) -> Point<f64, Logical> {
+        let s = self.scale();
+        (x / s, y / s).into()
     }
 
     /// Frame interval of the output.

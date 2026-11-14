@@ -42,7 +42,7 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/kit`, `crates
 
 ## Clipboard (clipboard.rs, server viewer.rs)
 - `HostClipboard` (sctk data device, text mimes): `set_clipboard` takes the host selection with the last input serial (keyboard enter, key or button press; queued until there is one), `take_clipboard` returns text read (on a thread) from a new selection someone else made. Our own selection's echo is ignored while our source is alive (it's cancelled before someone else's selection arrives).
-- Server `ClipBridge` (per shown viewer, current session only): host text → `clip_set`; `Session::clip_seq` changes → `clip_get` (pipe read on a thread) → host, only while the host window is focused; `last` stops ping-pong. Test: `viewer::clipboard_bridge`.
+- Server `ClipBridge` (per shown viewer, current session only): host text → `clip_set`; `Session::clip.seq()` changes → `clip_get` (pipe read on a thread) → host, only while the host window is focused; `last` stops ping-pong. Test: `viewer::clipboard_bridge`.
 
 ## Window decorations
 - The host decides (xdg-decoration; sctk reports `DecorationMode::Client` without it, e.g. GNOME). With client-side decorations (`HostState::csd`; `GUILAB_VIEWER_CSD=1` in the server's env forces it, for testing on our SSD-only host) the menu bar's free part (`MenuBar::show` returns it) becomes a title bar: drag = `xdg_toplevel.move`, double-click = maximize toggle, minimize/maximize/close buttons; a 5 pt border resizes (`border_presses` turns a press there into `xdg_toplevel.resize`, using the last press serial). Tested against guilab as host: move (floating viewer), close, cursors.

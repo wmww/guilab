@@ -86,7 +86,7 @@ impl ClipBridge {
             && self.last.as_ref() != Some(&text)
         {
             session.clip_set(text.clone());
-            self.seen.insert(session.tag.clone(), session.clip_seq);
+            self.seen.insert(session.tag.clone(), session.clip.seq());
             self.last = Some(text);
         }
         let read = self.reading.lock().ok().and_then(|mut r| r.take());
@@ -96,7 +96,7 @@ impl ClipBridge {
             viewer.host.set_clipboard(text.clone());
             self.last = Some(text);
         }
-        let seq = session.clip_seq;
+        let seq = session.clip.seq();
         let old = self.seen.insert(session.tag.clone(), seq);
         // First sight of a session, no change, or the human isn't in the viewer.
         if old.is_none_or(|o| o == seq) || !viewer.host.focused {
@@ -197,9 +197,9 @@ fn egui_cursor(icon: CursorIcon) -> EguiCursor {
 
 /// The session event for the human's input (output pixels -> logical).
 fn to_event(s: &Session, input: Input) -> InputEvent {
-    let scale = s.output.current_scale().fractional_scale();
+    let scale = s.scale();
     match input {
-        Input::Motion { x, y } => InputEvent::PointerMotion { pos: (x / scale, y / scale).into() },
+        Input::Motion { x, y } => InputEvent::PointerMotion { pos: s.from_px(x, y) },
         Input::Leave => InputEvent::PointerLeave,
         Input::Button { button, pressed } => InputEvent::PointerButton { button, pressed },
         Input::Scroll { dx, dy, steps, stop } => InputEvent::PointerAxis {
@@ -215,8 +215,8 @@ fn to_event(s: &Session, input: Input) -> InputEvent {
         Input::SwipeBegin { fingers } => InputEvent::SwipeBegin { fingers },
         Input::SwipeUpdate { dx, dy } => InputEvent::SwipeUpdate { delta: (dx / scale, dy / scale).into() },
         Input::SwipeEnd { cancelled } => InputEvent::SwipeEnd { cancelled },
-        Input::TouchDown { id, x, y } => InputEvent::TouchDown { slot: id as u32, pos: (x / scale, y / scale).into() },
-        Input::TouchMotion { id, x, y } => InputEvent::TouchMotion { slot: id as u32, pos: (x / scale, y / scale).into() },
+        Input::TouchDown { id, x, y } => InputEvent::TouchDown { slot: id as u32, pos: s.from_px(x, y) },
+        Input::TouchMotion { id, x, y } => InputEvent::TouchMotion { slot: id as u32, pos: s.from_px(x, y) },
         Input::TouchUp { id } => InputEvent::TouchUp { slot: id as u32 },
     }
 }
@@ -451,7 +451,7 @@ impl Server {
                             scale: o.scale,
                             locked: slot.lock.is_locked(),
                             cursor: HostCursor::Icon(EguiCursor::Default),
-                            viz: &slot.session.viz,
+                            viz: slot.session.viz(),
                             under_pointer: None,
                             agent: slot.working.as_ref().map(|w| Status {
                                 text: w.status.clone(),

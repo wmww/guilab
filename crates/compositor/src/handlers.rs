@@ -188,8 +188,7 @@ impl SelectionHandler for Session {
     fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
         let mimes = source.map(|s| s.mime_types());
         if ty == SelectionTarget::Clipboard {
-            self.clip_mimes = mimes.clone();
-            self.clip_seq += 1;
+            self.clip.set_owner(mimes.clone());
         }
         crate::xwayland::announce_selection(self, ty, mimes);
     }
@@ -272,7 +271,7 @@ impl TextInputActivation for Session {}
 impl FractionalScaleHandler for Session {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
         // One output per session, so its scale is always the right one.
-        let scale = self.output.current_scale().fractional_scale();
+        let scale = self.scale();
         with_states(&surface, |s| with_fractional_scale(s, |f| f.set_preferred_scale(scale)));
     }
 }

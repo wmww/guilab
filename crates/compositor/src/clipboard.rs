@@ -20,6 +20,28 @@ use crate::{handlers::SelData, session::Session};
 /// Text mime types, preferred first.
 const TEXT_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT", "STRING"];
 
+/// The clipboard as the viewer bridge and `clip get` see it. Every change of owner or
+/// content goes through `set_owner`, which bumps the seq.
+#[derive(Default)]
+pub struct Clipboard {
+    /// Mime types of a client-owned selection (None: empty or ours).
+    mimes: Option<Vec<String>>,
+    seq: u64,
+}
+
+impl Clipboard {
+    /// Changes with every new owner or content.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// A new owner: a client with these mime types, or None (ours, or empty).
+    pub(crate) fn set_owner(&mut self, mimes: Option<Vec<String>>) {
+        self.mimes = mimes;
+        self.seq += 1;
+    }
+}
+
 pub enum ClipRead {
     Text(String),
     /// Read this pipe to EOF.
@@ -30,8 +52,7 @@ impl Session {
     pub fn clip_set(&mut self, text: String) {
         let mimes: Vec<String> = TEXT_MIMES.iter().map(|s| s.to_string()).collect();
         set_data_device_selection(&self.dh, &self.seat, mimes.clone(), SelData::Text(Arc::from(text)));
-        self.clip_mimes = None;
-        self.clip_seq += 1;
+        self.clip.set_owner(None);
         crate::xwayland::announce_selection(self, SelectionTarget::Clipboard, Some(mimes));
         self.flush();
     }
@@ -42,7 +63,7 @@ impl Session {
             Some(SelData::X11) => true,
             None => false,
         };
-        let Some(mimes) = &self.clip_mimes else { return Err("the clipboard is empty".into()) };
+        let Some(mimes) = &self.clip.mimes else { return Err("the clipboard is empty".into()) };
         let Some(mime) = TEXT_MIMES.iter().find(|m| mimes.iter().any(|x| x == *m)) else {
             return Err(format!("the clipboard has no text (types: {})", mimes.join(", ")));
         };

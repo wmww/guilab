@@ -85,3 +85,23 @@ fn private_session_bus() {
     sleep(Duration::from_millis(300));
     assert!(!alive(daemon[0]), "dbus-daemon outlived the session");
 }
+
+/// A session whose start fails after its D-Bus daemon started (here: `new -x` without
+/// Xwayland) leaves no daemon behind.
+#[test]
+fn failed_new_leaves_no_bus() {
+    let Ok(dbus) = which("dbus-daemon") else { return eprintln!("skipping: dbus-daemon not installed") };
+    let lab = Lab::new();
+    // The server autostarts with this PATH: dbus-daemon, but no Xwayland.
+    let bin = lab.rt.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(dbus, bin.join("dbus-daemon")).unwrap();
+    let (ok, _, err) = lab.try_run_env(&[("PATH", bin.to_str().unwrap())], &["new", "-x"]);
+    assert!(!ok && err.contains("Xwayland"), "{err}");
+    let conf = lab.rt.join("guilab/s");
+    assert!(pgrep(&format!("dbus-daemon --config-file={}", conf.display())).is_empty(), "the session's dbus-daemon is still running");
+}
+
+fn which(prog: &str) -> Result<std::path::PathBuf, ()> {
+    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(prog)).find(|f| f.is_file())).ok_or(())
+}

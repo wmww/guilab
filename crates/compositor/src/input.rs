@@ -4,13 +4,13 @@
 //!
 //! Positions here are global logical coordinates; callers convert from output pixels.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 use smithay::{
     backend::input::{AxisSource, ButtonState, InputTime, KeyState},
     desktop::{Window, WindowSurfaceType},
     input::{
-        keyboard::{FilterResult, Keycode, xkb},
+        keyboard::{FilterResult, Keycode, Keysym, xkb},
         pointer::{
             AxisFrame, ButtonEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
             GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
@@ -62,10 +62,26 @@ pub enum InputEvent {
     PinchEnd { cancelled: bool },
 }
 
+/// Input state of the seat beyond what smithay keeps.
+#[derive(Default)]
+pub(crate) struct InputState {
+    pub held: Held,
+    /// Clients have key repeat on (see `set_repeat`).
+    pub key_repeat: bool,
+    /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
+    pub extra_keys: Vec<(Keysym, Keycode)>,
+    /// A button was pressed while a popup grab was active (see `popup_may_close`).
+    pub click_in_grab: bool,
+    /// The human's touchpad gesture in progress (logged when it ends).
+    pub gesture: Option<EventData>,
+    /// When keyboard focus last moved to an X window (keys wait for X to catch up).
+    pub x_focus_at: Option<Instant>,
+}
+
 /// Buttons, touch points and the touchpad gesture held through `inject`, to release on
 /// unlock (keys: the seat keyboard knows them).
 #[derive(Default)]
-pub struct Held {
+pub(crate) struct Held {
     pub buttons: Vec<u32>,
     /// Touch slot -> position.
     pub touches: BTreeMap<u32, Point<f64, Logical>>,
@@ -74,7 +90,7 @@ pub struct Held {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GestureKind {
+pub(crate) enum GestureKind {
     Swipe,
     Pinch,
 }
@@ -134,12 +150,12 @@ impl Session {
     /// a little. If the menu is gone, moves keyboard focus off it now (smithay's popup
     /// grab would only do that at the next key).
     pub(crate) fn popup_may_close(&mut self) -> bool {
-        if !self.click_in_grab {
+        if !self.input.click_in_grab {
             return false;
         }
         let Some(kb) = self.seat.get_keyboard() else { return false };
         if !kb.is_grabbed() {
-            self.click_in_grab = false;
+            self.input.click_in_grab = false;
             return false;
         }
         self.popups.cleanup();
@@ -148,16 +164,10 @@ impl Session {
             return true;
         }
         // The grab ended: it accepts any focus now, and removes itself.
-        self.click_in_grab = false;
+        self.input.click_in_grab = false;
         let w = self.window_under(self.pointer_location()).filter(|w| !is_or(w)).or_else(|| self.space.elements().rev().find(|w| !is_or(w)).cloned());
         kb.set_focus(self, w.and_then(|w| KbFocus::of(&w)), SERIAL_COUNTER.next_serial());
         false
-    }
-
-    /// Output pixels of a global logical point.
-    fn px(&self, p: Point<f64, Logical>) -> (i32, i32) {
-        let s = self.output.current_scale().fractional_scale();
-        ((p.x * s).round() as i32, (p.y * s).round() as i32)
     }
 
     /// Logs a human input event (agent input is logged as its command). Keys are logged
@@ -165,12 +175,12 @@ impl Session {
     fn log_human(&mut self, ev: &InputEvent) {
         let data = match ev {
             InputEvent::PointerMotion { pos } => {
-                let (x, y) = self.px(*pos);
+                let (x, y) = self.to_px(*pos);
                 EventData::Motion { path: vec![[x, y, 0]] }
             }
             InputEvent::PointerButton { button, pressed } => {
                 let p = self.pointer_location();
-                let (x, y) = self.px(p);
+                let (x, y) = self.to_px(p);
                 let window = self.window_under(p).and_then(|w| w.wl_surface().and_then(|s| surface_id(&s)));
                 let button = match button {
                     0x110 => "left".to_string(),
@@ -183,8 +193,8 @@ impl Session {
                 EventData::Button { button, pressed: *pressed, x, y, window }
             }
             InputEvent::PointerAxis { delta, steps, .. } => {
-                let (x, y) = self.px(self.pointer_location());
-                let s = self.output.current_scale().fractional_scale();
+                let (x, y) = self.to_px(self.pointer_location());
+                let s = self.scale();
                 let ((dx, dy), smooth) = match steps {
                     Some(st) => (*st, false),
                     None => ((delta.0 * s, delta.1 * s), true),
@@ -195,24 +205,24 @@ impl Session {
                 EventData::Scroll { dx, dy, x, y, smooth }
             }
             InputEvent::TouchDown { slot, pos } => {
-                let (x, y) = self.px(*pos);
+                let (x, y) = self.to_px(*pos);
                 EventData::Touch { finger: *slot, down: true, x, y }
             }
             InputEvent::TouchUp { slot } => {
-                let Some(pos) = self.held.touches.get(slot) else { return };
-                let (x, y) = self.px(*pos);
+                let Some(pos) = self.input.held.touches.get(slot) else { return };
+                let (x, y) = self.to_px(*pos);
                 EventData::Touch { finger: *slot, down: false, x, y }
             }
             // Gestures are logged once, when they end, with their totals.
             InputEvent::SwipeBegin { fingers } | InputEvent::PinchBegin { fingers } => {
                 let gesture = if matches!(ev, InputEvent::SwipeBegin { .. }) { "swipe" } else { "pinch" };
                 let scale = (gesture == "pinch").then_some(1.0);
-                self.gesture = Some(EventData::Gesture { gesture: gesture.into(), fingers: *fingers, dx: 0.0, dy: 0.0, scale, cancelled: false });
+                self.input.gesture = Some(EventData::Gesture { gesture: gesture.into(), fingers: *fingers, dx: 0.0, dy: 0.0, scale, cancelled: false });
                 return;
             }
             InputEvent::SwipeUpdate { delta } | InputEvent::PinchUpdate { delta, .. } => {
-                let s = self.output.current_scale().fractional_scale();
-                if let Some(EventData::Gesture { dx, dy, scale, .. }) = &mut self.gesture {
+                let s = self.scale();
+                if let Some(EventData::Gesture { dx, dy, scale, .. }) = &mut self.input.gesture {
                     (*dx, *dy) = (*dx + delta.x * s, *dy + delta.y * s);
                     if let InputEvent::PinchUpdate { scale: k, .. } = ev {
                         *scale = Some(*k);
@@ -221,7 +231,7 @@ impl Session {
                 return;
             }
             InputEvent::SwipeEnd { cancelled: c } | InputEvent::PinchEnd { cancelled: c } => {
-                let Some(mut g) = self.gesture.take() else { return };
+                let Some(mut g) = self.input.gesture.take() else { return };
                 if let EventData::Gesture { cancelled, .. } = &mut g {
                     *cancelled = *c;
                 }
@@ -235,8 +245,8 @@ impl Session {
     /// Key repeat is client-side, so it's per seat, not per key: on while a human types (held
     /// keys repeat as usual), off for agents (held keys in input chains must not repeat).
     fn set_repeat(&mut self, kb: &smithay::input::keyboard::KeyboardHandle<Session>, on: bool) {
-        if self.key_repeat != on {
-            self.key_repeat = on;
+        if self.input.key_repeat != on {
+            self.input.key_repeat = on;
             kb.change_repeat_info(if on { HUMAN_REPEAT_RATE } else { 0 }, HUMAN_REPEAT_DELAY);
         }
     }
@@ -244,7 +254,7 @@ impl Session {
     /// Records pointer and touch input for the viewer's overlay (keys: see `inject`).
     fn push_viz(&mut self, ev: &InputEvent, agent: bool) {
         use guilab_proto::viz::{TouchPhase, VizKind};
-        let s = self.output.current_scale().fractional_scale();
+        let s = self.scale();
         let px = |p: Point<f64, Logical>| (p.x * s, p.y * s);
         let kind = match ev {
             InputEvent::PointerMotion { pos } => {
@@ -263,7 +273,7 @@ impl Session {
                 VizKind::Touch { id: *slot, x, y, phase }
             }
             InputEvent::TouchUp { slot } => {
-                let (x, y) = self.held.touches.get(slot).map_or((0.0, 0.0), |p| px(*p));
+                let (x, y) = self.input.held.touches.get(slot).map_or((0.0, 0.0), |p| px(*p));
                 VizKind::Touch { id: *slot, x, y, phase: TouchPhase::Up }
             }
             _ => return,
@@ -306,11 +316,11 @@ impl Session {
                 let Some(ptr) = self.seat.get_pointer() else { return };
                 if pressed {
                     // A click while a menu is open may close it (the client decides).
-                    self.click_in_grab |= self.seat.get_keyboard().is_some_and(|k| k.is_grabbed());
+                    self.input.click_in_grab |= self.seat.get_keyboard().is_some_and(|k| k.is_grabbed());
                     self.focus_at(ptr.current_location());
-                    self.held.buttons.push(button);
+                    self.input.held.buttons.push(button);
                 } else {
-                    self.held.buttons.retain(|b| *b != button);
+                    self.input.held.buttons.retain(|b| *b != button);
                 }
                 let state = if pressed { ButtonState::Pressed } else { ButtonState::Released };
                 ptr.button(self, &ButtonEvent { button, state, serial: SERIAL_COUNTER.next_serial(), time });
@@ -365,22 +375,22 @@ impl Session {
             }
             InputEvent::TouchDown { slot, pos } => {
                 let Some(touch) = self.seat.get_touch() else { return };
-                if self.held.touches.is_empty() {
+                if self.input.held.touches.is_empty() {
                     self.focus_at(pos);
                 }
-                self.held.touches.insert(slot, pos);
+                self.input.held.touches.insert(slot, pos);
                 let under = self.surface_under(pos);
                 touch.down(self, under, &DownEvent { slot: Some(slot).into(), location: pos, serial: SERIAL_COUNTER.next_serial(), time });
             }
             InputEvent::TouchMotion { slot, pos } => {
                 let Some(touch) = self.seat.get_touch() else { return };
-                self.held.touches.insert(slot, pos);
+                self.input.held.touches.insert(slot, pos);
                 let under = self.surface_under(pos);
                 touch.motion(self, under, &TouchMotionEvent { slot: Some(slot).into(), location: pos, time });
             }
             InputEvent::TouchUp { slot } => {
                 let Some(touch) = self.seat.get_touch() else { return };
-                self.held.touches.remove(&slot);
+                self.input.held.touches.remove(&slot);
                 touch.up(self, &UpEvent { slot: Some(slot).into(), serial: SERIAL_COUNTER.next_serial(), time });
             }
             InputEvent::TouchFrame => {
@@ -391,9 +401,9 @@ impl Session {
             ev => {
                 let Some(ptr) = self.seat.get_pointer() else { return };
                 match ev {
-                    InputEvent::SwipeBegin { .. } => self.held.gesture = Some(GestureKind::Swipe),
-                    InputEvent::PinchBegin { .. } => self.held.gesture = Some(GestureKind::Pinch),
-                    InputEvent::SwipeEnd { .. } | InputEvent::PinchEnd { .. } => self.held.gesture = None,
+                    InputEvent::SwipeBegin { .. } => self.input.held.gesture = Some(GestureKind::Swipe),
+                    InputEvent::PinchBegin { .. } => self.input.held.gesture = Some(GestureKind::Pinch),
+                    InputEvent::SwipeEnd { .. } | InputEvent::PinchEnd { .. } => self.input.held.gesture = None,
                     _ => {}
                 }
                 let serial = SERIAL_COUNTER.next_serial();
@@ -417,15 +427,15 @@ impl Session {
     /// Releases every held key, button and touch point and cancels an open gesture (when a
     /// lock ends, so nothing stays stuck).
     pub fn release_all(&mut self, source: InputSource) {
-        match self.held.gesture {
+        match self.input.held.gesture {
             Some(GestureKind::Swipe) => self.inject(InputEvent::SwipeEnd { cancelled: true }, source),
             Some(GestureKind::Pinch) => self.inject(InputEvent::PinchEnd { cancelled: true }, source),
             None => {}
         }
-        for button in self.held.buttons.clone() {
+        for button in self.input.held.buttons.clone() {
             self.inject(InputEvent::PointerButton { button, pressed: false }, source);
         }
-        let touches: Vec<u32> = self.held.touches.keys().copied().collect();
+        let touches: Vec<u32> = self.input.held.touches.keys().copied().collect();
         for slot in &touches {
             self.inject(InputEvent::TouchUp { slot: *slot }, source);
         }

@@ -82,10 +82,15 @@ impl Session {
             .cloned()
     }
 
+    /// The window policy, for Wayland and X windows: a window without a parent tiles if
+    /// no other window is tiled; everything else floats.
+    pub(crate) fn should_tile(&self, w: &Window, parentless: bool) -> bool {
+        parentless && !self.space.elements().chain(self.unmapped.iter()).any(|o| o != w && is_tiled(o))
+    }
+
     fn apply_policy(&self, w: &Window) {
         let tl = w.toplevel().unwrap();
-        let tiled = tl.parent().is_none()
-            && !self.space.elements().chain(self.unmapped.iter()).any(|o| o != w && is_tiled(o));
+        let tiled = self.should_tile(w, tl.parent().is_none());
         tracing::debug!(surface = ?w.wl_surface().as_deref().and_then(crate::handlers::surface_id), tiled, "placing toplevel");
         w.user_data().insert_if_missing(WindowState::default);
         w.user_data().get::<WindowState>().unwrap().tiled.set(tiled);

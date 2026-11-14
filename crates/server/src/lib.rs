@@ -371,7 +371,7 @@ impl Server {
                         tracing::warn!("session {key}: {e}");
                     }
                     // Client requests may change what's on screen (e.g. destroying a popup).
-                    slot.session.dirty = true;
+                    slot.session.touch();
                     slot.session.flush();
                 }
                 Ok(PostAction::Continue)

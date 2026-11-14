@@ -64,7 +64,7 @@ impl Session {
     /// Tells X clients the output scale (client scale, XSETTINGS, Xft.dpi). Call when
     /// Xwayland is ready and whenever the scale changes (before relayout).
     pub(crate) fn x_apply_scale(&mut self) {
-        let s = self.output.current_scale().fractional_scale();
+        let s = self.scale();
         if let Some(client) = &self.xw.client {
             use smithay::wayland::compositor::CompositorHandler;
             self.client_compositor_state(client).set_client_scale(s);

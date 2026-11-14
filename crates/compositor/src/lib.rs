@@ -23,7 +23,7 @@ mod xscale;
 mod xwayland;
 
 pub use actions::Chain;
-pub use clipboard::ClipRead;
+pub use clipboard::{ClipRead, Clipboard};
 pub use cursor::{AppCursor, CursorImage};
 pub use input::{InputEvent, InputSource};
 pub use frame::write_rgba_png;
@@ -31,5 +31,5 @@ pub use settle::{Settle, ShotReady};
 pub use handlers::{SurfaceId, surface_id};
 pub use render::Gpu;
 pub use xwayland::XState;
-pub use session::{ClientState, SOCKET_NAME, Session, SessionConfig, SharedGpu};
+pub use session::{SOCKET_NAME, Session, SessionConfig, SharedGpu};
 pub use smithay::reexports::calloop;

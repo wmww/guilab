@@ -178,7 +178,7 @@ impl Server {
         }
         slot.last_active = Instant::now();
         // Commands may move windows, change the output, focus...: render the next tick.
-        slot.session.dirty = true;
+        slot.session.touch();
         if !policy.human {
             slot.last_agent = Instant::now();
         }
@@ -552,7 +552,7 @@ pub(crate) fn set_output(s: &mut Session, size: Option<(i32, i32)>, scale: Optio
     // The overlay notes agent changes; the human sees their own.
     if key.is_some() {
         let note = if o.scale == 1.0 { format!("{}×{}", o.width, o.height) } else { format!("{}×{} @{}x", o.width, o.height, o.scale) };
-        s.viz.push(true, guilab_proto::viz::VizKind::Note(note));
+        s.note(note);
     }
     Ok(())
 }

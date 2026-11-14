@@ -77,7 +77,7 @@ impl Session {
 
     /// Mapped toplevels, topmost first, each with its subsurfaces and popups nested.
     pub fn tree(&self) -> Vec<TreeNode> {
-        let scale = self.output.current_scale().fractional_scale();
+        let scale = self.scale();
         let mut out = Vec::new();
         for w in self.space.elements().rev() {
             let Some(surface) = w.wl_surface().map(|s| s.into_owned()) else { continue };
