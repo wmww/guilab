@@ -789,6 +789,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "guilab-editor"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "guilab-image",
+ "guilab-kit",
+ "png",
+]
+
+[[package]]
 name = "guilab-image"
 version = "0.1.0"
 dependencies = [

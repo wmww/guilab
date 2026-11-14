@@ -1,0 +1,19 @@
+[package]
+name = "guilab-editor"
+description = "egui image editor widget: drawing tools, move/reshape, text, crop, inserted pictures. Edits out; the host owns documents and undo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# egui + guilab-kit + guilab-image only; no guilab app types.
+
+[lib]
+doctest = false
+
+[dependencies]
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+guilab-kit.workspace = true
+guilab-image.workspace = true
+
+[dev-dependencies]
+png.workspace = true

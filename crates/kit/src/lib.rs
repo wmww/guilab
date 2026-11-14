@@ -5,6 +5,7 @@
 //! Call [`theme::install`] once on the context; widgets then read [`Theme::get`].
 
 pub mod anim;
+pub mod headless;
 pub mod history;
 pub mod menu;
 pub mod theme;

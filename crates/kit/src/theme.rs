@@ -57,7 +57,12 @@ pub struct Colors {
     pub glow: Color32,
     pub key_point: Color32,
     pub key_point_hot: Color32,
+    /// Thin ring around key points, so they read on light and dark images.
+    pub key_point_ring: Color32,
     pub hover_outline: Color32,
+    /// Crop tool: shade over the canvas outside the crop, and the crop's outline.
+    pub crop_dim: Color32,
+    pub crop_line: Color32,
     pub shadow: Color32,
 }
 
@@ -329,7 +334,10 @@ impl Theme {
                 glow: Color32::from_rgba_unmultiplied(110, 170, 255, 60),
                 key_point: gray(240),
                 key_point_hot: Color32::from_rgb(110, 170, 255),
+                key_point_ring: Color32::from_black_alpha(170),
                 hover_outline: Color32::from_rgba_unmultiplied(110, 170, 255, 140),
+                crop_dim: Color32::from_black_alpha(150),
+                crop_line: gray(240),
                 shadow: Color32::from_black_alpha(96),
             },
             space: SPACE,
@@ -372,7 +380,10 @@ impl Theme {
                 glow: Color32::from_rgba_unmultiplied(30, 100, 210, 50),
                 key_point: gray(255),
                 key_point_hot: Color32::from_rgb(30, 100, 210),
+                key_point_ring: Color32::from_black_alpha(150),
                 hover_outline: Color32::from_rgba_unmultiplied(30, 100, 210, 140),
+                crop_dim: Color32::from_black_alpha(130),
+                crop_line: gray(255),
                 shadow: Color32::from_black_alpha(40),
             },
             space: SPACE,

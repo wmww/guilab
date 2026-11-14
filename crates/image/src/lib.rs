@@ -14,7 +14,7 @@ pub mod store;
 pub mod text;
 
 pub use asset::{Asset, LoadError, Origin, Raster, SvgDoc, load_file};
-pub use draw::{Prim, display_list};
+pub use draw::{Prim, display_list, element_prims};
 pub use edit::{Doc, Edit, ElemKey};
 pub use id::{AssetId, IdError, IdKind, ImageId};
 pub use make::{MakeReq, make};

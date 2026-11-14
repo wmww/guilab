@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::id::AssetId;
-use crate::model::{ARROW_HEAD, Body, Color, IRect, Kind, Pt, Rect, TEXT_RADIUS};
+use crate::model::{ARROW_HEAD, Body, Color, Element, IRect, Kind, Pt, Rect, STROKE, TEXT_RADIUS};
 use crate::text::{Fonts, TextLayout};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,36 +50,42 @@ pub fn arrow_head(tail: Pt, tip: Pt, scale: f32) -> Option<(Pt, [Pt; 3])> {
 /// leaves out marks (pictures only).
 pub fn display_list(body: &Body, fonts: &Fonts, marks: bool) -> Vec<(usize, Prim)> {
     let mut out = Vec::new();
-    let width = body.stroke();
+    let mut prims = Vec::new();
     for (i, e) in body.elements.iter().enumerate() {
         if !marks && e.is_mark() {
             continue;
         }
-        let color = e.color;
-        let mut push = |p: Prim| out.push((i, p));
-        match &e.kind {
-            Kind::Raster { asset, dst, src } => push(Prim::Raster { asset: *asset, dst: *dst, src: *src }),
-            Kind::Svg { asset, dst } => push(Prim::Svg { asset: *asset, dst: *dst }),
-            Kind::Pen(pts) => push(Prim::Stroke { pts: pts.clone(), closed: false, width, color }),
-            Kind::Box(r) => {
-                let (a, b) = (r.min, r.max());
-                let pts = vec![a, Pt { x: b.x, y: a.y }, b, Pt { x: a.x, y: b.y }];
-                push(Prim::Stroke { pts, closed: true, width, color })
-            }
-            Kind::Ellipse(r) => push(Prim::Ellipse { rect: *r, width, color }),
-            Kind::Line(a, b) => push(Prim::Stroke { pts: vec![*a, *b], closed: false, width, color }),
-            Kind::Arrow(a, b) => {
-                if let Some((shaft_end, head)) = arrow_head(*a, *b, body.scale) {
-                    push(Prim::Stroke { pts: vec![*a, shaft_end], closed: false, width, color });
-                    push(Prim::Fill { poly: head.to_vec(), color });
-                }
-            }
-            Kind::Text { at, .. } => {
-                let (layout, backing) = e.text_layout(body.scale, fonts).unwrap();
-                push(Prim::RoundRect { rect: backing, radius: TEXT_RADIUS * body.scale, fill: text_backing(color) });
-                push(Prim::Text { layout: Arc::new(layout), at: *at, color });
-            }
-        }
+        element_prims(e, body.scale, fonts, &mut prims);
+        out.extend(prims.drain(..).map(|p| (i, p)));
     }
     out
+}
+
+/// Appends the primitives of one element (`scale`: the body's scale).
+pub fn element_prims(e: &Element, scale: f32, fonts: &Fonts, out: &mut Vec<Prim>) {
+    let width = STROKE * scale;
+    let color = e.color;
+    match &e.kind {
+        Kind::Raster { asset, dst, src } => out.push(Prim::Raster { asset: *asset, dst: *dst, src: *src }),
+        Kind::Svg { asset, dst } => out.push(Prim::Svg { asset: *asset, dst: *dst }),
+        Kind::Pen(pts) => out.push(Prim::Stroke { pts: pts.clone(), closed: false, width, color }),
+        Kind::Box(r) => {
+            let (a, b) = (r.min, r.max());
+            let pts = vec![a, Pt { x: b.x, y: a.y }, b, Pt { x: a.x, y: b.y }];
+            out.push(Prim::Stroke { pts, closed: true, width, color })
+        }
+        Kind::Ellipse(r) => out.push(Prim::Ellipse { rect: *r, width, color }),
+        Kind::Line(a, b) => out.push(Prim::Stroke { pts: vec![*a, *b], closed: false, width, color }),
+        Kind::Arrow(a, b) => {
+            if let Some((shaft_end, head)) = arrow_head(*a, *b, scale) {
+                out.push(Prim::Stroke { pts: vec![*a, shaft_end], closed: false, width, color });
+                out.push(Prim::Fill { poly: head.to_vec(), color });
+            }
+        }
+        Kind::Text { at, .. } => {
+            let (layout, backing) = e.text_layout(scale, fonts).unwrap();
+            out.push(Prim::RoundRect { rect: backing, radius: TEXT_RADIUS * scale, fill: text_backing(color) });
+            out.push(Prim::Text { layout: Arc::new(layout), at: *at, color });
+        }
+    }
 }

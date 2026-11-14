@@ -1,0 +1,427 @@
+//! Interaction tests: the demo host in a headless egui context, driven by synthetic input.
+
+use egui::{CursorIcon, Event, Key, Modifiers, Pos2, vec2};
+use guilab_image::geom::Key as KeyPt;
+use guilab_image::{Color, Edit, Element, IRect, Kind, Rect, pt};
+use guilab_kit::headless::{Headless, ev};
+
+use crate::demo::{DemoHost, sample_svg};
+use crate::{Hit, Tool};
+
+struct T {
+    h: Headless,
+    host: DemoHost,
+    cursor: CursorIcon,
+}
+
+impl T {
+    /// A 600x400 scale-1 screenshot shown at 1:1.
+    fn new() -> T {
+        let h = Headless::new(vec2(1000.0, 700.0), 1.0);
+        guilab_kit::theme::install(&h.ctx);
+        let mut t = T { h, host: DemoHost::new([600, 400], 1.0), cursor: CursorIcon::Default };
+        t.run(vec![]);
+        t.run(vec![]);
+        assert_eq!(t.host.xf.zoom, 1.0);
+        t
+    }
+
+    fn run(&mut self, events: Vec<Event>) {
+        let host = &mut self.host;
+        let out = self.h.run(events, 0.1, |ui| host.ui(ui));
+        self.cursor = out.platform_output.cursor_icon;
+    }
+
+    /// Canvas px to screen.
+    fn at(&self, x: f32, y: f32) -> Pos2 {
+        self.host.xf.apply(pt(x, y))
+    }
+
+    fn mv(&mut self, x: f32, y: f32) {
+        let p = self.at(x, y);
+        self.run(vec![ev::moved(p)]);
+    }
+
+    fn drag_mods(&mut self, from: (f32, f32), to: (f32, f32), m: Modifiers) {
+        let (a, b) = (self.at(from.0, from.1), self.at(to.0, to.1));
+        self.run(vec![ev::moved(a)]);
+        self.run(vec![ev::button(a, true, m)]);
+        self.h.modifiers = m;
+        self.run(vec![ev::moved(a + (b - a) * 0.5)]);
+        self.run(vec![ev::moved(b)]);
+        self.run(vec![ev::button(b, false, m)]);
+        self.h.modifiers = Modifiers::NONE;
+    }
+
+    fn drag(&mut self, from: (f32, f32), to: (f32, f32)) {
+        self.drag_mods(from, to, Modifiers::NONE);
+    }
+
+    fn click(&mut self, x: f32, y: f32) {
+        let p = self.at(x, y);
+        self.run(vec![ev::moved(p), ev::press(p), ev::release(p)]);
+    }
+
+    fn key(&mut self, k: Key, m: Modifiers) {
+        self.run(vec![ev::key(k, m)]);
+    }
+
+    fn elements(&self) -> Vec<Element> {
+        self.host.doc.as_ref().map(|d| d.body().elements.clone()).unwrap_or_default()
+    }
+
+    /// Adds marks straight into a fresh doc (a box, a line, a text), recorded for undo.
+    fn with_marks(&mut self) {
+        self.host.open();
+        let d = self.host.doc.as_mut().unwrap();
+        for el in [
+            Element::new(Color::RED, Kind::Box(Rect::new(100.0, 100.0, 200.0, 100.0))),
+            Element::new(Color::BLUE, Kind::Line(pt(100.0, 300.0), pt(300.0, 300.0))),
+            Element::new(Color::RED, Kind::Text { at: pt(400.0, 100.0), size: 18.0, width: None, text: "hello".into() }),
+        ] {
+            let e = d.add_edit(el);
+            d.apply(&e);
+        }
+        self.run(vec![]);
+    }
+}
+
+#[test]
+fn draw_without_doc_begins_and_commits() {
+    let mut t = T::new();
+    t.host.editor.tool = Tool::Box;
+    t.mv(100.0, 100.0);
+    assert_eq!(t.cursor, CursorIcon::Crosshair);
+    assert!(t.host.doc.is_none());
+    t.drag((100.0, 100.0), (200.0, 150.0));
+    let els = t.elements();
+    assert_eq!(els.len(), 2, "base + box");
+    assert_eq!(els[1].kind, Kind::Box(Rect::new(100.0, 100.0, 100.0, 50.0)));
+    assert!(matches!(t.host.log.as_slice(), [Edit::Add { .. }]));
+
+    // A stray click on a fresh live view makes no doc.
+    let mut t = T::new();
+    t.host.editor.tool = Tool::Pen;
+    t.click(50.0, 50.0);
+    assert!(t.host.doc.is_none(), "abandoned");
+    assert!(t.host.log.is_empty());
+}
+
+#[test]
+fn shift_constrains_shapes() {
+    let mut t = T::new();
+    t.host.open();
+    t.host.editor.tool = Tool::Ellipse;
+    t.drag_mods((100.0, 100.0), (180.0, 130.0), Modifiers::SHIFT);
+    assert_eq!(t.elements()[1].kind, Kind::Ellipse(Rect::new(100.0, 100.0, 80.0, 80.0)), "a circle");
+    t.host.editor.tool = Tool::Line;
+    t.drag_mods((100.0, 300.0), (200.0, 310.0), Modifiers::SHIFT);
+    let Kind::Line(a, b) = t.elements()[2].kind else { panic!() };
+    assert_eq!(a, pt(100.0, 300.0));
+    assert!((b.y - 300.0).abs() < 0.01, "snapped flat: {b:?}");
+}
+
+#[test]
+fn hit_priorities() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    let d = t.host.doc.as_ref().unwrap();
+    let k = d.keys().to_vec();
+    // Empty space and the locked base: pan.
+    t.mv(200.0, 150.0);
+    assert_eq!(t.host.editor.hovered(), Hit::None, "inside the box isn't on it");
+    assert_eq!(t.cursor, CursorIcon::Grab);
+    // On the box's edge, and near it (thin lines are hard to hit).
+    t.mv(200.0, 101.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Item(k[1]));
+    assert_eq!(t.cursor, CursorIcon::AllScroll);
+    t.mv(200.0, 100.0 - 1.5 - 5.5);
+    assert_eq!(t.host.editor.hovered(), Hit::Item(k[1]), "within the slop");
+    t.mv(200.0, 100.0 - 1.5 - 7.0);
+    assert_eq!(t.host.editor.hovered(), Hit::None, "past the slop");
+    // A key point wins over its item.
+    t.mv(301.0, 201.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Key(k[1], KeyPt::Corner(2)));
+    assert_eq!(t.cursor, CursorIcon::ResizeNwSe);
+    t.mv(299.0, 99.0);
+    assert_eq!(t.cursor, CursorIcon::ResizeNeSw);
+    t.mv(100.0, 300.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Key(k[2], KeyPt::End(0)));
+    // Topmost wins: a second box on top of the first's edge.
+    let d = t.host.doc.as_mut().unwrap();
+    let e = d.add_edit(Element::new(Color::GREEN, Kind::Box(Rect::new(150.0, 50.0, 100.0, 100.0))));
+    d.apply(&e);
+    let top = d.keys()[4];
+    t.mv(150.0, 101.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Item(top), "the newer box covers this spot of both");
+    // Text: anywhere in its backing.
+    t.mv(410.0, 110.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Item(k[3]));
+}
+
+#[test]
+fn move_reshape_pan_and_undo() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    let before = t.elements();
+    // Move the line down by 50: one Replace at release.
+    t.drag((200.0, 300.0), (200.0, 350.0));
+    assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(300.0, 350.0)));
+    assert_eq!(t.host.log.len(), 1);
+    assert!(matches!(t.host.log[0], Edit::Replace { .. }));
+    // Reshape: the box's bottom-right corner, grabbed slightly off the point.
+    t.drag((302.0, 202.0), (352.0, 252.0));
+    assert_eq!(t.elements()[1].kind, Kind::Box(Rect::new(100.0, 100.0, 250.0, 150.0)), "no jump by the grab offset");
+    // A line end.
+    t.drag((300.0, 350.0), (320.0, 380.0));
+    assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(320.0, 380.0)));
+    // Text corner: scales the font.
+    let Kind::Text { size: s0, .. } = t.elements()[3].kind else { panic!() };
+    let f = t.elements()[3].frame(1.0, t.host.editor.fonts());
+    t.drag((f.max().x, f.max().y), (f.max().x + 40.0, f.max().y + f.size.h));
+    let Kind::Text { size: s1, at, .. } = t.elements()[3].kind else { panic!() };
+    assert!(s1 > s0 * 1.8, "{s0} -> {s1}");
+    assert_eq!(at, pt(400.0, 100.0), "anchored at the opposite corner");
+    // Pan on empty space: no edit, the view moves.
+    let x0 = t.host.xf.offset;
+    t.drag((500.0, 350.0), (450.0, 330.0));
+    assert_eq!(t.host.xf.offset - x0, vec2(-50.0, -20.0));
+    assert_eq!(t.host.log.len(), 4);
+    // Undo everything back.
+    for _ in 0..4 {
+        t.key(Key::Z, Modifiers::COMMAND);
+    }
+    assert_eq!(t.elements(), before);
+    t.key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(300.0, 350.0)), "redo");
+}
+
+#[test]
+fn escape_and_undo_mid_drag() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    let before = t.elements();
+    let (a, b) = (t.at(200.0, 300.0), t.at(200.0, 360.0));
+    t.run(vec![ev::moved(a), ev::press(a)]);
+    t.run(vec![ev::moved(b)]);
+    assert_eq!(t.cursor, CursorIcon::AllScroll);
+    t.key(Key::Escape, Modifiers::NONE);
+    t.run(vec![ev::release(b)]);
+    assert_eq!(t.elements(), before, "Esc cancels the drag");
+    assert!(t.host.log.is_empty());
+
+    // The element disappears mid-drag (host undo): the drag just ends.
+    t.host.editor.tool = Tool::Box;
+    t.drag((400.0, 250.0), (500.0, 350.0));
+    t.host.editor.tool = Tool::Move;
+    let (a, b) = (t.at(450.0, 250.0), t.at(450.0, 280.0));
+    t.run(vec![ev::moved(a), ev::press(a)]);
+    t.run(vec![ev::moved(b)]);
+    t.host.undo();
+    t.run(vec![ev::moved(b + vec2(5.0, 5.0))]);
+    t.run(vec![ev::release(b)]);
+    assert_eq!(t.elements(), before);
+    assert!(!t.host.editor.busy());
+}
+
+#[test]
+fn delete_hovered() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    t.mv(200.0, 300.0);
+    t.key(Key::Delete, Modifiers::NONE);
+    assert_eq!(t.elements().len(), 3);
+    assert!(matches!(t.host.log[0], Edit::Remove { at: 2, .. }));
+    // The base can't be deleted.
+    t.mv(500.0, 350.0);
+    t.key(Key::Backspace, Modifiers::NONE);
+    assert_eq!(t.elements().len(), 3);
+    t.key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(t.elements().len(), 4, "undo brings it back");
+}
+
+#[test]
+fn text_new_edit_and_clear() {
+    let mut t = T::new();
+    t.host.editor.tool = Tool::Text;
+    t.click(100.0, 100.0);
+    assert!(t.host.doc.is_some(), "text on the live view begins a doc");
+    t.run(vec![]);
+    t.run(vec![ev::text("hi there")]);
+    t.key(Key::Enter, Modifiers::SHIFT);
+    t.run(vec![ev::text("two")]);
+    t.key(Key::Enter, Modifiers::NONE);
+    let Kind::Text { text, width, size, .. } = &t.elements()[1].kind else { panic!("{:?}", t.elements()) };
+    assert_eq!(text, "hi there\ntwo");
+    assert_eq!(*width, None, "short text stores no width");
+    assert_eq!(*size, 18.0);
+
+    // Esc on new text: nothing, and the doc it began is dropped.
+    let mut t2 = T::new();
+    t2.host.editor.tool = Tool::Text;
+    t2.click(100.0, 100.0);
+    t2.run(vec![]);
+    t2.run(vec![ev::text("nope")]);
+    t2.key(Key::Escape, Modifiers::NONE);
+    assert!(t2.host.doc.is_none() && t2.host.log.is_empty(), "{:?}", t2.host.log);
+
+    // Double-click with Move edits in place: the word under the pointer is selected.
+    t.host.editor.tool = Tool::Move;
+    let Kind::Text { at, .. } = t.elements()[1].kind else { panic!() };
+    let p = t.at(at.x + 5.0, at.y + 8.0);
+    t.run(vec![ev::moved(p), ev::press(p), ev::release(p)]);
+    t.run(vec![ev::press(p), ev::release(p)]);
+    t.run(vec![]);
+    t.run(vec![]);
+    t.run(vec![ev::text("bye")]);
+    t.key(Key::Enter, Modifiers::NONE);
+    let Kind::Text { text, .. } = &t.elements()[1].kind else { panic!() };
+    assert_eq!(text, "bye there\ntwo");
+    assert!(matches!(t.host.log.last(), Some(Edit::Replace { .. })));
+
+    // Long text wraps and stores its width.
+    t.host.editor.tool = Tool::Text;
+    t.click(100.0, 250.0);
+    t.run(vec![]);
+    t.run(vec![ev::text(&"word ".repeat(40))]);
+    t.key(Key::Enter, Modifiers::NONE);
+    let Kind::Text { width, at, .. } = t.elements()[2].kind.clone() else { panic!() };
+    assert_eq!(width, Some(16.0 * 18.0), "wraps at 16 ems");
+    assert_eq!(at.x, 100.0);
+
+    // Clearing a text removes it.
+    t.click(at.x + 5.0, at.y + 5.0);
+    t.run(vec![]);
+    t.run(vec![]);
+    t.key(Key::A, Modifiers::COMMAND);
+    t.key(Key::Backspace, Modifiers::NONE);
+    t.key(Key::Enter, Modifiers::NONE);
+    assert_eq!(t.elements().len(), 2);
+    assert!(matches!(t.host.log.last(), Some(Edit::Remove { .. })));
+}
+
+#[test]
+fn crop_and_show_all() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Crop;
+    t.run(vec![]);
+    t.mv(300.0, 200.0);
+    assert_eq!(t.cursor, CursorIcon::Crosshair, "no crop yet: a drag inside makes one");
+    t.drag((100.4, 50.0), (400.0, 300.6));
+    assert_eq!(t.host.doc.as_ref().unwrap().body().crop, Some(IRect::new(100, 50, 300, 251)), "whole pixels");
+    // Drag the left edge, then move the crop.
+    t.mv(100.0, 200.0);
+    assert_eq!(t.cursor, CursorIcon::ResizeHorizontal);
+    t.drag((100.0, 200.0), (50.0, 200.0));
+    assert_eq!(t.host.doc.as_ref().unwrap().body().crop, Some(IRect::new(50, 50, 350, 251)));
+    t.drag((200.0, 200.0), (210.0, 1000.0));
+    assert_eq!(t.host.doc.as_ref().unwrap().body().crop, Some(IRect::new(60, 149, 350, 251)), "kept inside the canvas");
+    // Other tools show (and fit) the crop only.
+    t.host.editor.tool = Tool::Move;
+    t.run(vec![]);
+    t.run(vec![]);
+    let shown = t.host.last.shown.unwrap();
+    assert_eq!(shown.size(), vec2(350.0, 251.0));
+    t.host.editor.tool = Tool::Crop;
+    t.run(vec![]);
+    t.run(vec![]);
+    // Show all, in the toast at the bottom of the view.
+    let clip = t.h.ctx.content_rect();
+    let mut found = None;
+    for y in (clip.max.y as i32 - 80..clip.max.y as i32).step_by(2) {
+        for x in (400..700).step_by(4) {
+            let p = egui::pos2(x as f32, y as f32);
+            if t.h.ctx.layer_id_at(p).is_some_and(|l| l.order == egui::Order::Middle) {
+                found = Some(p);
+            }
+        }
+    }
+    assert!(found.is_some(), "the crop toast is up");
+    for _ in 0..3 {
+        t.key(Key::Z, Modifiers::COMMAND);
+    }
+    assert_eq!(t.host.doc.as_ref().unwrap().body().crop, None, "crops undo");
+}
+
+#[test]
+fn insert_picture_moves_and_resizes_keeping_aspect() {
+    let mut t = T::new();
+    t.host.insert(sample_svg());
+    let Kind::Svg { dst, .. } = t.elements()[1].kind else { panic!() };
+    assert_eq!(dst, Rect::new(220.0, 172.0, 160.0, 56.0), "natural size, centered");
+    t.host.editor.tool = Tool::Move;
+    t.drag((300.0, 200.0), (310.0, 210.0));
+    t.drag((390.0, 238.0), (470.0, 238.0));
+    let Kind::Svg { dst, .. } = t.elements()[1].kind else { panic!() };
+    assert_eq!(dst.min, pt(230.0, 182.0));
+    assert_eq!(dst.size.w, 240.0);
+    assert!((dst.size.h - 84.0).abs() < 0.01, "aspect kept: {dst:?}");
+    t.drag_mods((470.0, 266.0), (470.0, 300.0), Modifiers::SHIFT);
+    let Kind::Svg { dst, .. } = t.elements()[1].kind else { panic!() };
+    assert_eq!((dst.size.w, dst.size.h), (240.0, 118.0), "Shift frees the aspect");
+}
+
+#[test]
+fn tool_keys_and_cursors() {
+    let mut t = T::new();
+    t.host.open();
+    t.run(vec![]);
+    t.host.editor.tool = Tool::Move;
+    for (k, tool) in [(Key::P, Tool::Pen), (Key::T, Tool::Text), (Key::C, Tool::Crop), (Key::V, Tool::Move)] {
+        t.key(k, Modifiers::NONE);
+        assert_eq!(t.host.editor.tool, tool);
+    }
+    for (tool, c) in [(Tool::Pen, CursorIcon::Crosshair), (Tool::Text, CursorIcon::Text), (Tool::Move, CursorIcon::Grab), (Tool::Crop, CursorIcon::Crosshair)] {
+        t.host.editor.tool = tool;
+        t.mv(300.0, 200.0);
+        assert_eq!(t.cursor, c, "{tool:?}");
+    }
+    t.host.editor.tool = Tool::Interact;
+    t.mv(300.0, 200.0);
+    assert_eq!(t.host.last.cursor, None, "Interact leaves the cursor to the host");
+}
+
+/// The editor paints text where the CPU renderer does (same layout, same fonts).
+#[test]
+fn text_matches_cpu_render() {
+    let mut t = T::new();
+    t.host.open();
+    let d = t.host.doc.as_mut().unwrap();
+    let e = d.add_edit(Element::new(Color::BLACK, Kind::Text { at: pt(50.0, 50.0), size: 30.0, width: Some(200.0), text: "Wrapped words here and there".into() }));
+    d.apply(&e);
+    t.run(vec![]);
+    t.run(vec![]);
+    let host = &mut t.host;
+    let out = t.h.run(vec![], 0.1, |ui| host.ui(ui));
+    let screen = t.h.render(&out, egui::Color32::BLACK);
+    let body = t.host.doc.as_ref().unwrap().body().clone();
+    let cpu = guilab_image::render(&body, &t.host.store, t.host.editor.fonts(), &Default::default()).unwrap();
+    // Bounding box of black glyph pixels inside the text box, in canvas px, both ways.
+    let dark = |c: [u8; 4]| c[0] < 60 && c[1] < 60 && c[2] < 60;
+    let bbox = |f: &dyn Fn(u32, u32) -> [u8; 4]| {
+        let (mut a, mut b) = ((u32::MAX, u32::MAX), (0, 0));
+        for y in 40..200 {
+            for x in 40..300 {
+                if dark(f(x, y)) {
+                    a = (a.0.min(x), a.1.min(y));
+                    b = (b.0.max(x), b.1.max(y));
+                }
+            }
+        }
+        (a, b)
+    };
+    let off = t.host.xf.offset;
+    let w = screen.size[0];
+    let on_screen = bbox(&|x, y| screen.pixels[(y as f32 + off.y) as usize * w + (x as f32 + off.x) as usize].to_array());
+    let on_cpu = bbox(&|x, y| cpu.pixel(x, y));
+    let close = |a: u32, b: u32| a.abs_diff(b) <= 2;
+    assert!(
+        close(on_screen.0.0, on_cpu.0.0) && close(on_screen.0.1, on_cpu.0.1) && close(on_screen.1.0, on_cpu.1.0) && close(on_screen.1.1, on_cpu.1.1),
+        "screen {on_screen:?} vs cpu {on_cpu:?}"
+    );
+}
