@@ -179,7 +179,8 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             return Ok(());
         }
-        Command::ClipSet { .. } | Command::Say { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),
+        Command::Say { .. } => "sent to the viewer's chat".into(),
+        Command::ClipSet { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),
         Command::Log { .. } => {
             let l: LogInfo = get(v)?;
             let mut out: Vec<String> = Vec::new();

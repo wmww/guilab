@@ -69,12 +69,14 @@ enum Cmd {
     Show,
     /// Close the viewer window. Sessions keep running.
     Hide,
-    /// Start a session. NAME defaults to the git worktree's directory name.
+    /// Start a session. NAME (or -S NAME) defaults to the git worktree's directory name.
     New {
+        /// Session name.
         name: Option<String>,
         /// Output size in pixels.
         #[arg(short, long, value_name = "WxH", value_parser = parse_size)]
         size: Option<[u32; 2]>,
+        /// Output scale (e.g. 2 or 1.5); screenshots stay in pixels.
         #[arg(long)]
         scale: Option<f64>,
         /// End after this many idle seconds (0 = never; default 1800).
@@ -101,15 +103,19 @@ enum Cmd {
     Tree,
     /// Save a PNG of the output. Waits for apps to finish drawing unless --no-settle.
     Screenshot {
+        /// Where to save the PNG (default: the session dir, deleted when the session ends).
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Capture now instead of waiting up to 3 s for apps to stop drawing.
         #[arg(long)]
         no_settle: bool,
     },
     /// Show or change the output size (pixels) and scale.
     Output {
+        /// New size in pixels.
         #[arg(short, long, value_name = "WxH", value_parser = parse_size)]
         size: Option<[u32; 2]>,
+        /// New scale (e.g. 2 or 1.5).
         #[arg(long)]
         scale: Option<f64>,
     },
@@ -302,7 +308,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
         Cmd::Show => Command::Show { display: guilab_proto::own_wayland_socket()? },
         Cmd::Hide => Command::Hide,
         Cmd::Server { stop: true, .. } => return client::stop_server(),
-        Cmd::New { name, size, scale, ttl, xwayland } => Command::New { name, size, scale, ttl, xwayland },
+        Cmd::New { name, size, scale, ttl, xwayland } => Command::New { name: name.or_else(|| cli.session.clone()), size, scale, ttl, xwayland },
         Cmd::End => Command::End,
         Cmd::Ls => Command::Ls,
         Cmd::Run { cmd } => Command::Run {
