@@ -9,7 +9,7 @@ Plan steps 1-7 (skeleton, headless compositor, input and locking, Xwayland, even
 - **smithay** compositor in-process. guilab *is* the compositor, so screenshots read our own buffers, input is injected directly (touch included), and frame timing is under our control.
 - Reuse existing code for tricky logic (popup placement/constraints, Xwayland WM, grabs) rather than writing our own: smithay helpers first, then anvil (MIT), then cosmic-comp/niri.
 - **egui** for the viewer, drawn with the same GLES renderer as the sessions (so session frames are GPU textures; the visible one is GPU-copied into an egui texture when it changes) and presented to the host as dmabufs (shm CPU copy as fallback).
-- GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer needs GLES (egui has no software renderer); a server that fell back to pixman can't show it yet (`issues/viewer-gaps.md`).
+- GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer needs GLES (egui has no software renderer): on a pixman server it gets its own GLES on Mesa's software EGL device (llvmpipe) and session frames are uploaded from the CPU.
 - Details and verified APIs: `smithay.md` (core compositor), `viewer.md` (viewer window, egui).
 - Public repo. MIT by default; switching to GPL is fine if borrowing from cosmic-comp/niri needs it.
 

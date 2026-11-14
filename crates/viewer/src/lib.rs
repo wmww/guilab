@@ -41,6 +41,9 @@ pub struct SessionFrame<'a> {
     pub key: &'a str,
     /// GL texture name and pixel size of its latest frame.
     pub texture: Option<(u32, (i32, i32))>,
+    /// Or the latest frame as a CPU image (sessions rendered without the GPU; current
+    /// session only).
+    pub image: Option<std::sync::Arc<egui::ColorImage>>,
     /// Changes whenever the frame's content does.
     pub seq: u64,
     pub size: (u32, u32),
@@ -254,11 +257,13 @@ impl Viewer {
         let cur = self.ui.current().or(sessions.first().map(|s| s.name)).map(str::to_string);
         let nearest = self.ui.nearest();
         let mut tex = None;
-        if let Some(s) = sessions.iter().find(|s| Some(s.name) == cur.as_deref())
-            && let Some((id, size)) = s.texture
-        {
-            let gfx = &mut self.gfx;
-            tex = renderer.with_context(|_| gfx.mirror(s.key, id, size, s.seq, nearest)).ok();
+        if let Some(s) = sessions.iter().find(|s| Some(s.name) == cur.as_deref()) {
+            if let Some((id, size)) = s.texture {
+                let gfx = &mut self.gfx;
+                tex = renderer.with_context(|_| gfx.mirror(s.key, id, size, s.seq, nearest)).ok();
+            } else if let Some(img) = &s.image {
+                tex = Some(self.gfx.cpu_texture(s.key, img, s.seq, nearest));
+            }
         }
         self.gfx.retain_mirrors(|k| sessions.iter().any(|s| s.key == k && Some(s.name) == cur.as_deref()));
         let views: Vec<ui::SessionView> = sessions

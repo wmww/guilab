@@ -20,6 +20,7 @@ use guilab_viewer::{
     markup,
 };
 use smithay::{
+    backend::renderer::gles::GlesRenderer,
     backend::input::AxisSource,
     input::{keyboard::Keycode, pointer::CursorIcon},
 };
@@ -49,6 +50,10 @@ pub(crate) enum ViewerState {
 
 pub(crate) struct Shown {
     viewer: Viewer,
+    /// The viewer's own software GLES, when sessions render with pixman.
+    soft: Option<Box<GlesRenderer>>,
+    /// pixman sessions' latest frames as images, by tag: (frame_seq, image).
+    cpu_frames: std::collections::HashMap<String, (u64, std::sync::Arc<ColorImage>)>,
     /// None once the source removed itself (host lost).
     token: Option<RegistrationToken>,
     display: PathBuf,
@@ -243,9 +248,6 @@ impl Server {
     /// `show`: opens the viewer on `display`. Replies (to `stream`) once the first frame is
     /// up; `None` = answered later.
     pub(crate) fn show(&mut self, display: PathBuf, stream: Option<UnixStream>) -> Option<Response> {
-        if !matches!(self.gpu.borrow().renderer, Renderer::Gles(_)) {
-            return Some(Response::err("the viewer needs GPU rendering (GLES), but this server renders with pixman"));
-        }
         let canon = std::fs::canonicalize(&display).unwrap_or_else(|_| display.clone());
         if !canon.exists() {
             return Some(Response::err(format!("no Wayland display at {}", display.display())));
@@ -305,11 +307,22 @@ impl Server {
             Err(e) => return fail(waiters, e),
         };
         let force_shm = std::env::var_os("GUILAB_VIEWER_SHM").is_some_and(|v| v == "1");
+        // Sessions on pixman: the viewer draws with its own software GLES (llvmpipe).
+        let mut soft = None;
         let viewer = {
             let mut gpu = self.gpu.borrow_mut();
             let (gbm, node) = (gpu.gbm.clone(), gpu.node);
-            let Renderer::Gles(r) = &mut gpu.renderer else { unreachable!("checked in show") };
-            Viewer::new(&c, r, gbm, node, force_shm)
+            match &mut gpu.renderer {
+                Renderer::Gles(r) => Viewer::new(&c, r, gbm, node, force_shm),
+                Renderer::Pixman(_) => match guilab_compositor::render::software_gles() {
+                    Ok(mut r) => {
+                        let v = Viewer::new(&c, &mut r, None, None, true);
+                        soft = Some(Box::new(r));
+                        v
+                    }
+                    Err(e) => Err(anyhow::anyhow!("sessions render with pixman and the viewer's software GLES failed: {e:#}")),
+                },
+            }
         };
         let viewer = match viewer {
             Ok(v) => v,
@@ -332,16 +345,13 @@ impl Server {
         let token = match token {
             Ok(t) => t,
             Err(e) => {
-                let mut gpu = self.gpu.borrow_mut();
-                if let Renderer::Gles(r) = &mut gpu.renderer {
-                    viewer.destroy(r);
-                }
+                with_renderer(&self.gpu, soft.as_deref_mut(), |r| viewer.destroy(r));
                 return fail(waiters, e.error.to_string());
             }
         };
         let shown_on = display.display().to_string();
         tracing::info!("viewer shown on {shown_on}");
-        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, token: Some(token), display, waiters, deadline, clip: ClipBridge::default(), cursors: Default::default(), next_cursor_id: 0 }));
+        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, soft, token: Some(token), display, waiters, deadline, clip: ClipBridge::default(), cursors: Default::default(), next_cursor_id: 0, cpu_frames: Default::default() }));
     }
 
     /// Closes the viewer (if any). `why`: an error for `show` requests still waiting.
@@ -365,10 +375,8 @@ impl Server {
                 for w in s.waiters.drain(..) {
                     send(&w, &Response::err(why.unwrap_or("hidden before it was shown")));
                 }
-                let mut gpu = self.gpu.borrow_mut();
-                if let Renderer::Gles(r) = &mut gpu.renderer {
-                    s.viewer.destroy(r);
-                }
+                let Shown { viewer, mut soft, .. } = *s;
+                with_renderer(&self.gpu, soft.as_deref_mut(), |r| viewer.destroy(r));
             }
         }
     }
@@ -408,6 +416,24 @@ impl Server {
                 let under: Vec<Option<[u8; 3]>> = self.sessions.values_mut().map(|slot| slot.session.color_under_pointer()).collect();
                 let cursors: Vec<HostCursor> = self.sessions.values_mut().map(|slot| s.cursor(&mut slot.session)).collect();
                 s.cursors.retain(|tag, _| self.sessions.values().any(|slot| &slot.session.tag == tag));
+                // pixman frames reach the viewer as CPU images (the current session's only).
+                let mut cpu_image = None;
+                if s.soft.is_some() {
+                    let cur = s.viewer.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned());
+                    if let Some(slot) = cur.as_deref().and_then(|c| self.sessions.get_mut(c)) {
+                        let (tag, seq) = (slot.session.tag.clone(), slot.session.frame_seq);
+                        let cached = s.cpu_frames.get(&tag).filter(|(q, _)| *q == seq).map(|(_, i)| i.clone());
+                        let img = cached.or_else(|| {
+                            let (w, h, mut px) = slot.session.read_rgba().ok()?;
+                            px.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
+                            let img = std::sync::Arc::new(ColorImage::from_rgba_premultiplied([w as usize, h as usize], &px));
+                            s.cpu_frames.insert(tag.clone(), (seq, img.clone()));
+                            Some(img)
+                        });
+                        cpu_image = img.map(|i| (tag, i));
+                    }
+                    s.cpu_frames.retain(|k, _| cpu_image.as_ref().is_some_and(|(t, _)| t == k));
+                }
                 let frames: Vec<SessionFrame> = self
                     .sessions
                     .iter()
@@ -417,6 +443,7 @@ impl Server {
                             name,
                             key: &slot.session.tag,
                             texture: slot.session.frame.gles_texture().map(|(t, size)| (t.tex_id(), size)),
+                            image: cpu_image.as_ref().filter(|(t, _)| *t == slot.session.tag).map(|(_, i)| i.clone()),
                             seq: slot.session.frame_seq,
                             size: (o.width, o.height),
                             scale: o.scale,
@@ -443,9 +470,8 @@ impl Server {
                     return;
                 }
                 let res = {
-                    let mut gpu = self.gpu.borrow_mut();
-                    let Renderer::Gles(r) = &mut gpu.renderer else { return };
-                    s.viewer.draw(r, &frames, now)
+                    let viewer = &mut s.viewer;
+                    with_renderer(&self.gpu, s.soft.as_deref_mut(), |r| viewer.draw(r, &frames, now))
                 };
                 drop(frames);
                 let actions = match res {
@@ -554,6 +580,19 @@ impl Server {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Runs `f` with the viewer's renderer: its own software one if any, else the server's
+/// GLES. (Shown only exists with one of them.)
+fn with_renderer<T>(gpu: &guilab_compositor::SharedGpu, soft: Option<&mut GlesRenderer>, f: impl FnOnce(&mut GlesRenderer) -> T) -> T {
+    match soft {
+        Some(r) => f(r),
+        None => {
+            let mut gpu = gpu.borrow_mut();
+            let Renderer::Gles(r) = &mut gpu.renderer else { unreachable!("the viewer has a software renderer on pixman servers") };
+            f(r)
         }
     }
 }

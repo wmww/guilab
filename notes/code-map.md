@@ -12,7 +12,7 @@
   - `focus.rs`: `KbFocus` (keyboard focus: `WlSurface` or `X11Surface`; the X arm does SetInputFocus/WM_TAKE_FOCUS). Pointer/touch focus stay `WlSurface` (smithay's X11Surface targets only forward to it; X menus grab inside Xwayland).
   - `cursor.rs`: the apps' cursor (`AppCursor`: named, hidden, or a rendered cursor surface), theme cursors, drawing it into `screenshot --cursor`.
   - `frame.rs`: `tick()` (render, presentation feedback, frame callbacks), settle detection, PNG writing, `set_output`.
-  - `render.rs`: `Gpu` (GLES on a render node, pixman fallback; `GUILAB_RENDERER=pixman|/dev/dri/renderD*`), per-session offscreen `Frame` with a damage tracker.
+  - `render.rs`: `Gpu` (GLES on a render node, pixman fallback; `GUILAB_RENDERER=pixman|/dev/dri/renderD*`), per-session offscreen `Frame` with a damage tracker, `render_surface` (a surface tree to RGBA, for cursors), `software_gles` (llvmpipe, the viewer's renderer on pixman servers).
   - `tree.rs`: `tree` reply; `track_windows` (each tick) diffs toplevels to log window open/close/title. `procs.rs`: run/kill/ps and cleanup; logs app exits (`reap`).
   - `Session::log` (`EventLog`) holds the session's events; the compositor logs human input, windows, app exits; the server logs the rest.
   - `input.rs`: `InputEvent` + `Session::inject(ev, InputSource)`, the only path from any input to the seat; logs `Human` input (output pixels, keysym name + typed char, window under the pointer). Hit-testing, click-to-focus, held buttons/touches (`release_all`), popup-grab workarounds.

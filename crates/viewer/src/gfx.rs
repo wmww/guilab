@@ -25,6 +25,8 @@ pub struct Gfx {
     gl: Arc<glow::Context>,
     fbos: (glow::Framebuffer, glow::Framebuffer),
     mirrors: HashMap<String, Mirror>,
+    /// Session frames that come as CPU images (pixman sessions), by key: (seq, texture).
+    cpu: HashMap<String, (u64, egui::TextureHandle)>,
 }
 
 impl Gfx {
@@ -43,7 +45,7 @@ impl Gfx {
                     s.debug.show_unaligned = false;
                     s.debug.warn_if_rect_changes_id = false;
                 });
-                Ok(Gfx { ctx, painter, gl, fbos, mirrors: HashMap::new() })
+                Ok(Gfx { ctx, painter, gl, fbos, mirrors: HashMap::new(), cpu: HashMap::new() })
             })
             .context("GL context")?
     }
@@ -108,7 +110,28 @@ impl Gfx {
     }
 
     /// Forgets mirrors whose key isn't in `keep`.
+    /// An egui texture showing a CPU frame (updated when `seq` changes).
+    pub fn cpu_texture(&mut self, key: &str, image: &egui::ColorImage, seq: u64, nearest: bool) -> egui::TextureId {
+        let opts = if nearest { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
+        match self.cpu.get_mut(key) {
+            Some((s, h)) => {
+                if *s != seq {
+                    h.set(image.clone(), opts);
+                    *s = seq;
+                }
+                h.id()
+            }
+            None => {
+                let h = self.ctx.load_texture(format!("session-{key}"), image.clone(), opts);
+                let id = h.id();
+                self.cpu.insert(key.to_string(), (seq, h));
+                id
+            }
+        }
+    }
+
     pub fn retain_mirrors(&mut self, keep: impl Fn(&str) -> bool) {
+        self.cpu.retain(|k, _| keep(k));
         let gone: Vec<String> = self.mirrors.keys().filter(|k| !keep(k)).cloned().collect();
         for k in gone {
             let m = self.mirrors.remove(&k).unwrap();

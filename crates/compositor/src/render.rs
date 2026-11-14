@@ -134,6 +134,15 @@ pub struct SurfaceImage {
     pub origin: (i32, i32),
 }
 
+/// A GLES renderer on Mesa's software EGL device (llvmpipe), for the viewer when sessions
+/// render with pixman (no render node).
+pub fn software_gles() -> anyhow::Result<GlesRenderer> {
+    let dev = EGLDevice::enumerate().context("enumerating EGL devices")?.find(|d| d.is_software()).context("no software EGL device (Mesa llvmpipe)")?;
+    let egl = unsafe { EGLDisplay::new(dev) }.context("egl display on the software device")?;
+    let ctx = EGLContext::new(&egl).context("egl context")?;
+    unsafe { GlesRenderer::new(ctx) }.context("gles renderer")
+}
+
 enum Target {
     Gles(GlesTexture),
     Pixman(pixman::Image<'static, 'static>),

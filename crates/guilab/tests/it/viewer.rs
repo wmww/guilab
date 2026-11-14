@@ -98,6 +98,10 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     }
     let (v, log) = viewed(env);
     let (ok, out, err) = v.show(&sock);
+    if !ok && err.contains("software GLES failed") {
+        eprintln!("skipping: no software EGL device: {err}");
+        return;
+    }
     assert!(ok && out.contains("viewer shown"), "{out}{err}");
     let info = v.info().viewer.expect("viewer info");
     assert_eq!(info.buffers, buffers);
@@ -134,6 +138,12 @@ fn click_through_dmabuf() {
 #[test]
 fn click_through_shm() {
     click_through(&[("GUILAB_VIEWER_SHM", "1")], "shm");
+}
+
+/// Sessions on pixman: the viewer draws with its own software GLES (llvmpipe).
+#[test]
+fn click_through_pixman() {
+    click_through(&[("GUILAB_RENDERER", "pixman")], "shm");
 }
 
 /// Showing and hiding, also mid-connect, never touches sessions.
