@@ -18,6 +18,7 @@ pub mod render;
 mod session;
 mod shell;
 mod tree;
+mod xscale;
 mod xwayland;
 
 pub use actions::Chain;

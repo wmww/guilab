@@ -18,3 +18,4 @@ png.workspace = true
 libc.workspace = true
 anyhow.workspace = true
 xcursor = "0.3"
+x11rb = { version = "0.14", features = ["res"] }

@@ -8,6 +8,7 @@
   - `shell.rs`: xdg-shell + decoration. Window policy, focus and stacking for Wayland and X windows (`focus_window`, `parent_window`, `move_window`), popups (anvil's unconstrain + grab), `relayout` after output changes.
   - `xwayland.rs`: per-session Xwayland + `XwmHandler` (from anvil's `shell/x11.rs`): spawn on our display range, X window policy (`x_place`), override-redirect stacking (`xw.or`), clipboard/primary bridging.
   - `grabs.rs`: `MoveGrab`, the pointer grab for interactive window moves.
+  - `xscale.rs`: our own x11rb connection to the session's X server (`XConn`): HiDPI for X clients (`x_apply_scale`: client scale, XSETTINGS, Xft.dpi, root cursor; on ready and on scale change) and pids via X-Resource for windows without `_NET_WM_PID`.
   - `focus.rs`: `KbFocus` (keyboard focus: `WlSurface` or `X11Surface`; the X arm does SetInputFocus/WM_TAKE_FOCUS). Pointer/touch focus stay `WlSurface` (smithay's X11Surface targets only forward to it; X menus grab inside Xwayland).
   - `cursor.rs`: the apps' cursor (`AppCursor`: named, hidden, or a rendered cursor surface), theme cursors, drawing it into `screenshot --cursor`.
   - `frame.rs`: `tick()` (render, presentation feedback, frame callbacks), settle detection, PNG writing, `set_output`.

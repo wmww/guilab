@@ -114,10 +114,10 @@ impl Session {
 
     /// Picks a new float's offset: the first cascade step (from the center) where it
     /// neither covers nor hides behind another floating window entirely, nor shares its
-    /// top-left (either could leave one unreachable). `base`: its spot with no offset.
-    pub(crate) fn cascade(&self, w: &Window, base: Point<i32, Logical>) {
+    /// top-left (either could leave one unreachable). `base`: its rect with no offset.
+    pub(crate) fn cascade(&self, w: &Window, base: Rectangle<i32, Logical>) {
         let area = self.output_rect();
-        let size = w.geometry().size;
+        let (base, size) = (base.loc, base.size);
         let others: Vec<Rectangle<i32, Logical>> = self
             .space
             .elements()
@@ -127,12 +127,18 @@ impl Session {
         let clash = |r: Rectangle<i32, Logical>| {
             others.iter().any(|o| o.contains_rect(r) || r.contains_rect(*o) || ((o.loc.x - r.loc.x).abs() < CASCADE / 2 && (o.loc.y - r.loc.y).abs() < CASCADE / 2))
         };
-        let fits = |p: Point<i32, Logical>| p.x + size.w <= area.loc.x + area.size.w && p.y + size.h <= area.loc.y + area.size.h;
-        let off = (1..16)
-            .map(|k| Point::<i32, Logical>::from((k * CASCADE, k * CASCADE)))
-            .take_while(|o| fits(base + *o))
-            .find(|o| !clash(Rectangle::new(base + *o, size)));
-        let off = if clash(Rectangle::new(base, size)) { off.unwrap_or_default() } else { Point::default() };
+        // Down-right first (a classic cascade), then other directions, nearest first; each
+        // spot kept on screen.
+        const DIRS: [(i32, i32); 8] = [(1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)];
+        let off = if clash(Rectangle::new(base, size)) {
+            (1..32)
+                .flat_map(|k| DIRS.iter().map(move |(dx, dy)| Point::<i32, Logical>::from((dx * k * CASCADE, dy * k * CASCADE))))
+                .map(|o| clamp_on(area, size, base + o) - base)
+                .find(|o| !clash(Rectangle::new(base + *o, size)))
+                .unwrap_or_default()
+        } else {
+            Point::default()
+        };
         if let Some(st) = w.user_data().get::<WindowState>() {
             st.offset.set(off);
         }
@@ -164,7 +170,7 @@ impl Session {
             } else if has_buffer(surface) {
                 self.unmapped.remove(idx);
                 if !is_tiled(&w) {
-                    self.cascade(&w, self.float_loc(&w));
+                    self.cascade(&w, Rectangle::new(self.float_loc(&w), w.geometry().size));
                 }
                 let loc = if is_tiled(&w) { self.output_rect().loc } else { self.float_loc(&w) };
                 self.space.map_element(w.clone(), loc, false);

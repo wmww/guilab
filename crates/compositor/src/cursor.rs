@@ -148,7 +148,7 @@ impl Session {
 
 /// A named cursor from the xcursor theme, at the image size closest to `XCURSOR_SIZE`
 /// (default 24) times `scale`, premultiplied.
-fn load_named(icon: CursorIcon, scale: f64) -> Option<CursorImage> {
+pub(crate) fn load_named(icon: CursorIcon, scale: f64) -> Option<CursorImage> {
     let theme = std::env::var("XCURSOR_THEME").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "default".into());
     let size = std::env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(24.0);
     let want = (size * scale).round() as u32;

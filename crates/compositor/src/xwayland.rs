@@ -54,11 +54,15 @@ pub struct Xw {
     pub wm: Option<X11Wm>,
     /// Mapped override-redirect windows, bottom to top.
     pub or: Vec<Window>,
+    /// Xwayland's Wayland client (for its client scale).
+    pub client: Option<smithay::reexports::wayland_server::Client>,
+    /// Our own X connection (Xft.dpi, client pids).
+    pub conn: Option<crate::xscale::XConn>,
 }
 
 impl Default for Xw {
     fn default() -> Self {
-        Xw { state: XState::Off, wm: None, or: Vec::new() }
+        Xw { state: XState::Off, wm: None, or: Vec::new(), client: None, conn: None }
     }
 }
 
@@ -91,6 +95,12 @@ impl Session {
                         Ok(wm) => {
                             tracing::info!("{}: Xwayland ready on :{display_number}", s.name);
                             s.xw.wm = Some(wm);
+                            s.xw.client = Some(client.clone());
+                            match crate::xscale::XConn::connect(display_number) {
+                                Ok(c) => s.xw.conn = Some(c),
+                                Err(e) => tracing::warn!("{}: own X connection: {e:#}", s.name),
+                            }
+                            s.x_apply_scale();
                             s.xw.state = XState::Ready(display_number);
                         }
                         Err(e) => s.xw.state = XState::Failed(format!("X11 window manager: {e}")),
@@ -213,7 +223,7 @@ impl XwmHandler for Session {
         if tiled {
             let _ = x.set_maximized(true);
         } else {
-            let base = self.x_rect(&w, &x).loc + w.geometry().loc;
+            let base = self.x_rect(&w, &x);
             self.cascade(&w, base);
         }
         self.x_place(&w);
@@ -375,6 +385,8 @@ impl XwmHandler for Session {
     fn disconnected(&mut self, _: XwmId) {
         tracing::warn!("{}: Xwayland went away", self.name);
         self.xw.wm = None;
+        self.xw.conn = None;
+        self.xw.client = None;
         self.xw.state = XState::Failed("Xwayland exited (see xwayland.log in the session dir)".into());
         let gone: Vec<Window> = self.space.elements().filter(|w| w.x11_surface().is_some()).cloned().collect();
         for w in gone {

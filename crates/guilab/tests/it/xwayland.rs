@@ -165,3 +165,56 @@ fn x11_parallel_sessions_and_cleanup() {
     assert!(alive(xb[0]));
     lab.run(&["-S", "b", "end"]);
 }
+
+/// HiDPI: X clients render at the output scale (X pixels = output pixels), so input and
+/// layout work the same as at scale 1; windows without `_NET_WM_PID` get a pid from
+/// X-Resource.
+#[test]
+fn x11_hidpi_and_pids() {
+    if !xwayland() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-x", "-s", "1600x1000", "--scale", "2"]);
+    let (log, l) = tk(&lab, "s1");
+    let tree = lab.wait_tree("s1", 5, |t| !kind(t, "x11").is_empty());
+    assert_eq!(rect(kind(&tree, "x11")[0]), (0, 0, 1600, 1000));
+    // Tk reports X pixels: the entry spans the 1600 px wide window.
+    let entry: Vec<i64> = l.lines().find(|x| x.starts_with("pos entry ")).unwrap().split(' ').skip(2).map(|v| v.parse().unwrap()).collect();
+    assert!(entry[2] > 1500, "the X window isn't at the output's pixel size: {entry:?}");
+    let t = lab.lock();
+    let (ex, ey) = center(&l, "entry", 1.0);
+    lab.input(&t, &["move", &ex, &ey, "click", "type", "hi"]);
+    wait_log(&log, "edit 'hi'", 5);
+    if crate::have("xeyes") {
+        lab.run(&["-t", &t, "run", "--", "xeyes"]);
+        let tree = lab.wait_tree("s1", 10, |t| kind(t, "x11").iter().any(|n| n["class"] == "XEyes"));
+        let eyes = kind(&tree, "x11").into_iter().find(|n| n["class"] == "XEyes").unwrap().clone();
+        assert!(eyes["pid"].as_u64().is_some(), "no pid for xeyes: {eyes}");
+    }
+}
+
+/// Drag and drop from an X app (GTK4 on X11) to a Wayland app (GTK4).
+#[test]
+fn x11_to_wayland_dnd() {
+    if !xwayland() || !gtk4() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-x", "-s", "1600x1000"]);
+    let wl = lab.json(&["run", "--", "python3", &app("gtk_input.py")])["log"].as_str().unwrap().to_string();
+    let wll = wait_log(&wl, "ready", 15);
+    let x = lab.json(&["run", "--", "env", "GDK_BACKEND=x11", "python3", &app("gtk_input.py")])["log"].as_str().unwrap().to_string();
+    let xl = wait_log(&x, "ready", 15);
+    // The X window floats over the tiled Wayland one; its drag source, the Wayland drop
+    // target (bottom right) stays visible.
+    let tree = lab.wait_tree("s1", 5, |t| !kind(t, "x11").is_empty());
+    let (wx, wy, _, _) = rect(kind(&tree, "x11")[0]);
+    let (sx, sy) = center(&xl, "drag", 1.0);
+    let (sx, sy) = (wx + sx.parse::<i64>().unwrap(), wy + sy.parse::<i64>().unwrap());
+    let (dx, dy) = center(&wll, "drop", 1.0);
+    let s = |v: i64| v.to_string();
+    let t = lab.lock();
+    lab.input(&t, &["move", &s(sx), &s(sy), "down", "move", &s(sx + 15), &s(sy + 10), "100", "move", &dx, &dy, "400", "sleep", "300", "up"]);
+    wait_log(&wl, "dropped payload", 5);
+}

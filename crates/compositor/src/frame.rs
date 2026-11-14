@@ -228,6 +228,7 @@ impl Session {
         self.space.map_output(&self.output, (0, 0));
 
         if scale.is_some() {
+            self.x_apply_scale();
             let s = self.output.current_scale();
             let transform = self.output.current_transform();
             for w in self.space.elements().chain(self.unmapped.iter()) {

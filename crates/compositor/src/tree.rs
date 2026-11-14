@@ -90,7 +90,7 @@ impl Session {
                 node.title = nonempty(x.title());
                 node.class = nonempty(x.class());
                 node.xid = Some(x.window_id());
-                node.pid = x.pid();
+                node.pid = x.pid().or_else(|| self.xw.conn.as_ref()?.pid(x.window_id()));
                 out.push(node);
                 continue;
             }
