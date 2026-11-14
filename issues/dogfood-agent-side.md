@@ -40,3 +40,6 @@ The outer guilab runs the old build for the whole session (it must stay up). Key
 
 ## The viewer can lose a click that arrives with the pointer's first move
 `debug input move X Y click` on a viewer that had never seen the pointer didn't focus the chat box; `move X Y sleep 100 click` did. Humans rarely do that, but scripted viewer tests must add a pause.
+
+## A human message was silently lost: delivered on `say`'s stderr, which I discarded
+Severity: high. Every command prints "events since your previous command" on stderr, and that delivery *consumes* them: a later `poll` won't return them. I ran `guilab say "..." 2>&1 | tail -1` (to keep output short); a human message (with an image and two notes) that arrived just before was printed in the part I cut, and `poll` then never woke for it. The human had to ask 45 minutes later whether their message got lost. Agents routinely trim or drop output. Suggest: human messages (wake events) stay pending until a `poll` (or an explicit ack) returns them, even if another command's stderr already showed them; or at least `poll` should return immediately if a message arrived since the last *poll*. Also worth a line in the skill doc: "never discard guilab stderr".
