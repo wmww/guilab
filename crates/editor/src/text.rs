@@ -191,7 +191,7 @@ impl Editor {
         };
         let l = fonts.layout(&ty.text, ty.size, Some(ty.wrap));
         let em = ty.size * z;
-        let text_w = (l.size[0] * z).max(em * 0.6) + 2.0;
+        let text_w = (l.size[0] * z).max(em * 0.6);
         let backing = c32(guilab_image::draw::text_backing(ty.color));
         let r = egui::Area::new(self.id.with("text-area"))
             .fixed_pos(xf.apply(ty.at) - Vec2::splat(pad * z))

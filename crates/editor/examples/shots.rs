@@ -187,9 +187,11 @@ fn scenarios(d: &mut Driver, filter: &str) {
         d.run(vec![ev::key(Key::Escape, Modifiers::NONE)]);
     }
     if want("insert") {
-        d.host.insert(sample_svg());
         d.host.insert(sample_raster(300, 200));
+        d.host.insert(sample_svg());
         d.tool(Tool::Move);
+        // Move the SVG off the raster.
+        d.drag(d.at(800.0, 500.0), d.at(800.0, 300.0), true);
         d.mv(d.at(800.0, 520.0));
         d.snap("11-insert-hover-picture");
         let c = d.host.xf.apply(guilab_image::pt(950.0, 600.0));
@@ -231,5 +233,14 @@ fn main() {
     for theme in [Theme::Dark, Theme::Light] {
         let mut d = Driver::new(&dir, theme, 1.0);
         scenarios(&mut d, &filter);
+    }
+    // HiDPI: crispness of marks, text and key points at 2x.
+    if filter.is_empty() || filter == "hidpi" {
+        let mut d = Driver::new(&dir, Theme::Dark, 2.0);
+        d.theme = "dark-2x";
+        draw_marks(&mut d);
+        d.tool(Tool::Move);
+        d.mv(d.at(700.0, 183.0));
+        d.snap("18-hidpi");
     }
 }

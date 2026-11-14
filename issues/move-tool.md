@@ -1,6 +1,6 @@
 # Move tool behavior
 
-Spec from the user. The dogfood session started a move tool; finish it to match this.
+Spec from the user. Built as specified in `guilab-editor` (phase 4, `image-system-design.md`); the viewer still uses the old markup move tool until phase 6 wires the editor in. Delete this issue then.
 
 Drag with the move tool, by what's under the pointer (first match wins):
 1. **Key point** → reshape the item.

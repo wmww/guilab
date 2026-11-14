@@ -2,7 +2,7 @@
 
 The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
 
-**Status:** phases 1 (`crates/image`), 2 (`crates/kit`) and 3 (agent side: server store, CLI, protocol) are built and tested; the core, server and CLI sections below describe the code as it is. Phases 4–7 not started.
+**Status:** phases 1 (`crates/image`), 2 (`crates/kit`), 3 (agent side: server store, CLI, protocol) and 4 (`crates/editor`, not wired into the viewer yet) are built and tested; those sections describe the code as it is. Phases 5–7 not started.
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -99,7 +99,7 @@ impl Assets for Store {}
 
 ### Invariant: renderings never become editable
 - `render()` returns `Rendered`, which can be read as pixels, encoded as PNG or uploaded as a texture. There's no `Rendered → Raster`.
-- Only two functions create a `Raster`. `Raster::from_capture(w, h, rgba, at_ms)` is called from exactly one place: the server's capture of a live session frame (keep it that way in review). `asset::load_file(path)` is the other.
+- Only two functions create a `Raster`. `Raster::from_capture(w, h, rgba, at_ms)` is called from exactly one place in guilab: the server's capture of a live session frame (keep it that way in review; test fixtures and the editor demo's synthetic screenshots are the only other callers). `asset::load_file(path)` is the other.
 - Every PNG that guilab writes from a rendering (the `image`/`screenshot`/`make` outputs, the viewer's File → Save) gets a `tEXt` chunk `guilab-render=<image id>`. `Rendered::png(Option<ImageId>)` is the only PNG encoder and always marks (`draft` without an id), so there's no unmarked path. `load_file` refuses such files (chunk found by a raw chunk scan) with `LoadError::Rendering(id)`, and the CLI says "that file is a rendering of image k3f9; use --from k3f9". Tools outside guilab that strip the chunk (GIMP, ImageMagick) are the allowed way around it, as the spec says.
 - The editor only opens `Body`s built from store images or drafts. Thumbnails and the main view are always `Rendered`/textures, never inputs.
 
@@ -113,7 +113,7 @@ impl Assets for Store {}
   - `drag_key(k, to, Mods { shift }, scale, fonts) -> Element`: the move tool's reshape rules (below)
   - `translated(d)`
   - `fit_to(rect, scale, fonts)`: pen points scaled into the rect (each axis); text scales `size` and `width` by the height ratio, at the rect's top-left
-- `draw::display_list(&Body, &Fonts, marks: bool) -> Vec<(usize, Prim)>`, where the usize is the element index:
+- `draw::display_list(&Body, &Fonts, marks: bool) -> Vec<(usize, Prim)>`, where the usize is the element index (`element_prims(el, scale, fonts, out)` for one element):
   ```rust
   pub enum Prim {
       Raster { asset: AssetId, dst: Rect, src: Option<IRect> },
@@ -202,53 +202,62 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
-Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot), hover_outline, me/agent; sizes incl. thumb_h, feed_thumb_h, faint_scale, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`, `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`.
+Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent; sizes incl. thumb_h, feed_thumb_h, faint_scale, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`, `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
 
-## guilab-editor
+## guilab-editor (built)
 ```rust
-pub enum Tool { Interact, Move, Pen, Box, Ellipse, Line, Arrow, Text, Crop }
-pub struct Editor { pub tool: Tool, pub color: Color, /* interaction state, texture cache, Fonts */ }
+pub enum Tool { Interact, Move, Pen, Box, Ellipse, Line, Arrow, Text, Crop }   // key(): V P R O L A T C
+pub struct Xf { pub offset: Vec2, pub zoom: f32 }    // canvas px -> screen points; Xf::fit(region, rect, max_zoom)
+pub struct Editor { pub tool: Tool, pub color: Color, /* gesture, typing, pending marks, textures, Fonts */ }
 pub struct Canvas<'a> {
-    pub doc: Option<&'a mut Doc>,     // None = live view: a drawing tool press asks for a doc
+    pub doc: Option<&'a mut Doc>,     // None = live view: a drawing press asks for a doc
     pub assets: &'a dyn Assets,
-    pub xf: Xf,                       // canvas px -> screen points (host owns zoom/pan)
+    pub xf: Xf,                       // host owns zoom/pan
     pub clip: Rect,                   // screen area the canvas owns
     pub new_doc: ([u32; 2], f32),     // canvas size and scale a new doc would have (live view)
-    pub visible: bool,                // false while a flight shows the image instead
+    pub visible: bool,                // false while a flight shows the image instead: no paint, no input
 }
 pub struct CanvasOut {
-    pub edits: Vec<Edit>,             // already applied to doc; the host records them
-    pub begin: bool,                  // a drawing press with doc None: create a doc (capture) now
+    pub edits: Vec<Edit>,             // already applied to doc; the host records them (one history group per frame)
+    pub begin: bool,                  // a drawing press (or text click) with doc None: create a doc now
+    pub abandon: bool,                // what asked for `begin` ended with nothing (stray click, Esc): drop that doc
     pub pan: egui::Vec2,              // move tool dragging empty space
-    pub cursor: Option<egui::CursorIcon>,
-    pub wants_keys: bool,             // text editing, or a doc is open
+    pub cursor: Option<egui::CursorIcon>,   // also set on the context
+    pub wants_keys: bool,             // a doc is open or text is being typed
+    pub shown: Option<Rect>,          // screen rect of view_region (flights, glow)
 }
+pub enum Hit { Key(ElemKey, geom::Key), Item(ElemKey), None }
 impl Editor {
-    pub fn new(fonts: Arc<Fonts>) -> Editor;
-    pub fn toolbar(&mut self, ui: &mut Ui) -> Option<Tool>;          // Some = the tool changed
-    pub fn canvas(&mut self, ui: &mut Ui, c: Canvas) -> CanvasOut;
-    pub fn insert(&mut self, doc: &mut Doc, asset: AssetId, natural: Size, center: Pt) -> Edit; // File > Insert image
-    pub fn delete_hovered(&mut self, doc: &mut Doc) -> Option<Edit>; // Delete/Backspace with Move (see open questions)
+    pub fn new(id, fonts: Arc<Fonts>) -> Editor;
+    pub fn toolbar(&mut self, ui) -> Option<Tool>;                 // Some = the tool changed
+    pub fn canvas(&mut self, ui, c: Canvas) -> CanvasOut;
+    pub fn view_region(&self, canvas, crop) -> IRect;             // crop, or the whole canvas with the Crop tool
+    pub fn insert(&mut self, doc, Picture::{Raster,Svg}(AssetId), natural: Size, center: Pt, fit: IRect) -> Edit;
+    pub fn delete_hovered(&mut self, doc) -> Option<Edit>;
+    pub fn commit(&mut self, doc) -> Vec<Edit>;                    // finish typing/pending marks (before send)
+    pub fn reset(&mut self);                                       // host switched docs or dropped the begun one
+    pub fn pick_color(&mut self, c); pub fn busy(&self) -> bool; pub fn hovered(&self) -> Hit;
 }
 ```
-- It paints `display_list(doc)`. Rasters are textures cached per `AssetId` (immutable, so the cache is exact). SVGs are textures from `svg_pixmap` at the on-screen size, rounded up to √2 steps. Marks are egui shapes, crisp at any zoom. Text uses an egui font family `"image-text"` registered with the same bytes as core.
-- A drawing press with no doc keeps the in-progress mark in the editor's own state and returns `begin`. The host creates the doc this frame (or next), and the mark is committed into it as `Edit::Add` at release. A tiny mark (accidental click) commits nothing, and the host then drops the doc (see the viewer flow).
-- Undo/redo keys are the host's (Edit menu, Ctrl+Z), since history is the host's. Text editing is in place: double-click a text with Move or Text, and committing makes one `Replace`.
-- Crop tool: drag a rect to get `Edit::Crop`. While it's selected, the whole canvas shows, dimmed outside the crop, and the toolbar shows "Show all" (crop none).
+- Painting: per element `element_prims` (core), so a dragged element is painted from the gesture's copy and a text being edited is hidden. Rasters are textures per (asset, filter): linear + mipmaps, nearest at ≥ 2 screen px per canvas px. SVGs are rendered per asset at the on-screen size rounded up to √2 steps. Unused textures go after 300 frames. Marks are egui shapes: open strokes get disc caps and discs at sharp turns (egui strokes are butt/miter), ellipses are our own polyline (egui's is faceted). Text: each core line laid out by egui unwrapped, in font family `guilab-image` (`install_fonts`, the same bytes as core) with core's line height; tested against the CPU render (`text_matches_cpu_render`).
+- Input: the canvas reads raw pointer events in order (several per frame work) and owns a press when it's inside `clip` on its own layer (`layer_id_at`), so toasts and the text field on top keep theirs. Double-click = second press within 0.35 s and 6 pt.
+- Drawing: press starts the mark (only inside the view region; points clamped to it), release commits `Edit::Add`. Under 3 screen pt = stray click, nothing. Shift: square/circle, lines at 45°. With no doc the mark stays in the editor (`pending`) until a doc arrives. Esc cancels a drag.
+- Text: Text tool click on empty space opens a box with its first line centered on the click (moved left so 6 ems fit before the right edge), on an existing text edits it (caret at the click); double-click with Move or a drawing tool edits the text under the pointer with the clicked word selected, or (drawing tools) opens new text. Enter commits, Shift+Enter is a newline, Esc cancels, a press outside commits (with the Text tool that's all the press does), a tool change commits. Wraps at 16 ems or the region's right edge; `width` is stored only when it wrapped (an existing width is kept). Growing past the region's bottom pushes it up. Committing empty text removes an existing one. The egui field shows core's line breaks: the space at each core break becomes `\n` in the galley (same char count, so cursor mapping holds).
+- Crop tool: the whole canvas shows, dimmed outside the crop (`crop_dim`), with handles at the corners and edge midpoints. Corners and edges (within `hit_slop`) resize, inside moves (kept inside the canvas), elsewhere draws a new crop (inside too when there's no crop yet). Whole pixels; a crop equal to the canvas is stored as none. A toast in the canvas says "Drag to crop" with **Show all** (crop none), disabled without a crop.
+- Keys while the canvas has them and no text has focus: Delete/Backspace (Move: remove hovered), Esc (cancel drag), tool letters. Undo/redo stay the host's.
+- Host contract: switching docs → `reset()`; the editor checks every frame that the elements its gesture/typing refer to still exist (host undo mid-drag just ends the drag).
 
 ### Move tool (spec: `move-tool.md`)
-On press, the first match wins:
-1. **Key point** (hit radius `key_point_hit_r` < drawn radius) → reshape:
-   - box, ellipse and pictures: corner resize. Pictures keep their aspect ratio unless Shift is held; marks keep it only with Shift.
-   - text: scale `size` and `width` by the height ratio, anchored at the opposite corner.
-   - pen: scale the points into the new bbox.
-   - line/arrow: move that end.
-   
-   Corners can't cross the opposite one (min 4 px).
-2. **Item or near it** (`hit_slop` screen px + half stroke; topmost first, i.e. last in the list) → move it. The locked base is never hit.
-3. **Otherwise** (empty canvas, outside it, or the live view with no doc) → `pan`.
+On press, the first match wins (`hit_test`):
+1. **Key point** within `key_point_hit_r` (4 pt; drawn at `key_point_r` 5 pt), topmost element first, nearest point of that element → reshape (`Element::drag_key`): pictures keep aspect unless Shift, marks keep it only with Shift; text scales its size; pen scales points; line/arrow move that end. The grab offset is kept, so nothing jumps.
+2. **Item or near it** (`hit_slop` 6 pt + half stroke; topmost first) → move; Shift locks to an axis. The locked base never hits.
+3. **Otherwise** → `pan`.
 
-Key points are drawn as small circles only while Move is selected, and a hovered one lights up (`key_point_hot`). The item a drag would move gets `hover_outline` (a glow along its bounds). Hover and drag use the same hit order. Cursor: `Move` over an item, `Grab`/`Grabbing` for pan, resize cursors on key points, and never the arrow over the app (`viewer-cursors.md`).
+Key points show on every element (not the base or a text being edited) while Move is selected; the hovered one lights up (`key_point_hot`). The element a drag would move (or is moving) glows: strokes get a wider `hover_outline` stroke underneath, text and pictures an outline around their bounds; its key points draw on top. Cursors: `AllScroll` over/moving an item (Adwaita draws `Move` as the arrow), `ResizeNwSe`/`ResizeNeSw` on corners by direction, `Crosshair` on line ends, `Grab`/`Grabbing` for pan; drawing tools `Crosshair`, Text `Text`, Crop by handle. Outside the view region (not panning) the host's cursor.
+
+### Demo host and screenshots
+- `guilab_editor::demo::DemoHost`: a complete host (doc, `Store` of assets, `History<Edit>`, fit/wheel zoom/middle-drag pan, Ctrl+Z / Ctrl+Shift+Z, live view → doc on `begin`, dropped on `abandon`). Tests (`src/tests.rs`) drive it through `guilab_kit::headless::Headless` with synthetic events.
+- `examples/shots.rs`: scripted scenarios rendered headless (CPU) in both themes and at 2x, with the pointer and cursor name marked: `target/debug/examples/shots [DIR] [FILTER]` after `cargo test --workspace` (default `target/editor-shots`).
 
 ## guilab-chat
 ```rust
@@ -376,7 +385,7 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 | 1 | **(done)** **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
 | 2 | **(done)** **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
 | 3 | **(done)** **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in message/agent events, feed renders from the store, skill doc "Images", `tests/it/images.rs`. Also (beyond the original plan): human messages already go through the store (the current viewer's marks are rebuilt as elements on the frozen base, so nothing baked enters it), `Annotation` is gone, `debug message --draw`, and the `screen` id on image-less messages. Tested end to end on 2 fresh agents. | 1 | proto, server, guilab, viewer, markup, skill |
-| 4 | **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
+| 4 | **(done)** **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
 | 5 | **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
 | 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured (replaces `Freeze` + sketch tag), Message with drafts → freeze (replaces the markup-mark conversion in `server/src/viewer.rs`), the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` already checks the listing) and the skill doc. | 3, 4, 5 | viewer, server, skill |
 | 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |

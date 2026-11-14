@@ -1,6 +1,6 @@
 # Image system
 
-Phases 1 (core crate `crates/image`) and 3 (agent side: store in the server, CLI, protocol, skill doc) done; 2, 4–7 queued. The UI side is in `chat-image-flow.md`. This file is the user's spec. **The design, phases and parallel plan are in `notes/image-system-design.md`**, and the tested agent doc text is the skill doc's "Images" section. When built, move the parts that end up true into notes.
+Phases 1 (core crate `crates/image`), 2 (kit), 3 (agent side: store in the server, CLI, protocol, skill doc) and 4 (editor widget `crates/editor`) done; 5–7 queued. The UI side is in `chat-image-flow.md`. This file is the user's spec. **The design, phases and parallel plan are in `notes/image-system-design.md`**, and the tested agent doc text is the skill doc's "Images" section. When built, move the parts that end up true into notes.
 
 ## Model
 - **Raster**: immutable pixels with a random id. Made by screenshots (human or agent) and by inserted files. Shared by every image that uses it; that sharing is the link between related images.
@@ -38,4 +38,4 @@ Split so each part could be pulled into another app (an egui harness, a mobile i
 ## Open questions for the user
 The design assumes these defaults; none blocks phases 1–3.
 - **Deleting an element in the editor** (the spec says pictures can be "deleted as a unit", but there's no UI for it): Delete/Backspace removes the item under the pointer while the Move tool is selected.
-- **Cropping in the editor** (the spec says crops are non-destructive and can be undone, but there's no UI for it): a Crop tool. Drag a rectangle; while the tool is selected, the whole canvas shows dimmed outside the crop, with a "Show all" button to uncrop.
+- **Cropping in the editor** (the spec says crops are non-destructive and can be undone, but there's no UI for it): a Crop tool. Drag a rectangle (or its edges/corners, or move it); while the tool is selected, the whole canvas shows dimmed outside the crop, with a "Show all" button (in a bar over the canvas) to uncrop.
