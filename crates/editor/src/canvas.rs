@@ -194,10 +194,11 @@ pub(crate) fn apply(doc: &mut Doc, e: Result<Edit, EditError>, out: &mut CanvasO
 
 impl Editor {
     /// Paints the doc (or, without one, what's being drawn) and handles primary-button
-    /// input over `c.clip`. The host keeps middle-drag, wheel zoom and Undo for itself.
+    /// input over `c.clip` (see [`Canvas`] for the input contract). The host keeps
+    /// middle-drag, wheel zoom and Undo for itself.
     pub fn canvas(&mut self, ui: &mut Ui, c: Canvas) -> CanvasOut {
         let mut out = CanvasOut::default();
-        let Canvas { mut doc, xf, clip, new_doc, visible } = c;
+        let Canvas { mut doc, xf, clip, new_doc, visible, input } = c;
         self.sync_doc(doc.as_ref().map(|d| d.id()));
         let t = Theme::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -209,11 +210,21 @@ impl Editor {
             None => (new_doc.0, new_doc.1, None),
         };
         let region = self.view_region(canvas, crop);
-        out.shown = Some(xf.rect(region.to_rect()));
+        // An empty clip (a collapsed panel) or a degenerate zoom: nothing to show or hit.
+        let visible = visible && clip.is_positive() && xf.zoom.is_finite() && xf.zoom > 0.0;
+        let input = input && visible;
+        if visible {
+            out.shown = Some(xf.rect(region.to_rect()));
+        }
+        // No input means no release either: end a drag now rather than leave it stuck.
+        if !input {
+            self.cancel_gesture(&mut out);
+            self.pointer = None;
+            self.hover = Hit::None;
+        }
         if !visible {
             return out;
         }
-
         // Keep state consistent with a doc that changed under us (undo mid-drag).
         if let Some(d) = &doc {
             let gone = |k: ElemKey| d.index_of(k).is_none();
@@ -246,18 +257,29 @@ impl Editor {
             }
         }
 
-        // Claims the area so egui widgets behind it don't react; input is read raw below.
-        ui.interact(clip, self.id.with("canvas"), Sense::click_and_drag());
+        // The claim: egui's hit test decides whether a press is ours, so widgets above it
+        // (other layers, or host widgets registered after `canvas()`) keep theirs. With
+        // Interact or no input it only senses hover, leaving clicks to what's below. egui
+        // hit-tests against the previous pass, so in the first pass after the claim started
+        // taking presses (a tool change) only the layer decides.
+        let takes = input && self.tool != Tool::Interact;
+        let claim_id = self.id.with("canvas");
+        let was_claimed = ctx.read_response(claim_id).is_some_and(|r| r.sense.senses_drag());
+        let claim = ui.interact(clip, claim_id, if takes { Sense::click_and_drag() } else { Sense::hover() });
+        let hit = claim.hovered();
         let layer = ui.layer_id();
-        // Our own text field's area counts as ours once typing ended (it lingers a frame).
-        let text_layer = egui::LayerId::new(egui::Order::Foreground, self.id.with("text-area"));
+        // Our text field's area lingers in egui's hit test for a pass after typing ended.
+        let text_layer = egui::LayerId::new(egui::Order::Middle, self.id.with("text-area"));
         let typing = self.typing.is_some();
-        let owns = |p: Pos2| clip.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == layer || l == text_layer && !typing);
+        let owns = |p: Pos2| {
+            let top = ctx.layer_id_at(p);
+            clip.contains(p) && (if was_claimed { hit } else { top.is_none_or(|l| l == layer) } || !typing && top == Some(text_layer))
+        };
         let (events, now, mods) = ui.input(|i| (i.events.clone(), i.time, i.modifiers));
         let keys_free = !ctx.egui_wants_keyboard_input();
 
         // Keys (not while a text field has focus).
-        if self.tool != Tool::Interact && keys_free && self.typing.is_none() && (doc.is_some() || self.busy()) {
+        if takes && keys_free && self.typing.is_none() && (doc.is_some() || self.busy()) {
             // Esc and Delete are taken only when they do something, so the host can use them
             // otherwise (e.g. Esc to close).
             if self.busy() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -282,7 +304,7 @@ impl Editor {
             }
         }
 
-        if self.tool != Tool::Interact {
+        if takes {
             for ev in &events {
                 match ev {
                     Event::PointerMoved(p) => {
@@ -291,7 +313,7 @@ impl Editor {
                     }
                     Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => {
                         self.pointer = Some(*pos);
-                                        if owns(*pos) {
+                        if owns(*pos) {
                             let double = self.last_press.is_some_and(|(t0, p0)| now - t0 < 0.35 && (p0 - *pos).length() < 6.0);
                             self.last_press = if double { None } else { Some((now, *pos)) };
                             self.press(*pos, double, doc.as_deref_mut(), canvas, scale, xf, region, &t, &mut out);
@@ -313,7 +335,7 @@ impl Editor {
         let over = self.pointer.filter(|p| dragging || owns(*p));
         self.hover = Hit::None;
         let mut cursor = None;
-        if self.tool != Tool::Interact
+        if takes
             && let Some(p) = over
         {
             let q = xf.invert(p);
@@ -358,7 +380,7 @@ impl Editor {
 
         self.paint(ui, doc.as_deref(), xf, clip, region, scale, &t, fonts_ready);
         if self.typing.is_some() {
-            self.text_ui(ui, doc.as_deref_mut(), xf, region, scale, fonts_ready, &mut out);
+            self.text_ui(ui, doc.as_deref_mut(), xf, clip, region, scale, fonts_ready, input, &mut out);
         }
         if self.tool == Tool::Crop
             && let Some(d) = doc.as_deref_mut()

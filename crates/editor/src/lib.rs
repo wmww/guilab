@@ -73,7 +73,9 @@ impl Tool {
     }
 }
 
-/// Canvas pixels to screen points: `screen = canvas * zoom + offset`.
+/// Canvas pixels to screen points: `screen = canvas * zoom + offset`. `zoom` is egui points
+/// per canvas px; a host that counts physical pixels per canvas px divides by
+/// `pixels_per_point`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Xf {
     pub offset: Vec2,
@@ -90,9 +92,10 @@ impl Xf {
     pub fn rect(&self, r: Rect) -> egui::Rect {
         egui::Rect::from_min_max(self.apply(r.min), self.apply(r.max()))
     }
-    /// The transform that fits canvas rect `r` centered in `screen`, at most `max_zoom`.
+    /// The transform that fits canvas rect `r` centered in `screen`, at most `max_zoom`, at
+    /// least [`MIN_ZOOM`] (an empty `screen` would give 0).
     pub fn fit(r: IRect, screen: egui::Rect, max_zoom: f32) -> Xf {
-        let zoom = (screen.width() / r.w.max(1) as f32).min(screen.height() / r.h.max(1) as f32).min(max_zoom);
+        let zoom = (screen.width() / r.w.max(1) as f32).min(screen.height() / r.h.max(1) as f32).min(max_zoom).max(MIN_ZOOM);
         let size = egui::vec2(r.w as f32, r.h as f32) * zoom;
         let min = screen.center() - size / 2.0;
         Xf { offset: min.to_vec2() - egui::vec2(r.x as f32, r.y as f32) * zoom, zoom }
@@ -100,18 +103,32 @@ impl Xf {
 }
 
 /// What the host gives the canvas each frame.
+///
+/// Input contract:
+/// - The canvas takes a primary press only where its claim (a widget over `clip`) wins
+///   egui's hit test. Draw host controls over the same area (resize handles, buttons, toasts)
+///   after [`Editor::canvas`], or on a layer above, and they keep their presses.
+/// - That hit test uses the pointer's latest position in the pass, so end an input batch
+///   after each press (the viewer's `take_input` does).
+/// - Host overlays over the canvas that must not take input (a glow) are painted with a layer
+///   painter (`Context::layer_painter`) or on a non-interactive order (`Order::Tooltip`). Any
+///   `Area` registers a widget, even with `interactable(false)`, and blocks presses below it.
 pub struct Canvas<'a> {
     /// `None` = no document yet (e.g. the live app): a drawing press asks for one
     /// ([`CanvasOut::begin`]), and the mark is committed once it's there.
     pub doc: Option<&'a mut Doc>,
     pub xf: Xf,
-    /// The screen area the canvas owns.
+    /// The screen area the canvas paints into and takes input in. Empty (a collapsed panel):
+    /// the canvas shows and takes nothing.
     pub clip: egui::Rect,
     /// Canvas size and scale a new doc would have (sizes marks while `doc` is `None`).
     pub new_doc: ([u32; 2], f32),
     /// false while the host shows the image some other way (e.g. flying to a slot): no
-    /// painting, no input.
+    /// painting, no input. A drag in progress is cancelled (its release can't arrive).
     pub visible: bool,
+    /// false: paint, but take no pointer or key input (e.g. the pass where a press closes a
+    /// menu, or while a dialog is up). Cancels a drag in progress like `visible`.
+    pub input: bool,
 }
 
 #[derive(Debug, Default)]
@@ -186,6 +203,9 @@ pub struct Editor {
     last_press: Option<(f64, Pos2)>,
     textures: paint::Textures,
 }
+
+/// The smallest zoom [`Xf::fit`] gives (an empty screen rect would give 0).
+pub const MIN_ZOOM: f32 = 1e-3;
 
 /// A mark smaller than this (screen points) is a stray click.
 const MIN_MARK: f32 = 3.0;

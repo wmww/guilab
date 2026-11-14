@@ -443,7 +443,7 @@ fn late_doc_gets_pending_mark() {
     let mut edits = Vec::new();
     let frame = |h: &mut Headless, ed: &mut Editor, doc: &mut Option<Doc>, events: Vec<Event>, begun: &mut u32, edits: &mut Vec<Edit>| {
         h.run(events, 0.1, |ui| {
-            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true });
+            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true });
             *begun += out.begin as u32;
             edits.extend(out.edits);
         });
@@ -492,7 +492,7 @@ fn doc_switch_drops_gesture() {
     let mut edits = Vec::new();
     let mut frame = |h: &mut Headless, doc: &mut Doc, events: Vec<Event>| {
         h.run(events, 0.1, |ui| {
-            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true }).edits);
+            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true }).edits);
         });
     };
     let (p, q) = (egui::pos2(50.0, 75.0), egui::pos2(80.0, 75.0));
@@ -579,4 +579,214 @@ fn move_keeps_element_reachable() {
     t.drag((100.0, 150.0), (-900.0, 150.0));
     let b = t.elements()[1].bounds(1.0, t.host.editor.fonts());
     assert!(b.max().x > 0.0, "{b:?}");
+}
+
+/// A bare host around one editor: canvas over `clip`, optional host widgets before and after it.
+struct Bare {
+    h: Headless,
+    ed: crate::Editor,
+    live: (guilab_image::AssetId, std::sync::Arc<guilab_image::Asset>),
+    doc: Option<guilab_image::Doc>,
+    xf: crate::Xf,
+    clip: egui::Rect,
+    visible: bool,
+    input: bool,
+    /// A drag widget registered after the canvas (like the viewer's resize handles).
+    after: Option<egui::Rect>,
+    /// A click widget registered before the canvas.
+    before: Option<egui::Rect>,
+    after_dragged: bool,
+    before_clicked: bool,
+    out: crate::CanvasOut,
+    edits: Vec<Edit>,
+    pan: egui::Vec2,
+}
+
+fn bare_doc(live: &(guilab_image::AssetId, std::sync::Arc<guilab_image::Asset>)) -> guilab_image::Doc {
+    let assets: std::collections::HashMap<_, _> = [live.clone()].into();
+    guilab_image::Doc::open(guilab_image::Body::screenshot(live.0, [400, 300], 1.0), &assets).unwrap()
+}
+
+impl Bare {
+    fn new() -> Bare {
+        let h = Headless::new(vec2(800.0, 600.0), 1.0);
+        guilab_kit::theme::install(&h.ctx);
+        let host = DemoHost::new([400, 300], 1.0);
+        let ed = crate::Editor::new("e", host.editor.fonts().clone());
+        let mut b = Bare {
+            h,
+            ed,
+            live: host.live,
+            doc: None,
+            xf: crate::Xf { offset: vec2(0.0, 0.0), zoom: 1.0 },
+            clip: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0)),
+            visible: true,
+            input: true,
+            after: None,
+            before: None,
+            after_dragged: false,
+            before_clicked: false,
+            out: Default::default(),
+            edits: Vec::new(),
+            pan: egui::Vec2::ZERO,
+        };
+        b.run(vec![]);
+        b.run(vec![]);
+        b
+    }
+
+    fn open(&mut self) {
+        self.doc = Some(bare_doc(&self.live));
+    }
+
+    fn run(&mut self, events: Vec<Event>) -> egui::FullOutput {
+        let Bare { h, ed, live, doc, xf, clip, visible, input, after, before, after_dragged, before_clicked, out, edits, pan } = self;
+        h.run(events, 0.1, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                if let Some(r) = *before {
+                    *before_clicked |= ui.interact(r, egui::Id::new("before"), egui::Sense::click()).clicked();
+                }
+                let o = ed.canvas(ui, crate::Canvas { doc: doc.as_mut(), xf: *xf, clip: *clip, new_doc: ([400, 300], 1.0), visible: *visible, input: *input });
+                if let Some(r) = *after {
+                    *after_dragged |= ui.interact(r, egui::Id::new("after"), egui::Sense::drag()).dragged();
+                }
+                if o.begin && doc.is_none() {
+                    *doc = Some(bare_doc(live));
+                }
+                edits.extend(o.edits.iter().cloned());
+                *pan += o.pan;
+                *out = o;
+            });
+        })
+    }
+
+    fn mv(&mut self, p: Pos2) {
+        self.run(vec![ev::moved(p)]);
+    }
+
+    fn drag(&mut self, a: Pos2, b: Pos2) {
+        self.run(vec![ev::moved(a)]);
+        self.run(vec![ev::press(a)]);
+        self.run(vec![ev::moved(a + (b - a) * 0.5)]);
+        self.run(vec![ev::moved(b)]);
+        self.run(vec![ev::release(b)]);
+    }
+}
+
+/// `input: false` paints the doc but takes no presses (a press that closes a menu).
+#[test]
+fn input_off_paints_but_ignores_presses() {
+    let mut b = Bare::new();
+    b.open();
+    let d = b.doc.as_mut().unwrap();
+    let e = d.add_edit(Element::new(Color::RED, Kind::Box(Rect::new(100.0, 100.0, 100.0, 100.0)))).unwrap();
+    d.apply(&e);
+    b.ed.tool = Tool::Box;
+    b.input = false;
+    b.run(vec![]);
+    b.drag(egui::pos2(250.0, 50.0), egui::pos2(350.0, 150.0));
+    assert!(b.edits.is_empty(), "no drawing while input is off");
+    let out = b.run(vec![]);
+    let img = b.h.render(&out, egui::Color32::BLACK);
+    let px = img.pixels[100 * img.size[0] + 150].to_array();
+    assert!(px[0] > 150 && px[1] < 80, "the box is painted: {px:?}");
+    assert_eq!(b.out.cursor, None, "no tool cursor while input is off");
+    // Back on: the same drag draws.
+    b.input = true;
+    b.run(vec![]);
+    b.drag(egui::pos2(250.0, 50.0), egui::pos2(350.0, 150.0));
+    assert_eq!(b.edits.len(), 1);
+}
+
+/// Hiding the canvas (or turning input off) mid-drag cancels the drag; the next press works.
+#[test]
+fn hiding_mid_drag_cancels() {
+    for hide_by_input in [false, true] {
+        let mut b = Bare::new();
+        b.ed.tool = Tool::Box;
+        let (a, m) = (egui::pos2(50.0, 50.0), egui::pos2(120.0, 120.0));
+        b.run(vec![ev::moved(a)]);
+        b.run(vec![ev::press(a)]);
+        assert!(b.out.begin);
+        b.run(vec![ev::moved(m)]);
+        if hide_by_input {
+            b.input = false;
+        } else {
+            b.visible = false;
+        }
+        b.run(vec![]);
+        assert!(b.out.abandon, "the begun doc is abandoned");
+        b.run(vec![ev::release(m)]);
+        b.doc = None;
+        b.input = true;
+        b.visible = true;
+        b.run(vec![]);
+        assert!(!b.ed.busy());
+        b.drag(egui::pos2(200.0, 200.0), egui::pos2(260.0, 240.0));
+        assert_eq!(b.edits.len(), 1, "the next drag draws (by input: {hide_by_input})");
+    }
+}
+
+/// A host widget drawn after the canvas (a resize handle) gets its presses alone; one drawn
+/// before it still gets clicks while the tool is Interact.
+#[test]
+fn host_widgets_keep_their_presses() {
+    let mut b = Bare::new();
+    b.open();
+    b.ed.tool = Tool::Move;
+    b.after = Some(egui::Rect::from_min_size(egui::pos2(500.0, 100.0), vec2(20.0, 20.0)));
+    b.run(vec![]);
+    b.mv(egui::pos2(510.0, 110.0));
+    assert_eq!(b.out.cursor, None, "the handle's cursor, not the canvas's");
+    b.drag(egui::pos2(510.0, 110.0), egui::pos2(560.0, 110.0));
+    assert!(b.after_dragged, "the handle dragged");
+    assert_eq!(b.pan, vec2(0.0, 0.0), "and the view didn't pan");
+    b.drag(egui::pos2(300.0, 300.0), egui::pos2(320.0, 300.0));
+    assert_eq!(b.pan, vec2(20.0, 0.0), "elsewhere the move tool still pans");
+
+    let mut b = Bare::new();
+    b.before = Some(egui::Rect::from_min_size(egui::pos2(100.0, 100.0), vec2(40.0, 40.0)));
+    b.run(vec![]);
+    let p = egui::pos2(120.0, 120.0);
+    b.run(vec![ev::moved(p)]);
+    b.run(vec![ev::press(p), ev::release(p)]);
+    assert!(b.before_clicked, "Interact leaves clicks to widgets under the canvas");
+}
+
+/// The text field stays inside the canvas clip, below menus.
+#[test]
+fn text_field_is_clipped() {
+    let mut b = Bare::new();
+    b.open();
+    b.clip = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 600.0));
+    b.ed.tool = Tool::Text;
+    b.run(vec![]);
+    let p = egui::pos2(300.0, 100.0);
+    b.run(vec![ev::moved(p)]);
+    b.run(vec![ev::press(p), ev::release(p)]);
+    b.run(vec![]);
+    b.run(vec![ev::text("some words that run past the edge")]);
+    // Pan so the field sticks out of the clip.
+    b.xf.offset = vec2(150.0, 0.0);
+    b.run(vec![]);
+    let out = b.run(vec![]);
+    let img = b.h.render(&out, egui::Color32::from_rgb(0, 0, 255));
+    let w = img.size[0];
+    let leaks = (0..600).flat_map(|y| (402..800).map(move |x| (x, y))).filter(|&(x, y)| img.pixels[y * w + x] != egui::Color32::from_rgb(0, 0, 255)).count();
+    assert_eq!(leaks, 0, "nothing painted outside the clip");
+    let order = b.h.ctx.memory(|m| m.areas().visible_layer_ids().into_iter().find(|l| l.id == egui::Id::new("e").with("text-area")).map(|l| l.order));
+    assert_eq!(order, Some(egui::Order::Middle));
+}
+
+/// An empty view (a collapsed panel) never gives a zero zoom or NaN points.
+#[test]
+fn empty_view_is_harmless() {
+    let xf = crate::Xf::fit(IRect::new(0, 0, 400, 300), egui::Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(0.0, 0.0)), 1.0);
+    assert!(xf.zoom > 0.0 && xf.zoom.is_finite(), "{xf:?}");
+    let mut b = Bare::new();
+    b.ed.tool = Tool::Pen;
+    b.clip = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(0.0, 0.0));
+    b.xf = crate::Xf { offset: vec2(10.0, 10.0), zoom: 0.0 };
+    b.drag(egui::pos2(10.0, 10.0), egui::pos2(10.0, 10.0));
+    assert!(!b.out.begin && b.edits.is_empty() && b.doc.is_none());
 }

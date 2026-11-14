@@ -152,7 +152,7 @@ impl DemoHost {
 
         let out = self.editor.canvas(
             ui,
-            Canvas { doc: self.doc.as_mut(), xf: self.xf, clip, new_doc: (size, self.scale), visible: true },
+            Canvas { doc: self.doc.as_mut(), xf: self.xf, clip, new_doc: (size, self.scale), visible: true, input: true },
         );
         if out.begin {
             self.open();

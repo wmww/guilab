@@ -167,7 +167,7 @@ impl Editor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn text_ui(&mut self, ui: &mut Ui, doc: Option<&mut Doc>, xf: Xf, region: IRect, scale: f32, fonts_ready: bool, out: &mut CanvasOut) {
+    pub(crate) fn text_ui(&mut self, ui: &mut Ui, doc: Option<&mut Doc>, xf: Xf, clip: egui::Rect, region: IRect, scale: f32, fonts_ready: bool, input: bool, out: &mut CanvasOut) {
         let fonts = self.fonts.clone();
         let id = self.id.with("text");
         let ty = self.typing.as_mut().unwrap();
@@ -192,11 +192,15 @@ impl Editor {
         let em = ty.size * z;
         let text_w = (l.size[0] * z).max(em * 0.6);
         let backing = c32(guilab_image::draw::text_backing(ty.color));
+        // Middle: above the canvas, below menus and tooltips; clipped to the canvas.
         let r = egui::Area::new(self.id.with("text-area"))
             .fixed_pos(xf.apply(ty.at) - Vec2::splat(pad * z))
-            .order(Order::Foreground)
+            .order(Order::Middle)
             .constrain(false)
+            .default_size(Vec2::ZERO)
+            .interactable(input)
             .show(ui.ctx(), |ui| {
+                ui.set_clip_rect(clip);
                 egui::Frame::new().fill(backing).inner_margin(pad * z).corner_radius(TEXT_RADIUS * scale * z).show(ui, |ui| {
                     egui::TextEdit::multiline(&mut ty.text)
                             .id(id)
@@ -212,7 +216,7 @@ impl Editor {
         let area = r.response.rect;
         let mut te_out = r.inner.inner;
         let te = te_out.response.response.clone();
-        if ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p)) {
+        if input && ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p) && clip.contains(p)) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
             out.cursor = Some(egui::CursorIcon::Text);
         }

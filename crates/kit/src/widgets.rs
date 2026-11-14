@@ -35,6 +35,9 @@ pub fn toast(ui: &Ui, id: Id, clip: Rect, slot: usize, add: impl FnOnce(&mut Ui)
     egui::Area::new(id)
         .pivot(Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(clip.center().x, y))
+        // egui sizes a new area at its default size for a pass, and that rect takes
+        // presses in the next hit test: keep it small.
+        .default_size(Vec2::ZERO)
         .order(egui::Order::Middle)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(t.space.xl as i8, (t.space.md + 2.0) as i8)).corner_radius(t.radius.toast).show(ui, |ui| {
