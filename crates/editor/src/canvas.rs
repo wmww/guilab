@@ -190,6 +190,7 @@ impl Editor {
     pub fn canvas(&mut self, ui: &mut Ui, c: Canvas) -> CanvasOut {
         let mut out = CanvasOut::default();
         let Canvas { mut doc, assets, xf, clip, new_doc, visible } = c;
+        self.sync_doc(doc.as_ref().map(|d| d.id()));
         let t = Theme::get(ui.ctx());
         let ctx = ui.ctx().clone();
         let fonts_ready = paint::install_fonts(&ctx);

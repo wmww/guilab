@@ -469,3 +469,35 @@ fn second_insert_cascades() {
     let dsts: Vec<_> = t.elements().iter().filter_map(|e| if let Kind::Svg { dst, .. } = e.kind { Some(dst.min) } else { None }).collect();
     assert_eq!(dsts, vec![pt(220.0, 172.0), pt(240.0, 192.0)]);
 }
+
+/// A host that switches docs mid-drag without `reset()`: the drag must not land on the
+/// element with the same key in the other doc.
+#[test]
+fn doc_switch_drops_gesture() {
+    use crate::{Canvas, Editor, Xf};
+    use guilab_image::{Body, Doc};
+    let mut h = Headless::new(vec2(800.0, 600.0), 1.0);
+    guilab_kit::theme::install(&h.ctx);
+    let host = DemoHost::new([400, 300], 1.0);
+    let mut ed = Editor::new("e", host.editor.fonts().clone());
+    ed.tool = Tool::Move;
+    let xf = Xf { offset: vec2(0.0, 0.0), zoom: 1.0 };
+    let with_box = |x: f32| {
+        let mut d = Doc::from_body(Body::screenshot(host.live, [400, 300], 1.0));
+        let e = d.add_edit(Element::new(Color::RED, Kind::Box(Rect::new(x, 50.0, 50.0, 50.0))));
+        d.apply(&e);
+        d
+    };
+    let (mut a, mut b) = (with_box(50.0), with_box(200.0));
+    let mut edits = Vec::new();
+    let mut frame = |h: &mut Headless, doc: &mut Doc, events: Vec<Event>| {
+        h.run(events, 0.1, |ui| {
+            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), assets: &host.store, xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true }).edits);
+        });
+    };
+    let (p, q) = (egui::pos2(50.0, 75.0), egui::pos2(80.0, 75.0));
+    frame(&mut h, &mut a, vec![ev::moved(p), ev::press(p)]);
+    frame(&mut h, &mut a, vec![ev::moved(q)]);
+    frame(&mut h, &mut b, vec![ev::release(q)]);
+    assert!(edits.is_empty(), "{edits:?}");
+}

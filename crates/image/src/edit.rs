@@ -1,6 +1,8 @@
 //! Edit ops on a mutable document (a draft or a scratch copy of an image). Hosts keep the
 //! ops in their history and apply/revert them; nothing here owns undo.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::model::{Body, Element, IRect};
 
 /// Stable element identity while editing (indices shift on insert/remove).
@@ -15,8 +17,22 @@ pub enum Edit {
     Crop { old: Option<IRect>, new: Option<IRect> },
 }
 
-#[derive(Clone, Debug)]
+/// Process-unique identity of a [`Doc`]: kept when the doc moves, fresh for a clone. Keys
+/// are small integers in every doc, so state about keys (an editor's gesture) must also
+/// remember which doc they belong to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DocId(u64);
+
+impl DocId {
+    fn fresh() -> DocId {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        DocId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Debug)]
 pub struct Doc {
+    id: DocId,
     body: Body,
     keys: Vec<ElemKey>,
     next: u64,
@@ -26,7 +42,11 @@ pub struct Doc {
 impl Doc {
     pub fn from_body(body: Body) -> Doc {
         let keys = (0..body.elements.len() as u64).map(ElemKey).collect();
-        Doc { next: body.elements.len() as u64, body, keys, rev: 0 }
+        Doc { id: DocId::fresh(), next: body.elements.len() as u64, body, keys, rev: 0 }
+    }
+
+    pub fn id(&self) -> DocId {
+        self.id
     }
 
     pub fn body(&self) -> &Body {
@@ -41,7 +61,7 @@ impl Doc {
         &self.keys
     }
 
-    /// Bumped by every apply/revert/set_base, for caches.
+    /// Bumped by every apply/revert, for caches.
     pub fn rev(&self) -> u64 {
         self.rev
     }
@@ -82,6 +102,10 @@ impl Doc {
     }
 
     fn insert(&mut self, key: ElemKey, at: usize, el: &Element) {
+        debug_assert!(self.index_of(key).is_none(), "duplicate {key:?}");
+        // Edits may come from another doc (a replay on a fresh copy): keys made later must
+        // not collide with theirs.
+        self.next = self.next.max(key.0 + 1);
         let at = at.min(self.keys.len());
         self.keys.insert(at, key);
         self.body.elements.insert(at, el.clone());
@@ -119,12 +143,11 @@ impl Doc {
         }
         self.rev += 1;
     }
+}
 
-    /// Inserts the capture raster at index 0. Not an edit: the base is part of the draft from
-    /// the start.
-    pub fn set_base(&mut self, el: Element) {
-        let k = self.new_key();
-        self.insert(k, 0, &el);
-        self.rev += 1;
+impl Clone for Doc {
+    /// A copy with its own [`DocId`].
+    fn clone(&self) -> Doc {
+        Doc { id: DocId::fresh(), body: self.body.clone(), keys: self.keys.clone(), next: self.next, rev: self.rev }
     }
 }

@@ -826,11 +826,24 @@ fn doc_apply_revert() {
         d.revert(e);
     }
     assert_eq!(*d.body(), orig);
-    // set_base puts the capture under existing marks.
-    let mut d = Doc::from_body(Body::new([100, 100], 1.0));
-    let e = d.add_edit(Element::new(Color::RED, Kind::Box(Rect::new(1.0, 1.0, 5.0, 5.0))));
-    d.apply(&e);
-    d.set_base(orig.elements[0].clone());
-    assert!(d.body().is_base(0));
-    assert_eq!(d.index_of(match e { Edit::Add { key, .. } => key, _ => unreachable!() }), Some(1));
+}
+
+/// Copy-on-edit redo replays edits on a fresh doc: keys made afterwards must stay unique.
+#[test]
+fn doc_replay_keeps_keys_unique() {
+    let mut s = store();
+    let shot = screenshot(&mut s, 100, 100, 1.0);
+    let body = (*s.image(shot).unwrap().body).clone();
+    let bx = |x: f32| Element::new(Color::BLUE, Kind::Box(Rect::new(x, 1.0, 5.0, 5.0)));
+    let mut a = Doc::from_body(body.clone());
+    let e = a.add_edit(bx(1.0));
+    a.apply(&e);
+    let mut b = Doc::from_body(body);
+    b.apply(&e);
+    let e2 = b.add_edit(bx(20.0));
+    b.apply(&e2);
+    let mut keys = b.keys().to_vec();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 3, "{:?}", b.keys());
 }

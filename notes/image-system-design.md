@@ -133,7 +133,8 @@ impl Assets for Store {}
 ### Edits (`guilab_image::edit`)
 ```rust
 pub struct ElemKey(u64);                    // stable while editing, unlike indices
-pub struct Doc { body: Body, keys: Vec<ElemKey>, next: u64, rev: u64 }   // rev++ on every apply/revert
+pub struct DocId(u64);                      // process-unique; a clone gets a fresh one, a move keeps it
+pub struct Doc { id: DocId, body: Body, keys: Vec<ElemKey>, next: u64, rev: u64 }   // rev++ on every apply/revert
 pub enum Edit {
     Add { key: ElemKey, at: usize, el: Element },
     Remove { key: ElemKey, at: usize, el: Element },
@@ -143,11 +144,12 @@ pub enum Edit {
 impl Doc {
     pub fn from_body(b: Body) -> Doc; pub fn body(&self) -> &Body;
     pub fn apply(&mut self, e: &Edit); pub fn revert(&mut self, e: &Edit);
-    pub fn set_base(&mut self, el: Element);   // inserts the capture raster at index 0; not an edit (see the viewer flow)
-    // builders: add_edit(el) (on top), remove_edit(key), replace_edit(key, new), crop_edit(new); keys(), index_of(key), element(key), new_key()
+    // builders: add_edit(el) (on top), remove_edit(key), replace_edit(key, new), crop_edit(new); id(), keys(), index_of(key), element(key), new_key()
 }
 ```
-Drags produce one `Replace` per drag, at release. The editor shows the in-progress state from its own interaction state, so history doesn't fill up with per-frame edits.
+- Edits replay on any doc with the same elements (copy-on-edit redo applies them to a fresh scratch doc): applying an `Add` moves `next` past its key, so later keys stay unique.
+- History stays valid only if every change to a doc is an `Edit` (`Add`/`Remove` store indices). Nothing inserts under existing marks outside an edit.
+- Drags produce one `Replace` per drag, at release. The editor shows the in-progress state from its own interaction state, so history doesn't fill up with per-frame edits.
 
 ## Text format
 Agents read and write the same lines. Tested on 6 fresh opus agents over two rounds. Each got a docs excerpt, a `poll` message with a listing, and 7–8 tasks: read the marks, render crops, replace, drop, scale a pen, build from scratch with raster `from`, SVG file and inline SVG, multi-line text, uncrop, stdin. All 6 answered every task correctly, and their answers were nearly identical. Their doubts are resolved here:
@@ -235,7 +237,7 @@ impl Editor {
     pub fn insert(&mut self, doc, Picture::{Raster,Svg}(AssetId), natural: Size, center: Pt, fit: IRect) -> Edit;
     pub fn delete_hovered(&mut self, doc) -> Option<Edit>;
     pub fn commit(&mut self, doc) -> Vec<Edit>;                    // finish typing/pending marks (before send)
-    pub fn reset(&mut self);                                       // host switched docs or dropped the begun one
+    pub fn reset(&mut self);                                       // host dropped the begun doc
     pub fn pick_color(&mut self, c); pub fn busy(&self) -> bool; pub fn hovered(&self) -> Hit;
 }
 ```
@@ -246,7 +248,7 @@ impl Editor {
 - Crop tool: the whole canvas shows, dimmed outside the crop (`crop_dim`), with handles at the corners and edge midpoints. Corners and edges (within `hit_slop`) resize, inside moves (kept inside the canvas), elsewhere draws a new crop (inside too when there's no crop yet). Whole pixels; a crop equal to the canvas is stored as none. A toast in the canvas says "Drag to crop" with **Show all** (crop none), disabled without a crop.
 - Keys while the canvas has them and no text has focus: Delete/Backspace (Move: remove hovered), Esc (cancel drag), tool letters. Esc and Delete are consumed only when they act, so the host can use them otherwise. Undo/redo stay the host's.
 - `insert` places a picture at natural size (shrunk to 90% of `fit`), centered, cascading 20×scale px off a picture already at that spot.
-- Host contract: switching docs → `reset()`; the editor checks every frame that the elements its gesture/typing refer to still exist (host undo mid-drag just ends the drag).
+- Host contract: none for switching docs. The editor remembers the `DocId` its gesture/typing/hover belong to and drops them when another doc shows up (a doc arriving where there was none keeps the pending marks). It also checks every frame that the elements they refer to still exist (host undo mid-drag just ends the drag).
 
 ### Move tool (spec: `move-tool.md`)
 On press, the first match wins (`hit_test`):
@@ -311,7 +313,7 @@ enum Op { Edit(DraftKey, Edit), Create(Draft /* as created */), Remove { at: usi
 Store access: `Viewer::draw(renderer, sessions, store: &Store, now)`. Reads only, and thumbnails are rendered from `Arc<Image>` and assets.
 
 ### Flows (`chat-image-flow.md`)
-- **Draw on the live app**: `CanvasOut.begin` → push `Action::Capture { session, ticket }` and set `Open::Capturing`. The session view keeps painting the live texture under the editor, so nothing changes visibly: no flash, no extra frame. The server answers `Viewer::captured(session, ticket, image)`. The glue makes a `Draft` from that screenshot (`parent` = it) via `Doc::set_base`. When the first edit commits, `Create` + `Edit` go in one history group, the slot is pushed into `pending` (its grow-in animation plays), and the state is `Away { outlined }`. If no edit commits (a tiny click), the draft is dropped and no slot appears.
+- **Draw on the live app**: `CanvasOut.begin` → push `Action::Capture { session, ticket }` and set `Open::Capturing`. The session view keeps painting the live texture under the editor, so nothing changes visibly: no flash, no extra frame. The server answers `Viewer::captured(session, ticket, image)`. The editor keeps the marks drawn meanwhile (`pending`); the glue makes the `Draft` from that screenshot's body (`parent` = it), and the editor commits the pending marks into it as ordinary edits. When the first edit commits, `Create` + `Edit` go in one history group, the slot is pushed into `pending` (its grow-in animation plays), and the state is `Away { outlined }`. If no edit commits (a tiny click), the draft is dropped and no slot appears.
 - **Open an image** (`ChatEvent::Open`): a draft → `Open::Draft`. A past image → `Open::Past` with a scratch `Doc` (the store image itself is never touched). Either way a flight goes from the slot to the view, and the slot is `Away`.
 - **Copy-on-edit**: the first `CanvasOut.edits` while `Open::Past`. The edit has already been applied to the scratch doc, so the glue moves that doc into a new `Draft` (`parent` = the past image). `Copy` + `Edit` go in one group. The feed slot goes back to `Shown` (the widget cross-fades it), and the new composer slot grows in as `Away { outlined }`. There's no flight. Undoing that group removes the draft and returns to `Open::Past` on a fresh doc.
 - **Switch images**: one flight from the view back to the old slot and one from the new slot to the view, at the same time. **Close** (Interact tool selected, or a click on the open image's own slot) → flight back to the slot, then `Open::Live`.

@@ -15,7 +15,7 @@ mod toolbar;
 use std::sync::Arc;
 
 use egui::{CursorIcon, Id, Pos2, Vec2, pos2};
-use guilab_image::{AssetId, Assets, Color, Doc, Edit, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, Size, pt};
+use guilab_image::{AssetId, Assets, Color, Doc, DocId, Edit, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, Size, pt};
 
 pub use paint::{FAMILY, install_fonts};
 
@@ -169,6 +169,8 @@ pub struct Editor {
     pub color: Color,
     id: Id,
     fonts: Arc<Fonts>,
+    /// The doc that gesture, typing and hover refer to (keys are only unique within a doc).
+    doc_id: Option<DocId>,
     gesture: Gesture,
     typing: Option<text::Typing>,
     /// Marks finished while there was no doc, committed when one arrives.
@@ -199,6 +201,7 @@ impl Editor {
             color: Color::RED,
             id: id.into(),
             fonts,
+            doc_id: None,
             gesture: Gesture::Idle,
             typing: None,
             pending: Vec::new(),
@@ -233,18 +236,32 @@ impl Editor {
         self.hover
     }
 
-    /// Drops all interaction state without committing (the host switched docs, or decided
-    /// not to make the doc `begin` asked for).
+    /// Drops all interaction state without committing (e.g. the host decided not to make the
+    /// doc `begin` asked for). Switching docs needs no call: the editor notices by
+    /// [`Doc::id`].
     pub fn reset(&mut self) {
         self.gesture = Gesture::Idle;
         self.typing = None;
         self.pending.clear();
         self.began = false;
         self.hover = Hit::None;
+        self.doc_id = None;
+    }
+
+    /// Notes the doc shown now. State about another doc's elements is dropped; a doc
+    /// arriving where there was none (after `begin`) keeps what waits for it.
+    fn sync_doc(&mut self, id: Option<DocId>) {
+        if id != self.doc_id && self.doc_id.is_some() {
+            self.gesture = Gesture::Idle;
+            self.typing = None;
+            self.hover = Hit::None;
+        }
+        self.doc_id = id;
     }
 
     /// Commits text being typed (e.g. before sending), returning the edits applied.
     pub fn commit(&mut self, doc: &mut Doc) -> Vec<Edit> {
+        self.sync_doc(Some(doc.id()));
         let mut out = CanvasOut::default();
         for el in self.pending.drain(..) {
             let e = doc.add_edit(el);
@@ -280,6 +297,7 @@ impl Editor {
 
     /// Removes the element a move-tool press would grab (Delete / Backspace).
     pub fn delete_hovered(&mut self, doc: &mut Doc) -> Option<Edit> {
+        self.sync_doc(Some(doc.id()));
         let key = match self.hover {
             Hit::Key(k, _) | Hit::Item(k) => k,
             Hit::None => return None,
