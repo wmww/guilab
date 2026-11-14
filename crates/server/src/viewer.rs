@@ -450,7 +450,7 @@ impl Server {
                             seq: slot.session.frame_seq,
                             size: (o.width, o.height),
                             scale: o.scale,
-                            locked: slot.lock.current.is_some(),
+                            locked: slot.lock.is_locked(),
                             cursor: HostCursor::Icon(EguiCursor::Default),
                             viz: &slot.session.viz,
                             under_pointer: None,
@@ -499,7 +499,7 @@ impl Server {
             match a {
                 Action::Input { session, input } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    if !input.is_release() && !slot.lock.human_input_allowed() {
+                    if !input.is_release() && slot.lock.is_locked() {
                         continue;
                     }
                     // The human using a session keeps it alive.
@@ -511,11 +511,14 @@ impl Server {
                         slot.session.inject(InputEvent::TouchFrame, InputSource::Human);
                     }
                 }
-                Action::Revoke { session } => self.revoke_lock(&session),
+                Action::Revoke { session } => {
+                    // Not locked any more (the agent let go meanwhile): nothing to stop.
+                    let _ = self.revoke_lock(&session);
+                }
                 Action::Resize { session, size, scale } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
                     // The agent's lock freezes the output (for the human).
-                    if slot.lock.current.is_some() {
+                    if slot.lock.is_locked() {
                         continue;
                     }
                     slot.last_active = Instant::now();

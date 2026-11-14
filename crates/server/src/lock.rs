@@ -5,22 +5,33 @@
 //!   while the session is locked, so an unlocked session stays easy to script.
 //! - Read-only commands never need it.
 //!
-//! The viewer's Stop button goes through `Server::revoke_lock` (which logs the event); its
-//! input is gated by [`LockState::human_input_allowed`].
+//! Pure token logic. Ending a lock has side effects (event, held input, input chains), so
+//! callers go through `Server::end_lock`, never just these methods.
 
 use std::time::Instant;
 
 use guilab_proto::Access;
 
-pub struct Lock {
-    pub token: String,
-    pub since: Instant,
-    pub last_used: Instant,
+struct Lock {
+    token: String,
+    since: Instant,
+    last_used: Instant,
+}
+
+/// How `take` got the lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Took {
+    /// The token already held it.
+    Same,
+    /// It was free.
+    New,
+    /// `--force` took it from another holder.
+    TakenOver,
 }
 
 #[derive(Default)]
 pub struct LockState {
-    pub current: Option<Lock>,
+    current: Option<Lock>,
     /// Token of the last revoked lock, to tell its holder what happened.
     revoked: Option<String>,
 }
@@ -42,12 +53,16 @@ fn ago(t: Instant) -> String {
 }
 
 impl LockState {
+    pub fn is_locked(&self) -> bool {
+        self.current.is_some()
+    }
+
     /// `guilab lock`. Returns the token (the same one if `token` already holds it).
-    pub fn take(&mut self, session: &str, token: Option<&str>, force: bool) -> Result<String, String> {
+    pub fn take(&mut self, session: &str, token: Option<&str>, force: bool) -> Result<(String, Took), String> {
         if let Some(l) = &mut self.current {
             if token == Some(l.token.as_str()) {
                 l.last_used = Instant::now();
-                return Ok(l.token.clone());
+                return Ok((l.token.clone(), Took::Same));
             }
             if !force {
                 return Err(format!(
@@ -59,20 +74,25 @@ impl LockState {
                 ));
             }
         }
+        let took = if self.current.is_some() { Took::TakenOver } else { Took::New };
         let now = Instant::now();
         let token = new_token();
         self.current = Some(Lock { token: token.clone(), since: now, last_used: now });
-        Ok(token)
+        Ok((token, took))
     }
 
-    /// `guilab unlock`. Ok(false) if it wasn't locked.
-    pub fn release(&mut self, session: &str, token: Option<&str>, force: bool) -> Result<bool, String> {
-        let Some(l) = &self.current else { return Ok(false) };
-        if !force && token != Some(l.token.as_str()) {
-            return Err(self.bad_token(session, token));
+    /// Whether `token` may release the lock (any token with `force`). Ok(false) if it isn't
+    /// locked. Changes nothing, so callers can do their other fallible work before `release`.
+    pub fn may_release(&self, session: &str, token: Option<&str>, force: bool) -> Result<bool, String> {
+        match &self.current {
+            None => Ok(false),
+            Some(l) if force || token == Some(l.token.as_str()) => Ok(true),
+            Some(_) => Err(self.bad_token(session, token)),
         }
+    }
+
+    pub fn release(&mut self) {
         self.current = None;
-        Ok(true)
     }
 
     /// Whether a command with this access may run with this token.
@@ -117,14 +137,10 @@ impl LockState {
         }
     }
 
-    /// Viewer's Revoke button: drops the lock; its token stops working.
-    pub fn revoke(&mut self) {
-        if let Some(l) = self.current.take() {
-            self.revoked = Some(l.token);
-        }
-    }
-
-    pub fn human_input_allowed(&self) -> bool {
-        self.current.is_none()
+    /// The human's Stop: drops the lock; its token stops working. False if it wasn't locked.
+    pub fn revoke(&mut self) -> bool {
+        let Some(l) = self.current.take() else { return false };
+        self.revoked = Some(l.token);
+        true
     }
 }

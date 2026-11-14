@@ -1,6 +1,6 @@
 # Backend cleanup pass: duplicated tables, small waste, dead bits
 
-Priority: low. One sitting; each item is small. (Session-struct dead fields are in `refactor-compositor-session.md`; Share leftovers in `remove-share.md`.)
+Priority: low. One sitting; each item is small. (Session-struct dead fields are in `refactor-compositor-session.md`.)
 
 ## Event kinds are listed in four places
 `proto/src/events.rs`: the `EventData` enum, `kind()`, the `KINDS` array and `GROUPS`; plus the hand-written kind list and default tiers in the CLI's `POLL_HELP` (`guilab/src/main.rs` ~262). `default_tier` ends in `_ => Passive`, so a new kind silently becomes passive. Fix: a unit test that every variant's `kind()` is in `KINDS` and in exactly the groups intended; build `POLL_HELP`'s kind/tier lines from `KINDS`/`GROUPS`/`default_tier` at runtime (clap `after_help` takes a `String`); make `default_tier` exhaustive.

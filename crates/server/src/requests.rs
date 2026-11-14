@@ -13,7 +13,13 @@ use guilab_proto::{
     log::ANON,
 };
 
-use crate::{ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait, Slot, Working, images::Images, send};
+use crate::{
+    ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait,
+    images::Images,
+    lock::Took,
+    send,
+    slot::{LockEnd, Slot},
+};
 
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -29,24 +35,6 @@ const SETTLE_CAP: Duration = Duration::from_secs(3);
 const MAP_CAP: Duration = Duration::from_secs(10);
 
 const DEFAULT_SIZE: [u32; 2] = [1280, 720];
-
-pub(crate) fn session_info(name: &str, slot: &Slot) -> SessionInfo {
-    let s = &slot.session;
-    SessionInfo {
-        name: name.to_string(),
-        wayland_display: s.socket_path(),
-        x_display: s.x_display(),
-        dir: s.dir.clone(),
-        root: slot.root.clone(),
-        output: s.output_info(),
-        apps: s.running_apps(),
-        windows: s.windows(),
-        ttl: slot.ttl,
-        expires_in: (slot.ttl > 0).then(|| slot.ttl.saturating_sub(slot.last_active.elapsed().as_secs())),
-        working: slot.working.as_ref().map(|w| w.status.clone()),
-        in_viewer: false,
-    }
-}
 
 /// Status set when a poll hands the agent a human message.
 const READ_STATUS: &str = "read your message";
@@ -124,7 +112,7 @@ impl Server {
             }
             Command::Ls => {
                 let shown = self.viewer_current();
-                let mut list: Vec<SessionInfo> = self.sessions.iter().map(|(n, s)| session_info(n, s)).collect();
+                let mut list: Vec<SessionInfo> = self.sessions.iter().map(|(n, s)| s.info(n)).collect();
                 list.iter_mut().for_each(|i| i.in_viewer = shown.as_deref() == Some(i.name.as_str()));
                 Response::ok(list)
             }
@@ -135,7 +123,7 @@ impl Server {
                     self.news.push(NewWait { session: name, stream, deadline: Instant::now() + XWAYLAND_TIMEOUT });
                     return None;
                 }
-                Ok(name) => Response::ok(session_info(&name, &self.sessions[&name])),
+                Ok(name) => Response::ok(self.sessions[&name].info(&name)),
                 Err(e) => Response::err(e),
             },
             cmd => {
@@ -183,31 +171,26 @@ impl Server {
         let s = &mut slot.session;
         let r = match cmd {
             Command::End => Response::ok(self.end_session(name)),
-            Command::Lock { force } => {
-                let had = slot.lock.current.as_ref().map(|l| l.token.clone());
-                match slot.lock.take(name, token, force) {
-                    Ok(token) => {
-                        if had.as_deref() != Some(token.as_str()) {
-                            s.log.push(EventData::Lock { forced: had.is_some() }, Some(key));
+            Command::Lock { force } => match slot.lock.take(name, token, force) {
+                Ok((token, took)) => {
+                    match took {
+                        Took::Same => {}
+                        Took::New => {
+                            s.log.push(EventData::Lock { forced: false }, Some(key));
                         }
-                        // Taking over: the old holder's chains stop.
-                        if force {
-                            self.abort_inputs(name, &Response::err("your lock was taken over (guilab lock --force)"));
-                        }
-                        Response::ok(LockInfo { session: name.to_string(), token })
+                        Took::TakenOver => self.end_lock(name, LockEnd::TakenOver, Some(key)),
                     }
-                    Err(e) => Response::err(e),
+                    Response::ok(LockInfo { session: name.to_string(), token })
                 }
-            }
-            Command::Unlock { force } => match slot.lock.release(name, token, force) {
-                Ok(was) => {
-                    if was {
-                        s.log.push(EventData::Unlock, Some(key));
-                    }
-                    s.release_all(InputSource::Agent);
-                    self.abort_inputs(name, &Response::err("the lock was released; input stopped"));
+                Err(e) => Response::err(e),
+            },
+            Command::Unlock { force } => match slot.lock.may_release(name, token, force) {
+                Ok(true) => {
+                    slot.lock.release();
+                    self.end_lock(name, LockEnd::Unlock, Some(key));
                     Response::ok(())
                 }
+                Ok(false) => Response::ok(()),
                 Err(e) => Response::err(e),
             },
             Command::Input { actions } => {
@@ -363,15 +346,14 @@ impl Server {
                 if status.is_empty() {
                     return Some(Response::err("say what you're doing: guilab work \"running the tests\""));
                 }
-                if let Err(e) = agent_message(&mut self.images, slot, key, message, &images) {
-                    return Some(Response::err(e));
+                let msg = match agent_message(&mut self.images, slot, message, &images) {
+                    Ok(m) => m,
+                    Err(e) => return Some(Response::err(e)),
+                };
+                if let Some(m) = msg {
+                    slot.session.log.push(m, Some(key));
                 }
-                let s = &mut slot.session;
-                s.log.push(EventData::Work { status: status.clone() }, Some(key));
-                match &mut slot.working {
-                    Some(w) => w.status = status,
-                    None => slot.working = Some(Working { status, since: Instant::now() }),
-                }
+                slot.set_working(status, key);
                 Response::ok(())
             }
             Command::Done { message, images } => {
@@ -385,28 +367,25 @@ impl Server {
                 }
                 // Done means hands off: release the lock, with or without the token (a
                 // wrong token is still an error, so a stale holder learns it lost the lock).
-                let unlocked = if slot.lock.current.is_some() {
-                    match slot.lock.release(name, token, token.is_none()) {
-                        Ok(was) => was,
-                        Err(e) => return Some(Response::err(e)),
-                    }
-                } else {
-                    false
+                // Everything fallible comes before any change.
+                let unlock = match slot.lock.may_release(name, token, token.is_none()) {
+                    Ok(u) => u,
+                    Err(e) => return Some(Response::err(e)),
                 };
-                if let Err(e) = agent_message(&mut self.images, slot, key, message, &images) {
-                    return Some(Response::err(e));
+                let msg = match agent_message(&mut self.images, slot, message, &images) {
+                    Ok(m) => m,
+                    Err(e) => return Some(Response::err(e)),
+                };
+                if let Some(m) = msg {
+                    slot.session.log.push(m, Some(key));
                 }
-                let s = &mut slot.session;
-                if unlocked {
-                    s.log.push(EventData::Unlock, Some(key));
-                    s.release_all(InputSource::Agent);
+                if unlock {
+                    slot.lock.release();
+                    self.end_lock(name, LockEnd::Done, Some(key));
                 }
-                s.log.push(EventData::Done, Some(key));
-                slot.working = None;
-                if unlocked {
-                    self.abort_inputs(name, &Response::err("the lock was released (guilab done); input stopped"));
-                }
-                Response::ok(DoneInfo { unlocked })
+                let slot = self.sessions.get_mut(name).unwrap();
+                slot.set_done(key);
+                Response::ok(DoneInfo { unlocked: unlock })
             }
             Command::Human { op } => match op {
                 HumanOp::Message { text, images, draw } => {
@@ -420,7 +399,7 @@ impl Server {
                     }
                 }
                 HumanOp::Input { actions } => {
-                    if !slot.lock.human_input_allowed() {
+                    if slot.lock.is_locked() {
                         return Some(Response::err("the session is locked: human input is blocked"));
                     }
                     if let Err(e) = s.check_chain(&actions) {
@@ -433,13 +412,10 @@ impl Server {
                     self.queue_input(name, None, stream, Chain::new(actions, InputSource::Human));
                     return None;
                 }
-                HumanOp::Revoke => {
-                    if slot.lock.current.is_none() {
-                        return Some(Response::err("not locked"));
-                    }
-                    self.revoke_lock(name);
-                    Response::ok(())
-                }
+                HumanOp::Revoke => match self.revoke_lock(name) {
+                    Ok(()) => Response::ok(()),
+                    Err(e) => Response::err(e),
+                },
             },
             Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => unreachable!(),
         };
@@ -568,7 +544,7 @@ impl Server {
             };
             let n = self.news.remove(i);
             let resp = match failed {
-                None => Response::ok(session_info(&n.session, &self.sessions[&n.session])),
+                None => Response::ok(self.sessions[&n.session].info(&n.session)),
                 Some(e) => {
                     self.end_session(&n.session);
                     Response::err(e)
@@ -787,27 +763,29 @@ fn read_messages(slot: &mut Slot, key: &str, d: &Delivery) {
     if !d.events.iter().any(|e| matches!(e.data, EventData::Message { .. })) {
         return;
     }
-    slot.session.log.push(EventData::Work { status: READ_STATUS.into() }, Some(key));
-    match &mut slot.working {
-        Some(w) => w.status = READ_STATUS.into(),
-        None => slot.working = Some(Working { status: READ_STATUS.into(), since: Instant::now() }),
-    }
+    slot.set_working(READ_STATUS.into(), key);
 }
 
-/// Logs an agent message (`work -m`, `done MSG`); images are ids or file paths.
-fn agent_message(images: &mut Images, slot: &mut Slot, key: &str, text: Option<String>, specs: &[String]) -> Result<(), String> {
+/// The event for an agent message (`work -m`, `done MSG`; images are ids or file paths),
+/// or None without text and images. Holds the images; logs nothing, so callers can fail
+/// before changing anything.
+fn agent_message(images: &mut Images, slot: &Slot, text: Option<String>, specs: &[String]) -> Result<Option<EventData>, String> {
     let text = text.map(|t| t.trim().to_string()).unwrap_or_default();
     if text.is_empty() && specs.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let mut refs = Vec::new();
-    for spec in specs {
-        let img = images.attach(spec, Made::Agent, slot.group).map_err(|e| format!("--image {spec}: {e}"))?;
-        images.hold(&img);
-        refs.push(images.image_ref(&img));
-    }
-    slot.session.log.push(EventData::AgentMessage { text, images: refs }, Some(key));
-    Ok(())
+    let imgs = specs
+        .iter()
+        .map(|spec| images.attach(spec, Made::Agent, slot.group).map_err(|e| format!("--image {spec}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let refs = imgs
+        .iter()
+        .map(|img| {
+            images.hold(img);
+            images.image_ref(img)
+        })
+        .collect();
+    Ok(Some(EventData::AgentMessage { text, images: refs }))
 }
 
 /// Changes a session's output and logs it. `key`: the agent's delivery key; None = the

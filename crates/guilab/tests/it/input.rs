@@ -107,6 +107,37 @@ fn lock_rules() {
     lab.run(&["end"]);
 }
 
+/// Whoever ends a lock (takeover, unlock), nothing the old holder held stays held:
+/// keys are released and an open touchpad gesture is ended.
+#[test]
+fn lock_end_releases_input() {
+    if !gtk4() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "600x700"]);
+    let log = lab.json(&["run", "--", &app("gtk_input.py")])["log"].as_str().unwrap().to_string();
+    let l = wait_log(&log, "ready", 15);
+    let t = lab.lock();
+    let (ex, ey) = center(&l, "entry", 1.0);
+    lab.input(&t, &["move", &ex, &ey, "click", "keydown", "shift"]);
+    wait_log(&log, "key Shift_L", 5);
+    // Taken over: the new holder doesn't inherit a held shift.
+    let t2 = lab.json(&["lock", "--force"])["token"].as_str().unwrap().to_string();
+    wait_log(&log, "keyup Shift_L", 5);
+
+    // Unlocked mid-pinch: the app sees the gesture end.
+    let (zx, zy) = center(&l, "zoom", 1.0);
+    let mut pinch = lab.cmd(&["-t", &t2, "input", "move", &zx, &zy, "pinch", "3"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    wait_log(&log, "zoom 1.", 5);
+    lab.run(&["-t", &t2, "unlock"]);
+    if pinch.wait().unwrap().success() {
+        eprintln!("lock_end_releases_input: the pinch finished before the unlock (slow machine?); not checking it");
+        return;
+    }
+    wait_log(&log, "zoom end", 5);
+}
+
 #[test]
 fn gtk_input_and_clipboard() {
     if !gtk4() {

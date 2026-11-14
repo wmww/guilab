@@ -62,12 +62,21 @@ pub enum InputEvent {
     PinchEnd { cancelled: bool },
 }
 
-/// Buttons and touch points held through `inject`, to release on unlock.
+/// Buttons, touch points and the touchpad gesture held through `inject`, to release on
+/// unlock (keys: the seat keyboard knows them).
 #[derive(Default)]
 pub struct Held {
     pub buttons: Vec<u32>,
     /// Touch slot -> position.
     pub touches: BTreeMap<u32, Point<f64, Logical>>,
+    /// A swipe or pinch begun and not ended.
+    pub gesture: Option<GestureKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureKind {
+    Swipe,
+    Pinch,
 }
 
 impl Session {
@@ -381,6 +390,12 @@ impl Session {
             }
             ev => {
                 let Some(ptr) = self.seat.get_pointer() else { return };
+                match ev {
+                    InputEvent::SwipeBegin { .. } => self.held.gesture = Some(GestureKind::Swipe),
+                    InputEvent::PinchBegin { .. } => self.held.gesture = Some(GestureKind::Pinch),
+                    InputEvent::SwipeEnd { .. } | InputEvent::PinchEnd { .. } => self.held.gesture = None,
+                    _ => {}
+                }
                 let serial = SERIAL_COUNTER.next_serial();
                 match ev {
                     InputEvent::SwipeBegin { fingers } => ptr.gesture_swipe_begin(self, &GestureSwipeBeginEvent { serial, time, fingers }),
@@ -399,8 +414,14 @@ impl Session {
         self.flush();
     }
 
-    /// Releases every held key, button and touch point (on unlock, so nothing stays stuck).
+    /// Releases every held key, button and touch point and cancels an open gesture (when a
+    /// lock ends, so nothing stays stuck).
     pub fn release_all(&mut self, source: InputSource) {
+        match self.held.gesture {
+            Some(GestureKind::Swipe) => self.inject(InputEvent::SwipeEnd { cancelled: true }, source),
+            Some(GestureKind::Pinch) => self.inject(InputEvent::PinchEnd { cancelled: true }, source),
+            None => {}
+        }
         for button in self.held.buttons.clone() {
             self.inject(InputEvent::PointerButton { button, pressed: false }, source);
         }

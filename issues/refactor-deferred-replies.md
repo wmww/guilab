@@ -23,5 +23,5 @@ Related: `send` (`lib.rs` ~533) switches the shared socket to blocking with a 2 
 - `end_session` becomes one `extract_if(|p| p.session == name)` with a per-kind final response (kill → ok with what was killed, others → "session ended").
 - `handle_session` returns `Reply::Now(Response) | Reply::Later(Wait)`; the dispatcher does the stream clone once.
 - Non-blocking writes: give each connection an output buffer flushed when writable (calloop `Generic` with WRITE interest while non-empty), or at least drop a follower whose buffer exceeds a cap instead of blocking.
-- Split `requests.rs` (836 lines) along the way: dispatch + resolve, `pending.rs`, and the agent lifecycle (see `refactor-lock-agent-lifecycle.md`).
+- Split `requests.rs` (836 lines) along the way: dispatch + resolve, `pending.rs`, and the agent lifecycle (`slot.rs` already holds the agent lifecycle).
 - Tests: Ctrl-C on a slow `input ... sleep 3000 ...` stops the chain (`tests/it/input.rs` already spawns a slow chain at ~91; extend it).

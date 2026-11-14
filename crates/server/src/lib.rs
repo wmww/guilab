@@ -2,8 +2,9 @@
 //! every session's nested loop. Single-threaded.
 
 mod images;
-pub mod lock;
+mod lock;
 mod requests;
+mod slot;
 mod viewer;
 
 use std::{
@@ -23,13 +24,14 @@ use std::{
 
 use anyhow::{Context, bail};
 use calloop::{
-    EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+    EventLoop, Interest, LoopHandle, Mode, PostAction,
     generic::Generic,
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
-use guilab_compositor::{Chain, Gpu, InputSource, Session, SharedGpu, procs};
+use guilab_compositor::{Chain, Gpu, Session, SharedGpu, procs};
 use guilab_proto::{Response, ServerInfo};
+use slot::Slot;
 
 pub struct Options {
     /// Exit after this long without sessions (autostarted servers).
@@ -43,29 +45,6 @@ pub struct Options {
 /// Default idle TTL of a session, in seconds.
 pub const DEFAULT_TTL: u64 = 1800;
 const TICK: Duration = Duration::from_millis(16);
-
-pub(crate) struct Slot {
-    pub session: Session,
-    pub root: Option<PathBuf>,
-    pub ttl: u64,
-    pub last_active: Instant,
-    pub lock: lock::LockState,
-    /// `last_active` when the expiry warning was logged (once per idle stretch).
-    pub warned: Option<Instant>,
-    /// The agent's status while it works (`guilab work`); None while it waits for the human.
-    pub working: Option<Working>,
-    /// The agent's last command (the viewer shows how long it's been quiet).
-    pub last_agent: Instant,
-    /// The session's images in the store (dropped with it).
-    pub group: guilab_image::Group,
-    token: RegistrationToken,
-}
-
-pub(crate) struct Working {
-    pub status: String,
-    /// When this stretch of work began (the first `work` after `done`).
-    pub since: Instant,
-}
 
 /// An input chain paused at a sleep (or queued behind another chain of its session).
 pub(crate) struct InputJob {
@@ -402,7 +381,7 @@ impl Server {
     /// Ends a session: drops its display (disconnecting clients) and kills its apps.
     pub(crate) fn end_session(&mut self, name: &str) -> Option<guilab_proto::SessionInfo> {
         let mut slot = self.sessions.remove(name)?;
-        let info = requests::session_info(name, &slot);
+        let info = slot.info(name);
         self.handle.remove(slot.token);
         let (children, tag) = slot.session.shutdown();
         let dir = slot.session.dir.clone();
@@ -449,18 +428,6 @@ impl Server {
         resp
     }
 
-    /// Viewer's Revoke button: drop the agent's lock, stop its input, release held keys.
-    pub fn revoke_lock(&mut self, name: &str) {
-        let Some(slot) = self.sessions.get_mut(name) else { return };
-        if slot.lock.current.is_none() {
-            return;
-        }
-        slot.lock.revoke();
-        slot.session.release_all(InputSource::Agent);
-        slot.session.log.push(guilab_proto::EventData::Revoke, None);
-        self.abort_inputs(name, &Response::err("the human revoked your lock; input stopped"));
-    }
-
     /// Logs a warning shortly before a session expires (a wake event, so pollers can keep
     /// it alive).
     fn warn_expiry(&mut self, now: Instant) {
@@ -504,10 +471,8 @@ impl Server {
             })
             .map_err(|e| e.error)?;
         let _ = fs::set_permissions(&session.dir, fs::Permissions::from_mode(0o700));
-        let now = Instant::now();
         let group = self.images.new_group();
-        let slot = Slot { session, root, ttl, last_active: now, lock: Default::default(), warned: None, working: None, last_agent: now, group, token };
-        self.sessions.insert(name, slot);
+        self.sessions.insert(name, Slot::new(session, root, ttl, group, token));
         Ok(())
     }
 }

@@ -263,8 +263,12 @@ fn work_done_lock_and_revoke() {
     let (code, out, _) = lab.status(&["poll", "--timeout", "0"]);
     assert_eq!((code, out.as_str()), (2, "Timed out: no wake event within 0s (exit code 2).\n"));
 
-    // `done` releases the lock, with or without the token.
+    // `done` releases the lock, with or without the token. A bad image fails it before
+    // anything changed: still locked and working.
     let t = lab.lock();
+    let (ok, _, err) = lab.try_run(&["done", "bye", "--image", "/nonexistent.png"]);
+    assert!(!ok && err.contains("/nonexistent.png"), "{err}");
+    lab.input(&t, &["move", "1", "1"]);
     let out = lab.run(&["done"]);
     assert!(out.contains("released your lock"), "{out}");
     let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "1", "1"]);
