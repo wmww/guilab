@@ -38,6 +38,8 @@ pub struct Event {
 }
 
 /// A text annotation on a human message: text, optionally placed on one of its images.
+/// The viewer sends text the human typed onto a drawing this way, and doesn't draw it into
+/// the image: agents read it more reliably as text, and baked-in text hides the UI under it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     pub text: String,
@@ -49,6 +51,9 @@ pub struct Annotation {
     pub x: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<i32>,
+    /// Color name of the text as drawn (e.g. "red"), to match it with same-colored marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

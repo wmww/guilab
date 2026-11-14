@@ -1,6 +1,6 @@
 # Viewer window: how it works and what to know
 
-Built in plan step 6 (`crates/viewer`, `crates/server/src/viewer.rs`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
+Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/viewer.rs`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
 
 ## Shape
 - Our own sctk client on a separate `Connection` (not smithay's winit backend: its renderer dies with the window, and winit refuses a second `EventLoop` per process, so show/hide/show would be impossible).
@@ -29,7 +29,16 @@ Built in plan step 6 (`crates/viewer`, `crates/server/src/viewer.rs`). Versions:
 - Pinch (`zwp_pointer_gesture_pinch_v1`, bound by hand) becomes egui `Zoom`; never forwarded. Cursor: the session's named cursor (`CursorImageStatus::Named`) maps to egui `CursorIcon` and then to `wp_cursor_shape_v1`.
 - Wheel vs touchpad: axis events with value120/discrete or source Wheel become egui `Line` units (notches), else `Point`. Forwarded wheel = 15 logical px per notch (like agent `scroll`); smooth scroll is scaled so content follows the fingers.
 
+## Chat and drawing (ui.rs, markup)
+- Panel order matters in egui: tabs (top), toolbar (left, full height), chat (bottom), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.
+- The UI only runs when the viewer draws. When it ran on input but couldn't present (waiting for a frame callback), `Viewer::draw` sets `host.dirty` so the new state still gets shown.
+- The frozen screenshot arrives one frame after the press (`Action::Freeze` -> server -> `set_screenshot`); the first mark is already being dragged on the live image meanwhile.
+- Several clicks inside one UI pass (a chain without sleeps) confuse egui's click detection; tests sleep ~150 ms between steps.
+- Feed scrolling: egui's `stick_to_bottom` lost track after `scroll_to_cursor`; `Chat` tracks "at the end" itself from the `ScrollArea` output and follows new items only then (and after sending).
+- The text box uses a non-wrapping layouter: computing its width before the TextEdit sees the frame's typed text made it wrap.
+
 ## Testing
 - Host = a second guilab server's session (tests: `tests/it/viewer.rs`; it pins the coordinate mapping by moving the host pointer and reading the viewed session's human motion event). Lab commands drop `WAYLAND_DISPLAY`, so a test can never open on the real desktop.
+- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=101, text y=230; message box near the bottom). Layout changes move them.
 - Manually: `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/glv-h guilab new host -s 1400x900`, then `guilab show` with `WAYLAND_DISPLAY=<that session's socket>` against another runtime dir, drive the host session with `input`, screenshot it.
 - The real desktop's `WAYLAND_DISPLAY` is usually set in agent shells; never run `guilab show` without overriding it.

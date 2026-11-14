@@ -20,7 +20,7 @@ mod xwayland;
 pub use actions::Chain;
 pub use clipboard::ClipRead;
 pub use input::{InputEvent, InputSource};
-pub use frame::{SETTLE_QUIET, Settle};
+pub use frame::{SETTLE_QUIET, Settle, write_rgba_png};
 pub use handlers::{SurfaceId, surface_id};
 pub use render::Gpu;
 pub use xwayland::XState;

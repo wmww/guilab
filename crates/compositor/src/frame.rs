@@ -109,18 +109,15 @@ impl Session {
 
     /// Writes the last rendered frame as an RGB PNG. Returns its pixel size.
     pub fn write_png(&mut self, path: &Path) -> anyhow::Result<(u32, u32)> {
-        let gpu = self.gpu.clone();
-        let (w, h, rgba) = self.frame.read_rgba(&mut gpu.borrow_mut())?;
-        let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
-        let tmp = path.with_extension("png.tmp");
-        let f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.set_compression(png::Compression::Fast);
-        enc.write_header()?.write_image_data(&rgb)?;
-        std::fs::rename(&tmp, path)?;
+        let (w, h, rgba) = self.read_rgba()?;
+        write_rgba_png(path, w, h, &rgba)?;
         Ok((w, h))
+    }
+
+    /// The last rendered frame (whole output, no cursor) as tightly packed RGBA8.
+    pub fn read_rgba(&mut self) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+        let gpu = self.gpu.clone();
+        self.frame.read_rgba(&mut gpu.borrow_mut())
     }
 
     pub fn output_info(&self) -> guilab_proto::OutputInfo {
@@ -166,4 +163,18 @@ impl Session {
         self.flush();
         Ok(())
     }
+}
+
+/// Writes opaque RGBA8 pixels as an RGB PNG (via a temp file, so readers never see half).
+pub fn write_rgba_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let tmp = path.with_extension("png.tmp");
+    let f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    enc.write_header()?.write_image_data(&rgb)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }

@@ -82,7 +82,10 @@ fn at(x: i32, y: i32, window: Option<u32>) -> String {
 }
 
 fn annotation(a: &Annotation) -> String {
-    let mut s = "annotation".to_string();
+    let mut s = match &a.color {
+        Some(c) => format!("{c} text annotation"),
+        None => "annotation".to_string(),
+    };
     if let Some(i) = a.image {
         s += &format!(" on image {}", i + 1);
     }
@@ -367,6 +370,9 @@ impl Fmt {
                     v.push(format!("  image {}: {}", i + 1, p.display()));
                 }
                 v.extend(annotations.iter().map(|a| format!("  {}", annotation(a))));
+                if annotations.iter().any(|a| a.color.is_some()) {
+                    v.push("  (text annotations aren't drawn in the image; the pixel is the text's top-left, where the human typed it, usually next to the mark it's about)".into());
+                }
                 v.push("  (reply with: guilab say \"...\")".into());
                 v
             }
@@ -477,7 +483,7 @@ mod tests {
             EventData::Message {
                 text: "fix this".into(),
                 images: vec!["/s/msg-1.png".into()],
-                annotations: vec![Annotation { text: "here".into(), image: Some(0), x: Some(5), y: Some(6) }],
+                annotations: vec![Annotation { text: "here".into(), image: Some(0), x: Some(5), y: Some(6), color: None }],
             },
         );
         msg.tier = Some(Tier::Wake);

@@ -20,3 +20,5 @@ rustix.workspace = true
 anyhow.workspace = true
 calloop.workspace = true
 serde.workspace = true
+png.workspace = true
+libc.workspace = true

@@ -276,16 +276,12 @@ impl Server {
                 Err(e) => Response::err(e),
             },
             Command::Human { op } => match op {
-                HumanOp::Message { text, images, annotations } => match copy_images(&s.dir, "msg", s.log.end(), &images) {
-                    Ok(images) => {
-                        if let Some(a) = annotations.iter().find(|a| a.image.is_some_and(|i| i >= images.len())) {
-                            return Some(Response::err(format!("annotation {:?} is on a missing image", a.text)));
-                        }
-                        s.log.push(EventData::Message { text, images, annotations }, None);
-                        Response::ok(())
+                HumanOp::Message { text, images, annotations } => {
+                    match human_message(s, text, images.into_iter().map(MsgImage::File).collect(), annotations) {
+                        Ok(()) => Response::ok(()),
+                        Err(e) => Response::err(e),
                     }
-                    Err(e) => Response::err(e),
-                },
+                }
                 HumanOp::Input { actions } => {
                     if !slot.lock.human_input_allowed() {
                         return Some(Response::err("the session is locked: human input is blocked (unless shared)"));
@@ -570,6 +566,40 @@ fn peer_gone(stream: &mut UnixStream) -> bool {
         Ok(n) => n == 0,
         Err(e) => !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted),
     }
+}
+
+/// An image attached to a human message.
+pub(crate) enum MsgImage {
+    File(std::path::PathBuf),
+    /// Opaque RGBA8 pixels (from the viewer).
+    Rgba(u32, u32, Vec<u8>),
+}
+
+/// Logs a human message (wakes polls). Images are stored in the session dir as
+/// `msg-SEQ-N.EXT` (files copied, pixels written as PNG).
+pub(crate) fn human_message(s: &mut Session, text: String, images: Vec<MsgImage>, annotations: Vec<guilab_proto::Annotation>) -> Result<(), String> {
+    if let Some(a) = annotations.iter().find(|a| a.image.is_some_and(|i| i >= images.len())) {
+        return Err(format!("annotation {:?} is on a missing image", a.text));
+    }
+    let seq = s.log.end();
+    let mut paths = Vec::new();
+    for (i, img) in images.into_iter().enumerate() {
+        match img {
+            MsgImage::File(src) => {
+                let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
+                let dst = s.dir.join(format!("msg-{seq}-{}.{ext}", i + 1));
+                std::fs::copy(&src, &dst).map_err(|e| format!("image {}: {e}", src.display()))?;
+                paths.push(dst);
+            }
+            MsgImage::Rgba(w, h, px) => {
+                let dst = s.dir.join(format!("msg-{seq}-{}.png", i + 1));
+                guilab_compositor::write_rgba_png(&dst, w, h, &px).map_err(|e| format!("writing {}: {e:#}", dst.display()))?;
+                paths.push(dst);
+            }
+        }
+    }
+    s.log.push(EventData::Message { text, images: paths, annotations }, None);
+    Ok(())
 }
 
 /// Copies message attachments into the session dir as `PREFIX-SEQ-N.EXT`.

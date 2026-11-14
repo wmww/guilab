@@ -1,6 +1,7 @@
-//! guilab's viewer UI: session tabs, the session view (zoom/pan, input forwarding) and lock
-//! controls. Pure egui: sessions come in as [`SessionView`]s, the human's actions go out
-//! as [`Action`]s, which the server applies.
+//! guilab's viewer UI: session tabs, the session view (zoom/pan, input forwarding), lock
+//! controls, and per session the drawing toolbar and chat panel (`guilab-markup`). Pure
+//! egui: sessions come in as [`SessionView`]s, the human's actions go out as [`Action`]s,
+//! which the server applies.
 //!
 //! Mouse scheme (the app gets plain clicks, drags and scrolling over its image):
 //! - Ctrl+scroll anywhere, or scroll outside the image: zoom at the pointer. Pinch: zoom.
@@ -14,12 +15,15 @@
 use std::collections::HashMap;
 
 use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
+use guilab_markup::{Annotated, Chat, FeedItem, Sketch};
 
 use crate::host::HostInput;
 
 /// A session as the UI sees it.
 pub struct SessionView<'a> {
     pub name: &'a str,
+    /// Unique per session instance (a new session with an old name starts fresh).
+    pub key: &'a str,
     /// The session's latest frame, if any.
     pub texture: Option<egui::TextureId>,
     /// Output size in pixels.
@@ -56,11 +60,31 @@ impl Input {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Input { session: String, input: Input },
     Revoke { session: String },
     Share { session: String, on: bool },
+    /// A drawing started: answer with [`ViewerUi::set_screenshot`] (whole output, no cursor).
+    Freeze { session: String },
+    /// The human sent a message (text, composited drawings with their text annotations).
+    Message { session: String, text: String, images: Vec<Annotated> },
+}
+
+/// UI state of one session.
+struct PerSession {
+    key: String,
+    zoom: Zoom,
+    sketch: Sketch,
+    chat: Chat,
+    /// Next event seq the feed wants (see [`ViewerUi::feed_cursor`]).
+    feed_next: u64,
+}
+
+impl PerSession {
+    fn new(key: &str) -> PerSession {
+        let id = egui::Id::new(("session", key));
+        PerSession { key: key.into(), zoom: Zoom::default(), sketch: Sketch::new(id.with("sketch")), chat: Chat::new(id.with("chat")), feed_next: 0 }
+    }
 }
 
 /// Zoom and pan of one session's view.
@@ -90,7 +114,7 @@ const WHEEL_PX: f64 = 15.0;
 #[derive(Default)]
 pub struct ViewerUi {
     current: Option<String>,
-    zooms: HashMap<String, Zoom>,
+    sessions: HashMap<String, PerSession>,
     /// Buttons and keys we pressed in `held_in`, to release when input goes elsewhere.
     held_buttons: Vec<u32>,
     held_keys: Vec<u32>,
@@ -149,6 +173,40 @@ impl ViewerUi {
         }
     }
 
+    fn per(&mut self, name: &str, key: &str) -> &mut PerSession {
+        let p = self.sessions.entry(name.to_string()).or_insert_with(|| PerSession::new(key));
+        if p.key != key {
+            *p = PerSession::new(key);
+        }
+        p
+    }
+
+    /// The next session event seq its feed wants (0 = it has nothing yet).
+    pub fn feed_next(&mut self, name: &str, key: &str) -> u64 {
+        self.per(name, key).feed_next
+    }
+
+    /// Appends feed items for a session; `next`: the seq after the last event they cover.
+    pub fn push_feed(&mut self, name: &str, key: &str, items: Vec<FeedItem>, next: u64) {
+        let p = self.per(name, key);
+        for i in items {
+            p.chat.push(i);
+        }
+        p.feed_next = next;
+    }
+
+    /// The frozen screenshot for a drawing that asked for one ([`Action::Freeze`]).
+    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage) {
+        if let Some(p) = self.sessions.get_mut(name) {
+            p.sketch.set_screenshot(image);
+        }
+    }
+
+    /// Whether keys belong to egui even without a focused text field (a drawing is open).
+    pub fn keys_to_egui(&self) -> bool {
+        self.current.as_deref().and_then(|c| self.sessions.get(c)).is_some_and(|p| p.sketch.drawing_open())
+    }
+
     /// Draws the whole viewer. `inputs`: this frame's host input in order; raw keys in it
     /// are meant for the session (egui doesn't want keyboard input). `keyboard_left`: the
     /// host keyboard focus left the window.
@@ -157,7 +215,7 @@ impl ViewerUi {
         if self.current.as_deref().is_none_or(|c| !sessions.iter().any(|s| s.name == c)) {
             self.current = sessions.first().map(|s| s.name.to_string());
         }
-        self.zooms.retain(|k, _| sessions.iter().any(|s| s.name == k));
+        self.sessions.retain(|k, p| sessions.iter().any(|s| s.name == k && s.key == p.key));
 
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -185,22 +243,40 @@ impl ViewerUi {
             self.image_rect = None;
             return out;
         };
+        // Taken out of the map while drawing, so `self` stays free to borrow.
+        self.per(s.name, s.key);
+        let mut p = self.sessions.remove(s.name).unwrap();
 
+        egui::Panel::left("tools").resizable(false).exact_size(40.0).show(ui, |ui| {
+            ui.vertical_centered(|ui| p.sketch.toolbar(ui));
+        });
+        egui::Panel::bottom("chat").resizable(true).default_size(180.0).size_range(90.0..=800.0).show(ui, |ui| {
+            if let Some(m) = p.chat.show(ui, &mut p.sketch) {
+                out.push(Action::Message { session: s.name.to_string(), text: m.text, images: m.images });
+            }
+        });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let mut zoom = self.zooms.get(s.name).copied().unwrap_or_default();
             egui::Panel::top("session-bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     self.lock_bar(ui, s, &mut out);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        zoom_bar(ui, &mut zoom);
+                        zoom_bar(ui, &mut p.zoom);
                     });
                 });
             });
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
-            self.view(ui, s, &mut zoom, view, resp.hovered(), inputs, &mut out);
-            self.zooms.insert(s.name.to_string(), zoom);
+            let drawing = p.sketch.active();
+            self.view(ui, s, &mut p.zoom, view, resp.hovered(), drawing, inputs, &mut out);
+            if drawing && let Some(rect) = self.image_rect {
+                let size = [s.size.0 as usize, s.size.1 as usize];
+                p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32 });
+            }
         });
+        if p.sketch.wants_screenshot() {
+            out.push(Action::Freeze { session: s.name.to_string() });
+        }
+        self.sessions.insert(s.name.to_string(), p);
         out
     }
 
@@ -224,7 +300,8 @@ impl ViewerUi {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+    /// `drawing`: the sketch owns the pointer over the image; nothing goes to the app.
+    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, drawing: bool, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
         let ppp = ui.ctx().pixels_per_point();
         // Session pixels in points at zoom 1.
         let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
@@ -248,6 +325,7 @@ impl ViewerUi {
         };
         let send = |out: &mut Vec<Action>, input: Input| out.push(Action::Input { session: s.name.to_string(), input });
         let blocked = s.blocked();
+        let to_app = !blocked && !drawing;
         let layer = ui.layer_id();
         let ours = |p: Pos2| view.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer);
         let zoom_at = |z: &mut Zoom, img: &mut Rect, p: Pos2, factor: f32| {
@@ -304,7 +382,7 @@ impl ViewerUi {
                         continue;
                     }
                     let grabbed = !self.held_buttons.is_empty();
-                    if grabbed || (!blocked && ours(p) && img.contains(p)) {
+                    if grabbed || (to_app && ours(p) && img.contains(p)) {
                         let (x, y) = to_session(img, p);
                         send(out, Input::Motion { x, y });
                     }
@@ -320,7 +398,7 @@ impl ViewerUi {
                             && let Some((_, (x, y))) = self.middle.take()
                         {
                             // A middle click that never moved: deliver it now.
-                            if !blocked {
+                            if to_app {
                                 send(out, Input::Motion { x, y });
                                 send(out, Input::Button { button: code, pressed: true });
                                 send(out, Input::Button { button: code, pressed: false });
@@ -347,7 +425,7 @@ impl ViewerUi {
                         }
                         continue;
                     }
-                    if blocked {
+                    if !to_app {
                         continue;
                     }
                     self.held_in = Some(s.name.to_string());
@@ -361,7 +439,7 @@ impl ViewerUi {
                     if !ours(p) {
                         continue;
                     }
-                    if modifiers.ctrl || !img.contains(p) {
+                    if modifiers.ctrl || drawing || !img.contains(p) {
                         let notches = match unit {
                             egui::MouseWheelUnit::Point => delta.y / 50.0,
                             egui::MouseWheelUnit::Line => delta.y,
@@ -420,7 +498,7 @@ impl ViewerUi {
             }
         }
         painter.rect_stroke(img, 0.0, egui::Stroke::new(1.0, Color32::from_gray(60)), egui::StrokeKind::Outside);
-        if blocked {
+        if blocked && !drawing {
             let banner = Rect::from_min_size(view.min + vec2(8.0, 8.0), vec2(view.width() - 16.0, 26.0));
             painter.rect_filled(banner, 4.0, Color32::from_black_alpha(190));
             painter.text(banner.center(), egui::Align2::CENTER_CENTER, "Input blocked: an agent holds the lock", egui::FontId::proportional(14.0), Color32::from_rgb(240, 180, 80));
@@ -431,7 +509,7 @@ impl ViewerUi {
         // Cursor: the app's over its image, a hand while panning.
         if self.panning.is_some() {
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        } else if hovered && let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
+        } else if hovered && !drawing && let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
             if img.contains(p) && !blocked {
                 ui.ctx().set_cursor_icon(s.cursor);
             } else if img.contains(p) {

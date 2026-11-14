@@ -1,0 +1,18 @@
+[package]
+name = "guilab-markup"
+description = "egui widgets for drawing on screenshots, queueing them and chatting: screenshot in, annotated images and messages out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Self-contained on purpose: depends only on egui, so another egui app can copy this
+# crate out as is. No guilab, compositor or IPC types.
+
+[lib]
+doctest = false
+
+[dependencies]
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+
+[dev-dependencies]
+png.workspace = true

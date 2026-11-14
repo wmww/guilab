@@ -2,7 +2,7 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Plan steps 1-6 (skeleton, headless compositor, input and locking, Xwayland, event log, viewer window) are built; see `plan.md` for what's next and `code-map.md` for the code.
+Plan steps 1-7 (skeleton, headless compositor, input and locking, Xwayland, event log, viewer window, chat and drawing) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
@@ -56,9 +56,9 @@ Plan steps 1-6 (skeleton, headless compositor, input and locking, Xwayland, even
 
 ## Messaging
 - `guilab poll [--timeout SECS]` blocks until a wake event, prints it and everything else since the previous delivery, and exits 0 (2 on timeout, still printing what happened). `--follow` keeps going with one line per wake event (passive events appended as `(meanwhile: ...)`), for Monitor-style tools.
-- A human message has text, image attachments (copied into the session dir as `msg-SEQ-N.EXT`, path given) and text annotations (`{text, image?, x?, y?}`, positions in image pixels). How the viewer delivers annotation text (baked into the image, as data, or both) is decided in step 7; the event carries both kinds.
+- A human message has text, image attachments (in the session dir as `msg-SEQ-N.EXT`, path given) and text annotations (`{text, image?, x?, y?, color?}`, positions in image pixels). The viewer sends each drawing as one PNG with the shapes drawn in but **not the text**; the text goes as annotations (top-left of the text, its color), and `poll` adds a one-line hint saying so. See "Annotation text" below for why.
 - `guilab say TEXT [--image PATH]` logs an agent → human message (images copied as `say-SEQ-N.EXT`) for the viewer's feed.
-- The hidden `guilab debug message|input|revoke|share` acts as the human for tests (and for messages until step 7 adds the viewer's input box). Human input goes through `Session::inject(.., InputSource::Human)`, which logs it; it's refused while locked and not shared.
+- The hidden `guilab debug message|input|revoke|share` acts as the human for tests. The viewer's message box and `debug message` both go through `requests::human_message`. Human input goes through `Session::inject(.., InputSource::Human)`, which logs it; it's refused while locked and not shared.
 
 ## Viewer
 Start with basic functionality. Don't build UI or features we aren't sure we need.
@@ -68,16 +68,18 @@ Layout:
 - **Main area:** a bar with the lock controls (Revoke, Share, status) and zoom controls (−, %, +, Fit, 1:1), then the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. The human uses the app directly here, unless locked out (then a banner says so and input is dropped; releases of held keys/buttons still go through).
   - Zoom is host physical pixels per session pixel (100% = pixel-exact). Fit is the default and follows the window, capped at the larger of 1:1 and the session's logical size (so a scale-2 session on a 1x host shows pixel-exact, a scale-1 session on a 2x host at its normal size).
   - Mouse scheme: plain clicks, drags and scrolling over the image go to the app. Ctrl+scroll anywhere, scroll outside the image, or pinch zooms at the pointer; middle-drag anywhere or any drag outside the image pans. A middle click that doesn't move still reaches the app (sent on release). Rejected: plain scroll to zoom and space+drag (both take input the app needs).
-  - Keys go to the session unless an egui text field has focus (step 7's input box). Human input to a session counts as activity for its TTL.
-- **Left edge:** a narrow drawing toolbar for diagramming, not art. One fixed-width pen, box, ellipse, line, arrow, text (as a tool or by double-click), and a few colors. Nothing more.
-- **Bottom:** the message input, plus a feed of the conversation: human messages, agent `say` output, and each agent command as a log line, so you can see what the agent is doing. A drag handle resizes it.
+  - Keys go to the session unless an egui text field has focus (message box, text annotation) or a drawing is open. Human input to a session counts as activity for its TTL.
+- **Left edge:** a narrow drawing toolbar for diagramming, not art: use-the-app (no tool), pen, box, ellipse, line, arrow, text (as a tool or by double-click with any tool), five colors (red, yellow, green, blue, white; picking one with no tool selected picks the pen), undo. Nothing more. One fixed stroke width and font size (3 and 18 logical px, scaled by the session scale).
+- **Bottom:** the message box (Enter sends, Shift+Enter newline), queued thumbnails next to it, and above it a feed: human messages and agent `say` (with image thumbnails, full size on hover) and each agent command as one gray line (`guilab ...`), so you can see what the agent is doing. A drag handle resizes it. The feed is built from the session log, so it's the same after hide/show.
 
 Drawing flow:
-- Starting to draw (any tool) freezes a screenshot of the session (whole output, no cursor) and the drawing goes over it.
-- "Queue" shrinks it to a thumbnail next to the input box. A queued thumbnail can be deleted. All queued screenshots go with the next message.
-- Sending a message while a drawing is still open sends that drawing with it.
-- Keep annotation + queuing (and the chat feed, if it fits naturally) in its own crate(s), easy to copy into another egui app: depends only on egui and image types, takes a screenshot in, gives annotated images, text annotations and queue events out. No compositor, IPC or session types.
-- Each screenshot reaches the agent as one composited image file. Text annotations either get baked into the image, or sent as text with a position, or both. Decide by testing: give fresh, context-free sub-agents each format and see which they understand better.
+- With a tool selected, pressing on the image starts a drawing: the viewer asks the server for a screenshot (whole output, no cursor, forced opaque) and shows it frozen under the marks. While a tool is selected or a drawing is open, pointer input over the image never reaches the app; zoom/pan work as usual (plain scroll also zooms). While a drawing is open, keys stay in the viewer (Ctrl+Z undo, typing text), and a bar over it says "Drawing on a frozen screenshot" with Queue and Discard.
+- Text: click (text tool) or double-click (any tool) opens a box at that point; Enter or clicking elsewhere commits, Esc cancels. Text has a light or dark backing so it reads on any screenshot.
+- "Queue" composites the drawing into a thumbnail next to the message box (× deletes it, hover shows it big). All queued drawings, plus one still open, go with the next message, which may have no text. Queue, Send and Discard return to the use-the-app tool.
+- Marks are stored in session pixels and drawn with egui; the composite is rendered on the CPU by tessellating the same egui shapes (`guilab-markup` `Renderer`), so it matches the screen exactly with no GPU or extra dependency.
+- Annotation + queue + chat feed live in `crates/markup` (`guilab-markup`), which depends only on egui: screenshot (`ColorImage`) in; composited images, text notes and messages out. No compositor, IPC or session types. Its `compose` example and unit tests use it without guilab.
+
+Annotation text (decided by testing): context-free agents (opus) got three realistic annotated screenshots (widget factory, calculator, gtk4-demo; boxes, ellipses, arrows, pen, 4 notes each) and had to name the element and change for each note. Formats: A text baked into the image only, B text only as positioned annotations (image without text), C both; two agents each. B: 24/24 correct and confident. A and C: 22/24; both missed the same note because the baked text box covered the label it pointed at (they said so). Agents matched B's notes to arrows/boxes by position fine; adding the note's color (one more agent: 12/12, matched by color and distance) helps. So: shapes baked, text sent as annotations with position and color. The viewer still shows text on the drawing and in queued thumbnails (a preview with text).
 
 ## Screenshots
 - Agent screenshots take options: target (output or surface), cursor on/off, and settle-wait on/off. The default waits for the app to finish drawing, includes no cursor, and captures the whole output.

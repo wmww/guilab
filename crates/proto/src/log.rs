@@ -150,6 +150,12 @@ impl EventLog {
         Delivery { since, events }
     }
 
+    /// Events with seq >= `from`, oldest first (cheap: binary search).
+    pub fn from_seq(&self, from: u64) -> impl DoubleEndedIterator<Item = &Event> {
+        let i = self.events.partition_point(|e| e.seq < from);
+        self.events.range(i..)
+    }
+
     /// `guilab log`: events after seq `after` and/or since time `since`, of the given
     /// kinds (all if empty), at most the `last` newest (0 = all).
     pub fn query(&self, after: Option<u64>, since: Option<u64>, kinds: &[&str], last: usize) -> LogInfo {

@@ -228,7 +228,7 @@ enum ClipOp {
 }
 
 fn parse_note(s: &str) -> Result<guilab_proto::Annotation, String> {
-    let mut a = guilab_proto::Annotation { text: s.to_string(), image: None, x: None, y: None };
+    let mut a = guilab_proto::Annotation { text: s.to_string(), image: None, x: None, y: None, color: None };
     let Some((place, text)) = s.split_once(':') else { return Ok(a) };
     let (img, xy) = match place.split_once('@') {
         Some((i, xy)) => (Some(i), xy),

@@ -12,14 +12,25 @@ use std::{
 
 use calloop::{RegistrationToken, channel};
 use guilab_compositor::{InputEvent, InputSource, Session, render::Renderer};
-use guilab_proto::{Response, ViewerInfo};
-use guilab_viewer::{Action, BufferKind, Connected, HostEvent, HostSource, Input, SessionFrame, Viewer, egui::CursorIcon as EguiCursor};
+use guilab_proto::{Annotation, EventData, Response, ViewerInfo, text::Fmt};
+use guilab_viewer::{
+    Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Viewer, Who,
+    egui::{ColorImage, CursorIcon as EguiCursor},
+    markup,
+};
 use smithay::{
     backend::input::AxisSource,
     input::{keyboard::Keycode, pointer::{CursorIcon, CursorImageStatus}},
 };
 
-use crate::{Server, send};
+use crate::{
+    Server,
+    requests::{MsgImage, human_message},
+    send,
+};
+
+/// Feed items loaded when the viewer first shows a session.
+const FEED_BACKLOG: usize = 300;
 
 /// How long `show` waits for the window's first frame.
 const SHOW_TIMEOUT: Duration = Duration::from_secs(10);
@@ -269,6 +280,15 @@ impl Server {
                 if s.viewer.frames == 0 && now >= s.deadline {
                     return self.hide_viewer(Some("timed out waiting for the host to show the window"));
                 }
+                for (name, slot) in &self.sessions {
+                    let log = &slot.session.log;
+                    let next = s.viewer.feed_next(name, &slot.session.tag);
+                    if next == log.end() {
+                        continue;
+                    }
+                    let items = feed_items(log, next);
+                    s.viewer.push_feed(name, &slot.session.tag, items, log.end());
+                }
                 let frames: Vec<SessionFrame> = self
                     .sessions
                     .iter()
@@ -329,6 +349,44 @@ impl Server {
                 }
                 Action::Revoke { session } => self.revoke_lock(&session),
                 Action::Share { session, on } => self.share(&session, on),
+                Action::Freeze { session } => {
+                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
+                    let shot = match slot.session.read_rgba() {
+                        Ok((w, h, mut px)) => {
+                            // Like screenshots: opaque (clients may leave alpha 0, e.g. GL areas).
+                            px.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
+                            ColorImage::from_rgba_premultiplied([w as usize, h as usize], &px)
+                        }
+                        Err(e) => {
+                            tracing::warn!("viewer: screenshot for drawing: {e:#}");
+                            continue;
+                        }
+                    };
+                    if let ViewerState::Shown(s) = &mut self.viewer {
+                        s.viewer.set_screenshot(&session, shot);
+                    }
+                }
+                Action::Message { session, text, images } => {
+                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
+                    slot.last_active = Instant::now();
+                    let mut annotations = Vec::new();
+                    let mut files = Vec::new();
+                    for (i, a) in images.into_iter().enumerate() {
+                        let [w, h] = a.image.size;
+                        let px: Vec<u8> = a.image.pixels.iter().flat_map(|c| c.to_array()).collect();
+                        files.push(MsgImage::Rgba(w as u32, h as u32, px));
+                        annotations.extend(a.notes.into_iter().map(|n| Annotation {
+                            text: n.text,
+                            image: Some(i),
+                            x: Some(n.pos.x.round() as i32),
+                            y: Some(n.pos.y.round() as i32),
+                            color: markup::mark::color_name(n.color).map(|c| c.to_lowercase()),
+                        }));
+                    }
+                    if let Err(e) = human_message(&mut slot.session, text, files, annotations) {
+                        tracing::warn!("viewer: sending message: {e}");
+                    }
+                }
             }
         }
     }
@@ -345,4 +403,72 @@ pub(crate) fn insert_channel(handle: &calloop::LoopHandle<'static, Server>) -> a
         })
         .map_err(|e| anyhow::anyhow!("{}", e.error))?;
     Ok(tx)
+}
+
+/// The session's local UTC offset in seconds (for feed times).
+fn tz_offset() -> i64 {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
+    }
+}
+
+/// Feed items for the log's messages, `say`s and agent commands from seq `next` on (the
+/// newest [`FEED_BACKLOG`] when the feed is new).
+fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
+    let fmt = Fmt { tz: tz_offset() };
+    let wanted = |e: &&guilab_proto::Event| matches!(e.data, EventData::Message { .. } | EventData::Say { .. } | EventData::Command { .. });
+    let mut events: Vec<&guilab_proto::Event> = if next == 0 {
+        log.from_seq(0).rev().filter(wanted).take(FEED_BACKLOG).collect()
+    } else {
+        log.from_seq(next).filter(wanted).collect()
+    };
+    if next == 0 {
+        events.reverse();
+    }
+    events
+        .into_iter()
+        .map(|e| {
+            let time = fmt.clock(e.t);
+            match &e.data {
+                EventData::Message { text, images, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images) },
+                EventData::Say { text, images } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images) },
+                EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: format!("guilab {cmd}"), images: Vec::new() },
+                _ => unreachable!("filtered"),
+            }
+        })
+        .collect()
+}
+
+fn load_images(paths: &[PathBuf]) -> Vec<std::sync::Arc<ColorImage>> {
+    paths
+        .iter()
+        .filter_map(|p| match decode_png(p) {
+            Ok(i) => Some(std::sync::Arc::new(i)),
+            Err(e) => {
+                tracing::warn!("viewer: image {}: {e:#}", p.display());
+                None
+            }
+        })
+        .collect()
+}
+
+fn decode_png(path: &std::path::Path) -> anyhow::Result<ColorImage> {
+    let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info()?;
+    let mut buf = vec![0; r.output_buffer_size().ok_or_else(|| anyhow::anyhow!("image too large"))?];
+    let info = r.next_frame(&mut buf)?;
+    let buf = &buf[..info.buffer_size()];
+    let size = [info.width as usize, info.height as usize];
+    Ok(match info.color_type {
+        png::ColorType::Rgb => ColorImage::from_rgb(size, buf),
+        png::ColorType::Rgba => ColorImage::from_rgba_unmultiplied(size, buf),
+        png::ColorType::Grayscale => ColorImage::from_rgb(size, &buf.iter().flat_map(|g| [*g; 3]).collect::<Vec<_>>()),
+        png::ColorType::GrayscaleAlpha => {
+            ColorImage::from_rgba_unmultiplied(size, &buf.chunks(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect::<Vec<_>>())
+        }
+        t => anyhow::bail!("unsupported PNG color type {t:?}"),
+    })
 }

@@ -3,7 +3,8 @@
 //! - [`source`], [`host`], [`gfx`]: generic. egui in a window on a host Wayland display,
 //!   drawn by a smithay `GlesRenderer` that lives on a render node (not on the window), so
 //!   the window can come and go while the renderer stays. Nothing guilab-specific.
-//! - [`ui`] and [`Viewer`]: guilab's UI on top (tabs, session view, lock controls).
+//! - [`ui`] and [`Viewer`]: guilab's UI on top (tabs, session view, lock controls, and the
+//!   drawing toolbar and chat panel from `guilab-markup`).
 //!
 //! The server owns sessions; each draw it passes [`SessionFrame`]s in and applies the
 //! [`ui::Action`]s that come back.
@@ -25,6 +26,7 @@ use smithay::backend::{
 };
 
 pub use egui;
+pub use guilab_markup::{self as markup, Annotated, FeedItem, Who};
 pub use host::{BufferKind, Connected, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
 pub use ui::{Action, Input};
@@ -105,6 +107,24 @@ impl Viewer {
         (self.host.can_draw() && changed) || self.host.has_input()
     }
 
+    /// The next event seq the session's feed wants (0 = nothing shown yet).
+    pub fn feed_next(&mut self, name: &str, key: &str) -> u64 {
+        self.ui.feed_next(name, key)
+    }
+
+    /// Adds feed items (events before `next`) for a session.
+    pub fn push_feed(&mut self, name: &str, key: &str, items: Vec<FeedItem>, next: u64) {
+        let any = !items.is_empty();
+        self.ui.push_feed(name, key, items, next);
+        self.host.dirty |= any;
+    }
+
+    /// Answers [`Action::Freeze`].
+    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage) {
+        self.ui.set_screenshot(name, image);
+        self.host.dirty = true;
+    }
+
     /// Releases the human's held buttons and keys (on hide).
     pub fn release_all(&mut self) -> Vec<Action> {
         self.ui.release_all()
@@ -116,7 +136,7 @@ impl Viewer {
         let keyboard_left = std::mem::take(&mut self.host.keyboard_left);
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
-        let to_session = !self.gfx.ctx.egui_wants_keyboard_input();
+        let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !self.ui.keys_to_egui();
         let events: Vec<egui::Event> = inputs
             .iter()
             .filter_map(|i| match i {
@@ -143,6 +163,7 @@ impl Viewer {
             .iter()
             .map(|s| ui::SessionView {
                 name: s.name,
+                key: s.key,
                 texture: if Some(s.name) == cur.as_deref() { tex } else { None },
                 size: s.size,
                 scale: s.scale,
@@ -192,6 +213,9 @@ impl Viewer {
         if drawn {
             self.frames += 1;
             self.shown = self.signature(sessions);
+        } else {
+            // The UI ran on input without presenting; its new state still has to be shown.
+            self.host.dirty = true;
         }
         Ok(actions)
     }

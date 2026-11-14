@@ -182,3 +182,41 @@ fn show_refuses_own_session() {
     let (ok, _, err) = v.try_run(&["show"]);
     assert!(!ok && err.contains("WAYLAND_DISPLAY"), "{err}");
 }
+
+/// Drawing and chat, end to end: the agent's `say` reaches the feed; the human draws a box
+/// and a text note, types a message and sends it; `poll` gets the image and the note.
+/// Positions are the viewer's layout in a 1200x800 window (toolbar at the left, message
+/// box at the bottom, the 800x600 session fitted in between).
+#[test]
+fn draw_and_send() {
+    let Some((h, sock, t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let shot = v.path("shot.png");
+    v.run(&["screenshot", "--no-settle", "-o", &shot]);
+    v.run(&["say", "here's the app", "--image", &shot]);
+
+    let step = |actions: &[&str]| {
+        h.input(&t, actions);
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    step(&["move", "19", "101", "click"]); // box tool
+    step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
+    step(&["move", "19", "230", "click"]); // text tool
+    step(&["move", "520", "330", "click"]);
+    step(&["type", "label", "key", "Return"]);
+    step(&["move", "600", "777", "click"]); // message box
+    step(&["type", "fix it", "key", "Return"]);
+
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    assert!(out.contains("human message: \"fix it\""), "{out}{err}");
+    assert!(out.contains("red text annotation on image 1 at pixel") && out.contains("\"label\""), "{out}");
+    let img = out.lines().find_map(|l| l.trim().strip_prefix("image 1: ")).expect("an image");
+    let (w, hh, px, ch) = crate::read_png(img);
+    assert_eq!((w, hh), (800, 600));
+    let red = px.chunks(ch).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count();
+    assert!(red > 300, "the box isn't in the image ({red} red pixels)");
+    assert!(v.info().viewer.is_some(), "the viewer survived");
+}

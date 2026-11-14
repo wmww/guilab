@@ -23,3 +23,4 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
 egui_glow = "0.35"
 glow = "0.17"
+guilab-markup.workspace = true
