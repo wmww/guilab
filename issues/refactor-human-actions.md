@@ -13,4 +13,4 @@ So integration tests exercise rules the viewer doesn't use, and a rule change ha
 - `server/src/human.rs` with methods on `Server`: `human_input(session, InputEvent)` (gate + TTL + log), `human_resize(session, size, scale)`, `human_revoke(session) -> Result`, `human_message(session, text, Vec<MsgImage>)`, `human_freeze(session) -> (image, id)`. `apply_viewer_actions` and the `Command::Human` arm both become thin adapters.
 - `debug input` keeps chains (tests need sleeps/glides) but each event goes through `human_input`, and human chains aren't aborted by agent lock changes (`abort_inputs` should take only `key.is_some()` jobs).
 - `human_message`: resolve all images first, then hold them all.
-- Once `remove-share.md` lands, `human_input_allowed()` is just `!locked`.
+- Share is gone: `human_input_allowed()` is just `current.is_none()`; it could become `!is_locked()`.

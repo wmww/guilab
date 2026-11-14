@@ -242,6 +242,13 @@ pub struct ViewerUi {
     pub theme: ThemePref,
 }
 
+/// View menu choices that outlive the window (the server keeps them across hide/show).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Prefs {
+    pub theme: ThemePref,
+    pub chat: ChatPlace,
+}
+
 /// Where the chat panel goes (View menu).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ChatPlace {
@@ -262,6 +269,15 @@ fn linux_button(b: PointerButton) -> u32 {
 }
 
 impl ViewerUi {
+    pub fn prefs(&self) -> Prefs {
+        Prefs { theme: self.theme, chat: self.chat_place }
+    }
+
+    pub fn set_prefs(&mut self, p: Prefs) {
+        self.theme = p.theme;
+        self.chat_place = p.chat;
+    }
+
     /// The selected session (last frame).
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
@@ -590,7 +606,7 @@ impl ViewerUi {
                     let fixed = p.sizing.follow;
                     let z = &mut p.zoom;
                     // Steppers: they keep the menu open.
-                    let step = vec2(t.size.menu_item_h, 0.0);
+                    let step = vec2(t.size.menu_item_h, t.size.menu_item_h - t.space.sm);
                     m.custom(
                         |ui| {
                             ui.label("Zoom");
@@ -601,7 +617,7 @@ impl ViewerUi {
                                     z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
                                     z.fit = false;
                                 }
-                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(step * 2.0)).on_hover_text("Actual size (100%)").clicked() {
+                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(step.x * 2.0, step.y))).on_hover_text("Actual size (100%)").clicked() {
                                     *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
                                 }
                                 if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Zoom out").clicked() {

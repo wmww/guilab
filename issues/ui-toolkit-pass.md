@@ -1,10 +1,7 @@
-# UI code pass
+# UI code pass: what's left
 
-Queued for after the dogfood session and the queued viewer features (move tool, cursors, sizing, agent status).
-
-Go through the viewer and markup UI code and get it into shape per design.md's "UI quality" rule:
-- Find hand-rolled widgets (menu bar from plain buttons, toolbars, popups, panels) and fix what feels off compared to a normal desktop app: hover/pressed/disabled states, keyboard navigation and shortcuts, menus closing on outside click/Escape, focus handling, spacing, cursors, tooltips.
-- Pull repeated patterns into a small set of reusable widgets with the right abstractions. Keep `crates/markup` free of guilab types.
-- Theming per design.md: one theme module with named tokens (colors, spacing, sizes, rounding, fonts) in light and dark variants. Move every hardcoded value there. Follow the desktop's color-scheme via the XDG portal (the server's own D-Bus, not a session's), default dark, View menu System/Light/Dark. Check both themes by screenshot.
-- Check if a well-built egui crate covers something better than our code; adopt only if it's genuinely good.
-- Verify by using the viewer through guilab itself (screenshots + input), not just by reading code.
+The toolkit and theming parts are done (`guilab-kit`: theme tokens light/dark following the XDG portal, View > Appearance, menus with keyboard navigation, shared widgets; viewer and markup use it). Left for after image-system phases 4–7, which rebuild the editor (toolbar, canvas) and chat (feed, composer):
+- Go over the new editor and chat UI per design.md's "UI quality" rule (states, keyboard, focus, spacing, cursors, tooltips); build them on kit widgets and tokens only.
+- Keyboard access to the menu bar itself (e.g. F10): keys go to the session app unless egui has focus, so there's no free key yet. Decide whether to reserve one.
+- Tooltips are egui's (placed below the pointer). Restyle if they look off next to the new UI.
+- Verify by using the viewer through guilab itself (screenshots + input), both themes.

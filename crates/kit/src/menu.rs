@@ -111,38 +111,49 @@ impl MenuBar {
         if ui.memory(|m| m.focused().is_some()) {
             return keys;
         }
-        let take = |k: Key| ui.input_mut(|i| i.consume_key(Modifiers::NONE, k));
-        if take(Key::Escape) {
-            state.open = None;
-            return keys;
-        }
-        let count = |k: Key| ui.input_mut(|i| i.count_and_consume_key(Modifiers::NONE, k));
-        for _ in 0..count(Key::ArrowDown) {
-            state.hot = step(&state.items, state.hot, 1);
-        }
-        for _ in 0..count(Key::ArrowUp) {
-            state.hot = step(&state.items, state.hot, -1);
-        }
-        if take(Key::Home) {
-            state.hot = step(&state.items, None, 1);
-        }
-        if take(Key::End) {
-            state.hot = step(&state.items, None, -1);
-        }
-        for (k, dir) in [(Key::ArrowRight, 1), (Key::ArrowLeft, -1)] {
-            if take(k) {
-                let enabled: Vec<bool> = state.titles.iter().map(|t| t.1).collect();
-                let cur = state.titles.iter().position(|t| Some(&t.0) == state.open.as_ref());
-                if let Some(i) = step(&enabled, cur, dir) {
-                    state.open = Some(state.titles[i].0.clone());
-                    state.width = 0.0;
-                    state.items.clear();
-                    state.hot = None;
+        // Taken in order: "End, Up" must land on the second-to-last item.
+        const NAV: [Key; 9] = [Key::Escape, Key::ArrowDown, Key::ArrowUp, Key::Home, Key::End, Key::ArrowRight, Key::ArrowLeft, Key::Enter, Key::Space];
+        let pressed: Vec<Key> = ui.input_mut(|i| {
+            let mut out = Vec::new();
+            i.events.retain(|e| match e {
+                egui::Event::Key { key, pressed, modifiers, .. } if NAV.contains(key) && modifiers.matches_exact(Modifiers::NONE) => {
+                    if *pressed {
+                        out.push(*key);
+                    }
+                    false
+                }
+                _ => true,
+            });
+            out
+        });
+        for k in pressed {
+            match k {
+                Key::Escape => {
+                    state.open = None;
+                    break;
+                }
+                Key::ArrowDown => state.hot = step(&state.items, state.hot, 1),
+                Key::ArrowUp => state.hot = step(&state.items, state.hot, -1),
+                Key::Home => state.hot = step(&state.items, None, 1),
+                Key::End => state.hot = step(&state.items, None, -1),
+                Key::ArrowRight | Key::ArrowLeft => {
+                    let dir = if k == Key::ArrowRight { 1 } else { -1 };
+                    let enabled: Vec<bool> = state.titles.iter().map(|t| t.1).collect();
+                    let cur = state.titles.iter().position(|t| Some(&t.0) == state.open.as_ref());
+                    if let Some(i) = step(&enabled, cur, dir) {
+                        state.open = Some(state.titles[i].0.clone());
+                        state.width = 0.0;
+                        state.items.clear();
+                        state.hot = None;
+                    }
+                    // The new menu's items are known next frame.
+                    break;
+                }
+                _ => {
+                    keys.activate = state.hot;
+                    break;
                 }
             }
-        }
-        if take(Key::Enter) | take(Key::Space) {
-            keys.activate = state.hot;
         }
         keys
     }

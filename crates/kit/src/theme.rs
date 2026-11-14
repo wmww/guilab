@@ -452,7 +452,7 @@ impl Theme {
         sp.button_padding = vec2(self.space.md, self.space.xs + 1.0);
         sp.menu_margin = Margin::symmetric(0, self.space.sm as i8);
         sp.window_margin = Margin::same(self.space.md as i8);
-        sp.interact_size = vec2(40.0, 22.0);
+        sp.interact_size = vec2(40.0, 18.0);
         sp.tooltip_width = 480.0;
 
         s.interaction.tooltip_delay = self.motion.tooltip_delay;

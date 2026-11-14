@@ -2,7 +2,7 @@
 
 The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
 
-**Status:** phases 1 (`crates/image`) and 3 (agent side: server store, CLI, protocol) are built and tested; the core, server and CLI sections below describe the code as it is. Phases 2, 4–7 not started.
+**Status:** phases 1 (`crates/image`), 2 (`crates/kit`) and 3 (agent side: server store, CLI, protocol) are built and tested; the core, server and CLI sections below describe the code as it is. Phases 4–7 not started.
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -202,17 +202,7 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
-- `Theme` (`Arc`, stored in egui ctx data: `Theme::get(ctx)`, `Theme::install(ctx, Mode)` also sets egui `Visuals`/`Style` from the tokens):
-  - `colors`: panel, view_bg, text, weak, strong, accent, danger, outline, hover_fill, selected_fill, glow, key_point, key_point_hot, hover_outline, me, agent
-  - `space`
-  - `size`: toolbar_w, tool_button, thumb_h (composer and feed), faint_scale, hit_slop, key_point_r, key_point_hit_r, close_badge
-  - `radius`, `font`
-  - `motion`: whoosh 220 ms ease-out-cubic, slot_grow 160 ms, fade 200 ms, hover_grow ×1.15 over 100 ms, hover_delay 0
-  
-  `Theme::dark()`/`light()`. Following the portal and the View menu choice is viewer work (`ui-toolkit-pass.md`).
-- `anim`: `Easing`, and `tween(ctx, id, target, Motion) -> f32` on top of `ctx.animate_value_with_time`. `RectTween` lerps between two rects that are re-resolved every frame.
-- `History<Op>`: `push(op)`, `begin_group()/end_group()`, `undo() -> Option<Op>`/`redo() -> Option<Op>` (the caller applies or reverts), `retain(|op| ..)` (to drop ops for sent drafts), and a limit of 500.
-- Widgets moved here from markup/viewer: `menu` (the menu bar, unchanged API), `toast`, `send_button`, `session tab`, plus new `close_badge` (the × circle) and `thumb_frame` (rounded image with hover and outline states). All values come from `Theme`.
+Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot), hover_outline, me/agent; sizes incl. thumb_h, feed_thumb_h, faint_scale, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`, `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`.
 
 ## guilab-editor
 ```rust
@@ -376,7 +366,7 @@ send it: guilab done "..." --image p4n2
 ## Interface points with work in flight
 - **viewer-cursors**: the editor reports `CanvasOut.cursor`, and the session view applies it over the image, so a tool cursor, never the arrow, shows while a tool takes input.
 - **viewer-sizing**: the open doc has its own `doc_zoom` (fit to its crop) and ignores "lock size to window". Resize handles show on the live view only. Flights use the doc rect from that zoom.
-- **ui-toolkit-pass**: phase 2 creates `guilab-kit` and moves existing widgets into it. The full sweep of hardcoded values and the portal light/dark wiring stay in that issue, done against kit.
+- **ui-toolkit-pass**: kit, the value sweep and portal light/dark are done; the issue keeps the pass over the rebuilt editor and chat UI (after P7).
 
 ## Phases
 Each phase leaves main green (`cargo test --workspace`, clippy) and working end to end.
@@ -384,14 +374,14 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 | # | phase | needs | touches |
 |---|---|---|---|
 | 1 | **(done)** **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
-| 2 | **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
+| 2 | **(done)** **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
 | 3 | **(done)** **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in message/agent events, feed renders from the store, skill doc "Images", `tests/it/images.rs`. Also (beyond the original plan): human messages already go through the store (the current viewer's marks are rebuilt as elements on the frozen base, so nothing baked enters it), `Annotation` is gone, `debug message --draw`, and the `screen` id on image-less messages. Tested end to end on 2 fresh agents. | 1 | proto, server, guilab, viewer, markup, skill |
 | 4 | **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
 | 5 | **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
 | 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured (replaces `Freeze` + sketch tag), Message with drafts → freeze (replaces the markup-mark conversion in `server/src/viewer.rs`), the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` already checks the listing) and the skill doc. | 3, 4, 5 | viewer, server, skill |
 | 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
 
-**Parallelism** (at most 3 worktrees): P2 once viewer-polish lands; then **P4 ∥ P5** (new crates, no overlap). **P6** alone (it touches everything). **P7** alone (viewer UI). `ui-toolkit-pass` comes after P7 or alongside P4/P5 if it stays out of `viewer/src/ui*`.
+**Parallelism** (at most 3 worktrees): **P4 ∥ P5** (new crates, no overlap). **P6** alone (it touches everything). **P7** alone (viewer UI). What's left of `ui-toolkit-pass` comes after P7.
 
 ## Open questions
 See the end of the issue (`image-system.md`). Defaults are used unless the user decides otherwise.

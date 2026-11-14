@@ -157,6 +157,8 @@ pub struct Server {
     pub(crate) viewer_gen: u64,
     /// A tab for the viewer to switch to (`-S NAME show`).
     pub(crate) viewer_tab: Option<String>,
+    /// View menu choices, kept while the viewer is hidden.
+    pub(crate) viewer_prefs: guilab_viewer::Prefs,
     pub(crate) viewer_tx: calloop::channel::Sender<viewer::ConnectResult>,
     last_slow_tick: Instant,
 }
@@ -252,6 +254,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         viewer: Default::default(),
         viewer_gen: 0,
         viewer_tab: None,
+        viewer_prefs: Default::default(),
         viewer_tx,
     };
     if let Some(display) = opts.show

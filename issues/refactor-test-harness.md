@@ -15,3 +15,4 @@ Priority: medium (flakiness under load; notes already say "reproduce flaky tests
 - For "the poller is registered": expose pending-request counts in `ServerInfo` (`ping`), e.g. `pending: { polls, inputs, shots }`, and wait on that. Cheap, also useful for debugging a stuck server. (Pairs with `refactor-deferred-replies.md`, which makes the count trivial.)
 - One runner: `Lab::exec(args) -> Out { code, stdout, stderr }` with builder-ish `.env()`/`.cwd()`; `run`/`json`/`try_run` become one-liners on it. Move shared app/skip helpers (`have`, `gtk4`, `qt6`, `has_python_module`, `wait_log`, `center`) into one `apps.rs`-style helper module, separate from the `apps` test module.
 - Skips: count them (static counter) and print a summary, or honor `GUILAB_REQUIRE_APPS=1` to turn skips into failures for CI-like runs.
+- Seen flaky: `xwayland::x11_clipboard_bridging` timed out in `wait_log` once in a full run (machine busy with a nested viewer); passed 3/3 alone.

@@ -59,6 +59,9 @@ fn menu_mouse_and_keys() {
     assert_eq!(bar(&ctx, vec![key(Key::ArrowDown), key(Key::Enter)]), vec!["Zoom"], "Right switched to View");
 
     bar(&ctx, vec![button(file, true), button(file, false)]);
+    assert_eq!(bar(&ctx, vec![key(Key::End), key(Key::ArrowUp), key(Key::Enter)]), vec!["Open"], "keys apply in order");
+
+    bar(&ctx, vec![button(file, true), button(file, false)]);
     bar(&ctx, vec![key(Key::Escape)]);
     assert!(!MenuBar::is_open(&ctx, "bar"), "Esc closes");
 

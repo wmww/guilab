@@ -325,10 +325,11 @@ impl Server {
                 },
             }
         };
-        let viewer = match viewer {
+        let mut viewer = match viewer {
             Ok(v) => v,
             Err(e) => return fail(waiters, format!("{e:#}")),
         };
+        viewer.set_prefs(self.viewer_prefs);
         let source = HostSource::new(c.conn, c.queue);
         let token = self.handle.insert_source(source, |ev, queue, srv: &mut Server| match ev {
             HostEvent::Dispatch => match &mut srv.viewer {
@@ -368,6 +369,7 @@ impl Server {
                 if let Some(why) = why {
                     tracing::info!("viewer closed: {why}");
                 }
+                self.viewer_prefs = s.viewer.prefs();
                 let releases = s.viewer.release_all();
                 self.apply_viewer_actions(releases);
                 if let Some(t) = s.token.take() {

@@ -33,7 +33,7 @@ pub use egui;
 pub use guilab_markup::{self as markup, Annotated, FeedItem, Status, Who};
 pub use host::{BufferKind, Connected, CursorImage, HostCursor, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
-pub use ui::{Action, Input};
+pub use ui::{Action, Input, Prefs};
 
 /// A session for one draw.
 pub struct SessionFrame<'a> {
@@ -136,6 +136,16 @@ impl Viewer {
         }
         let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
         (self.host.can_draw() && changed) || self.host.has_input()
+    }
+
+    /// View menu choices (kept by the server across hide/show).
+    pub fn prefs(&self) -> Prefs {
+        self.ui.prefs()
+    }
+
+    pub fn set_prefs(&mut self, p: Prefs) {
+        self.ui.set_prefs(p);
+        self.host.dirty = true;
     }
 
     /// The session tab shown (as of the last frame).
