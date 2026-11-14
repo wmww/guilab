@@ -17,3 +17,11 @@ Issues live in `issues/` (unless specified, "issue" means one of these markdown 
 - Keep prose, comments, errors, and commit messages compact unless extra detail is genuinely useful.
 - When talking directly to humans, write especially simply and concisely. Avoid details or jargon unless critical for correctness.
 - Avoid recording dates or time estimates unless asked, remember you can always recover dates from git
+
+## Builds and worktrees
+- `wt` comes from the reasonable-rust-builds plugin (github wmww/agent-skills, enabled in `.claude/settings.json`). If it's not on PATH, stop and ask the user to install it; don't improvise worktrees.
+- Work in a task worktree: `wt claim <branch>` prints it (`.worktrees/wtN`, warm `target/` kept between tasks); `wt release` only as your very last step, after your last commit. Never build in the main checkout; main only fast-forwards (`git rebase main` and the checks in the worktree, then `git merge --ff-only <branch>` in main).
+- At most 3 worktrees exist at once (disk space). Coordinators: claim a worktree per sub-agent and give it the path; never use agent-tool worktree isolation (cold targets). `wt trim` when the parallel work winds down.
+- Build and test only with `cargo test --workspace` (narrow with `--test it <module>::` and name filters) and `cargo clippy --workspace --all-targets`. No `-p`, no other `--features`, no per-command `RUSTFLAGS`/`CARGO_INCREMENTAL`/`CARGO_TARGET_DIR`: each combination builds and keeps another copy of the tree. `--release` only for timing checks.
+- Expected costs are in `notes/code-map.md` (Build and test); if yours are 3x those at low load, stop and find out why.
+

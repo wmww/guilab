@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+cargo test --workspace --no-run
+cargo clippy --workspace --all-targets
