@@ -24,8 +24,9 @@ use crate::{
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long `kill` waits for the apps to exit (they get SIGKILL after 2 s).
-const KILL_WAIT: Duration = Duration::from_secs(3);
+/// How long `kill` waits for the apps to exit (they get SIGKILL after 2 s; a big process
+/// on a loaded machine can take a while to go even then).
+const KILL_WAIT: Duration = Duration::from_secs(5);
 
 /// How long `new -x` waits for Xwayland.
 const XWAYLAND_TIMEOUT: Duration = Duration::from_secs(10);

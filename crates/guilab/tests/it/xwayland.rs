@@ -148,7 +148,12 @@ fn x11_parallel_sessions_and_cleanup() {
     // Ending a session takes its Xwayland, X clients, socket and lock file with it.
     lab.run(&["-S", "a", "-t", &t, "end"]);
     wait_dead(&[xa[0], app_a], "Xwayland and the app to end with the session");
-    assert!(x_files(&a).iter().all(|f| !Path::new(f).exists()));
+    // Gone, or already reused by another test's server (the lock holds the server's pid).
+    let ours = lab.info().pid.to_string();
+    let [sock, lock] = x_files(&a);
+    let held = std::fs::read_to_string(&lock).ok().map(|s| s.trim().to_string());
+    assert!(held.as_ref().is_none_or(|p| *p != ours), "lock file left behind: {lock}");
+    assert!(held.is_some() || !Path::new(&sock).exists(), "socket left behind: {sock}");
     assert!(alive(xb[0]));
     lab.run(&["-S", "b", "end"]);
 }
