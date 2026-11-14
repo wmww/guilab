@@ -790,3 +790,107 @@ fn empty_view_is_harmless() {
     b.drag(egui::pos2(10.0, 10.0), egui::pos2(10.0, 10.0));
     assert!(!b.out.begin && b.edits.is_empty() && b.doc.is_none());
 }
+
+/// Steady frames upload no textures: two instances of one SVG at different sizes each keep
+/// their own render.
+#[test]
+fn steady_frames_upload_nothing() {
+    let mut t = T::new();
+    t.host.insert(sample_svg());
+    let d = t.host.doc.as_mut().unwrap();
+    let Kind::Svg { asset, dst } = d.body().elements[1].kind.clone() else { panic!() };
+    let e = d.add_edit(Element::picture(Kind::Svg { asset, dst: Rect::new(dst.min.x, dst.min.y + 80.0, dst.size.w * 3.0, dst.size.h * 3.0) })).unwrap();
+    d.apply(&e);
+    for _ in 0..3 {
+        t.run(vec![]);
+    }
+    let host = &mut t.host;
+    let out = t.h.run(vec![], 0.1, |ui| host.ui(ui));
+    assert!(out.textures_delta.set.is_empty(), "{:?}", out.textures_delta.set.iter().map(|(id, d)| (id, d.image.size())).collect::<Vec<_>>());
+}
+
+/// A raster keeps one texture: zooming past 2 device px per canvas px swaps its filter
+/// instead of uploading a second copy.
+#[test]
+fn raster_keeps_one_texture() {
+    let mut t = T::new();
+    t.host.open();
+    t.run(vec![]);
+    let count = |t: &T| t.h.ctx.tex_manager().read().num_allocated();
+    let before = count(&t);
+    t.host.xf.zoom = 3.0;
+    t.run(vec![]);
+    t.run(vec![]);
+    assert_eq!(count(&t), before, "nearest replaced linear");
+    t.host.xf.zoom = 1.0;
+    t.run(vec![]);
+    assert_eq!(count(&t), before);
+}
+
+/// A raster wider than the GPU's max texture side is uploaded downscaled to fit.
+#[test]
+fn big_raster_fits_max_texture_side() {
+    let mut h = Headless::new(vec2(1000.0, 700.0), 1.0);
+    guilab_kit::theme::install(&h.ctx);
+    let mut host = DemoHost::new([3000, 400], 1.0);
+    host.open();
+    let mut sizes = Vec::new();
+    for _ in 0..3 {
+        let out = h.run(vec![], 0.1, |ui| host.ui(ui));
+        sizes.extend(out.textures_delta.set.iter().filter(|(_, d)| d.pos.is_none()).map(|(_, d)| d.image.size()));
+    }
+    let max = h.ctx.input(|i| i.max_texture_side);
+    assert!(sizes.iter().any(|s| s[1] < 400), "the raster was uploaded: {sizes:?}");
+    assert!(sizes.iter().all(|s| s[0] <= max && s[1] <= max), "{sizes:?} > {max}");
+}
+
+/// Timing: ~20 multi-line texts, the move tool, the pointer moving. `cargo test --workspace
+/// -- --ignored --nocapture move_tool_frame_time`.
+#[test]
+#[ignore]
+fn move_tool_frame_time() {
+    let mut t = T::new();
+    t.host.open();
+    let d = t.host.doc.as_mut().unwrap();
+    for i in 0..20 {
+        let text = "Spacing here should be sixteen pixels, not thirty, and the label is clipped on the right. ".repeat(2);
+        let e = d.add_edit(Element::new(Color::RED, Kind::Text { at: pt(20.0 + (i % 4) as f32 * 140.0, 20.0 + (i / 4) as f32 * 75.0), size: 14.0, width: Some(130.0), text })).unwrap();
+        d.apply(&e);
+    }
+    t.host.editor.tool = Tool::Move;
+    t.run(vec![]);
+    let n = 200;
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        t.mv(50.0 + (i % 50) as f32 * 10.0, 50.0 + (i / 50) as f32 * 80.0);
+    }
+    let el = start.elapsed();
+    let layout = std::time::Instant::now();
+    for i in 0..n * 20 {
+        let text = format!("{i} Spacing here should be sixteen pixels, not thirty, and the label is clipped on the right.");
+        std::hint::black_box(t.host.editor.fonts().layout(&text, 14.0, Some(130.0)));
+    }
+    eprintln!("frame {:.2} ms; one uncached layout {:.1} us", el.as_secs_f64() * 1000.0 / n as f64, layout.elapsed().as_secs_f64() * 1e6 / (n * 20) as f64);
+}
+
+/// Zooming doesn't rasterize the doc's text at every zoom step: on-screen sizes are
+/// quantized, so egui's shared font atlas (UI text too) doesn't fill up and rebuild.
+#[test]
+fn zoom_keeps_font_atlas_small() {
+    let mut t = T::new();
+    t.host.open();
+    let d = t.host.doc.as_mut().unwrap();
+    let e = d.add_edit(Element::new(Color::RED, Kind::Text { at: pt(20.0, 20.0), size: 18.0, width: None, text: "The quick brown fox jumps over the lazy dog 0123456789".into() })).unwrap();
+    d.apply(&e);
+    t.run(vec![]);
+    t.run(vec![]);
+    let fill = |t: &T| t.h.ctx.fonts(|f| f.font_atlas_fill_ratio());
+    let f0 = fill(&t);
+    for i in 0..100 {
+        t.host.xf.zoom = 1.2 + i as f32 * 0.003;
+        t.run(vec![]);
+    }
+    // About 6 sizes from 1.2x to 1.5x (a glyph set per zoom filled 27% of the atlas).
+    let all = fill(&t) - f0;
+    assert!(all < 0.04, "{all}");
+}

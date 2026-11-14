@@ -1,6 +1,8 @@
 //! Element geometry in canvas px: bounds, hit testing, key points and reshaping. `scale` is
 //! the body's scale (stroke width and text padding depend on it).
 
+use std::sync::Arc;
+
 use crate::model::{Element, Kind, Pt, Rect, TEXT_PAD, pt, STROKE};
 use crate::text::{Fonts, TextLayout};
 
@@ -41,7 +43,7 @@ fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
 
 impl Element {
     /// The text's layout and its backing rect (text rect + padding).
-    pub fn text_layout(&self, scale: f32, fonts: &Fonts) -> Option<(TextLayout, Rect)> {
+    pub fn text_layout(&self, scale: f32, fonts: &Fonts) -> Option<(Arc<TextLayout>, Rect)> {
         let Kind::Text { at, size, width, text } = &self.kind else { return None };
         let l = fonts.layout(text, *size, *width);
         let r = Rect::new(at.x, at.y, l.size[0], l.size[1]).expand(TEXT_PAD * scale);

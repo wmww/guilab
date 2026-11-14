@@ -85,7 +85,7 @@ pub fn element_prims(e: &Element, scale: f32, fonts: &Fonts, out: &mut Vec<Prim>
         Kind::Text { at, .. } => {
             let (layout, backing) = e.text_layout(scale, fonts).unwrap();
             out.push(Prim::RoundRect { rect: backing, radius: TEXT_RADIUS * scale, fill: text_backing(color) });
-            out.push(Prim::Text { layout: Arc::new(layout), at: *at, color });
+            out.push(Prim::Text { layout, at: *at, color });
         }
     }
 }

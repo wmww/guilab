@@ -955,3 +955,4 @@ fn live_frame_callers() {
     }
     assert!(found.is_empty(), "Raster::from_live_frame outside the server's capture: {found:?}");
 }
+
