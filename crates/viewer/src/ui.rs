@@ -207,6 +207,9 @@ pub enum ChatPlace {
     Right,
 }
 
+/// Behind the session image.
+const VIEW_BG: Color32 = Color32::from_gray(24);
+
 /// How long toasts stay up after the thing that raised them (seconds).
 const TOAST_SECS: f64 = 4.0;
 
@@ -308,20 +311,21 @@ impl ViewerUi {
         let now = ui.input(|i| i.time);
         self.menu_bar(ui, sessions, &mut out);
 
-        // Session tabs: the selected one takes the panel color below it, so it reads as
-        // attached to the session it shows.
-        let bar = ui.visuals().extreme_bg_color;
-        egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(bar).inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 0 })).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for s in sessions {
-                    let sel = self.current.as_deref() == Some(s.name);
-                    if session_tab(ui, sel, s.name).clicked() && !sel {
-                        self.current = Some(s.name.to_string());
+        // Session tabs, only when there's a choice. The selected one takes the view's color
+        // below it, so it reads as attached to the session it shows.
+        if sessions.len() > 1 {
+            egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: 6, right: 6, top: 2, bottom: 0 })).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for s in sessions {
+                        let sel = self.current.as_deref() == Some(s.name);
+                        if session_tab(ui, sel, s.name).clicked() && !sel {
+                            self.current = Some(s.name.to_string());
+                        }
                     }
-                }
+                });
             });
-        });
+        }
 
         let cur = self.current.as_deref().and_then(|c| sessions.iter().find(|s| s.name == c));
         if self.held_in.is_some() && (self.held_in.as_deref() != cur.map(|s| s.name) || cur.is_some_and(|s| s.blocked())) {
@@ -750,7 +754,7 @@ impl ViewerUi {
         }
 
         let painter = ui.painter_at(view);
-        painter.rect_filled(view, 0.0, Color32::from_gray(24));
+        painter.rect_filled(view, 0.0, VIEW_BG);
         match s.texture {
             Some(tex) => {
                 painter.image(tex, img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -785,7 +789,7 @@ fn session_tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response
     let size = egui::vec2((galley.size().x + 32.0).max(80.0), 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let fill = if selected {
-        v.panel_fill
+        VIEW_BG
     } else if resp.hovered() {
         v.widgets.hovered.weak_bg_fill
     } else {

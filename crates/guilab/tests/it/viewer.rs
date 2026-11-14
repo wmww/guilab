@@ -225,9 +225,9 @@ fn draw_and_send() {
         h.input(&t, actions);
         std::thread::sleep(Duration::from_millis(150));
     };
-    step(&["move", "19", "167", "click"]); // box tool
+    step(&["move", "19", "133", "click"]); // box tool
     step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
-    step(&["move", "19", "296", "click"]); // text tool
+    step(&["move", "19", "262", "click"]); // text tool
     step(&["move", "520", "330", "click"]);
     step(&["type", "label", "key", "Return"]);
     step(&["move", "600", "777", "click"]); // message box

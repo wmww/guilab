@@ -41,7 +41,7 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 
 ## Testing
 - Host = a second guilab server's session (tests: `tests/it/viewer.rs`; it pins the coordinate mapping by moving the host pointer and reading the viewed session's human motion event). Lab commands drop `WAYLAND_DISPLAY`, so a test can never open on the real desktop.
-- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=167, text y=296; message box near the bottom). Layout changes move them. Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
+- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=133, text y=262 with one session (no tab bar); message box near the bottom). Layout changes move them. Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
 - egui gotchas: `consume_key` ignores Shift (use `consume_plain_enter` for Enter-sends); a TextEdit with a custom `.frame()` ignores `.margin()`.
 - Manually: `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/glv-h guilab new host -s 1400x900`, then `guilab show` with `WAYLAND_DISPLAY=<that session's socket>` against another runtime dir, drive the host session with `input`, screenshot it.
 - The real desktop's `WAYLAND_DISPLAY` is usually set in agent shells; never run `guilab show` without overriding it.
