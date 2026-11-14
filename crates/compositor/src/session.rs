@@ -151,6 +151,15 @@ pub struct Session {
     pub last_configure: Instant,
     /// When input was last delivered (settle waits for the app to react).
     pub last_input: Instant,
+    /// Start of the current run of commits without a `SETTLE_QUIET` gap (animation check).
+    pub busy_since: Instant,
+    /// The last `run`: when, and the app's id (settle waits for its first window).
+    pub last_spawn: Option<(Instant, u32)>,
+    /// When a toplevel last appeared.
+    pub last_map: Instant,
+    /// Something may have changed what's on screen since the last render (client
+    /// requests, commands, input). Idle sessions skip rendering.
+    pub dirty: bool,
 
     pub keymap: Keymap,
     /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
@@ -323,6 +332,10 @@ impl Session {
             last_render: now,
             last_configure: now,
             last_input: now,
+            busy_since: now,
+            last_spawn: None,
+            last_map: now,
+            dirty: true,
             keymap,
             extra_keys: Vec::new(),
             held: Held::default(),

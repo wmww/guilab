@@ -494,6 +494,8 @@ impl Server {
                     if let Err(e) = el.dispatch(Some(Duration::ZERO), &mut slot.session) {
                         tracing::warn!("session {key}: {e}");
                     }
+                    // Client requests may change what's on screen (e.g. destroying a popup).
+                    slot.session.dirty = true;
                     slot.session.flush();
                 }
                 Ok(PostAction::Continue)

@@ -1,5 +1,7 @@
 //! Real apps: rendering, window policy, popups, output changes, parallel sessions.
 
+use std::time::{Duration, Instant};
+
 use crate::{Lab, app, have, lit_fraction, nodes, read_png, rect};
 
 #[test]
@@ -112,4 +114,34 @@ fn qt_renders_tiled() {
     assert_eq!(lab.json(&["screenshot", "-o", &shot])["settled"], true);
     // Qt's default light theme: mostly light pixels, i.e. it drew (no server-side decorations).
     assert!(lit_fraction(&shot) > 0.9);
+}
+
+/// Screenshot settling: a just-started app's window is waited for, animations don't cost
+/// the full cap, and windows bigger than the output are reported.
+#[test]
+fn screenshot_settle_cases() {
+    if !have("python3") || !crate::input::gtk4() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "800x600"]);
+    lab.run(&["run", "--", "python3", &app("gtk_app.py"), "--spin"]);
+    lab.wait_tree("s1", 10, |t| !crate::nodes(t).is_empty());
+    std::thread::sleep(Duration::from_millis(1300));
+    let t = Instant::now();
+    let s = lab.json(&["screenshot"]);
+    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    assert_eq!((s["settled"].as_bool(), s["animating"].as_bool()), (Some(false), Some(true)), "{s}");
+    // A second app: the screenshot waits for its window.
+    lab.run(&["run", "--", "python3", &app("gtk_app.py")]);
+    lab.json(&["screenshot"]);
+    let ev = lab.json(&["log", "-n", "0", "--kind", "window_map,screenshot"])["events"].as_array().unwrap().clone();
+    let k: Vec<&str> = ev.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(k, ["window_map", "screenshot", "window_map", "screenshot"], "{ev:?}");
+
+    lab.run(&["new", "c", "-s", "640x480"]);
+    lab.run(&["-S", "c", "run", "--", "python3", &app("gtk_app.py"), "--big"]);
+    lab.wait_tree("c", 10, |t| !crate::nodes(t).is_empty());
+    let out = lab.run(&["-S", "c", "screenshot"]);
+    assert!(out.contains("doesn't fit the 640x480 output, so it's cut off"), "{out}");
 }

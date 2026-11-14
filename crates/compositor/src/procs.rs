@@ -119,6 +119,7 @@ impl Session {
             })
             .map_err(|e| e.error)?;
         self.procs.list.push(Proc { info: info.clone(), child: Some(child), kill_at: None, killed: false });
+        self.last_spawn = Some((Instant::now(), id));
         Ok(info)
     }
 
@@ -147,6 +148,10 @@ impl Session {
 
     pub fn ps(&self) -> Vec<ProcInfo> {
         self.procs.list.iter().map(|p| p.info.clone()).collect()
+    }
+
+    pub fn is_running(&self, id: u32) -> bool {
+        self.procs.list.iter().any(|p| p.info.id == id && p.child.is_some())
     }
 
     pub fn running_apps(&self) -> usize {

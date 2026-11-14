@@ -25,6 +25,13 @@ use crate::{
 
 /// No commits for this long counts as "done drawing" (a blinking cursor still passes).
 pub const SETTLE_QUIET: Duration = Duration::from_millis(150);
+/// Commits without a quiet gap for this long count as an animation (spinner, video): its
+/// screenshots stop waiting for quiet (see [`Settle::Animating`]).
+pub const ANIM_DETECT: Duration = Duration::from_secs(1);
+/// While animating, how long after the last input a screenshot waits (the app reacting).
+pub const ANIM_REACT: Duration = Duration::from_millis(300);
+/// A window from the last `run` is expected this long; until then the session is busy.
+pub const NEW_APP_WAIT: Duration = Duration::from_secs(3);
 /// How long an unanswered configure (not acked, or acked but not committed) keeps a session
 /// busy. Bounded because clients may ack without committing when nothing changes for them.
 pub const CONFIGURE_WAIT: Duration = Duration::from_secs(1);
@@ -34,13 +41,39 @@ pub enum Settle {
     /// No toplevel has a buffer yet.
     NoWindow,
     Busy,
+    /// Done except that something keeps redrawing: as settled as it gets.
+    Animating,
     Settled,
 }
 
 impl Session {
-    /// One frame: render, presentation feedback, frame callbacks, cleanup.
+    /// One frame: render (only if something may have changed), frame callbacks, cleanup.
     /// Driven by the server's timer at the output refresh rate.
     pub fn tick(&mut self) {
+        if std::mem::take(&mut self.dirty) || self.dnd_icon.is_some() {
+            self.render();
+        }
+        let now = self.clock.now();
+        let output = self.output.clone();
+        // Throttle: surfaces that aren't visible still get a callback once a second.
+        for w in self.space.elements() {
+            w.send_frame(&output, now, Some(Duration::from_secs(1)), surface_primary_scanout_output);
+        }
+        if let Some(icon) = &self.dnd_icon {
+            send_frames_surface_tree(icon, &output, now, None, |_, _| Some(output.clone()));
+        }
+        // Cursor surfaces too, so animated cursors run.
+        if let CursorImageStatus::Surface(c) = &self.cursor_status {
+            send_frames_surface_tree(c, &output, now, None, |_, _| Some(output.clone()));
+        }
+        self.space.refresh();
+        self.popups.cleanup();
+        self.track_windows();
+        self.flush();
+    }
+
+    /// Renders the frame (damage-tracked) and sends presentation feedback.
+    fn render(&mut self) {
         let gpu = self.gpu.clone();
         let icon = self.dnd_icon.clone();
         let pointer = self.pointer_location();
@@ -69,23 +102,11 @@ impl Session {
                 }
                 self.last_states = Some(r.states);
             }
-            Err(e) => tracing::warn!("{}: render failed: {e:#}", self.name),
+            Err(e) => {
+                tracing::warn!("{}: render failed: {e:#}", self.name);
+                self.dirty = true;
+            }
         }
-        // Throttle: surfaces that aren't visible still get a callback once a second.
-        for w in self.space.elements() {
-            w.send_frame(&output, now, Some(Duration::from_secs(1)), surface_primary_scanout_output);
-        }
-        if let Some(icon) = &icon {
-            send_frames_surface_tree(icon, &output, now, None, |_, _| Some(output.clone()));
-        }
-        // Cursor surfaces too, so animated cursors run.
-        if let CursorImageStatus::Surface(c) = &self.cursor_status {
-            send_frames_surface_tree(c, &output, now, None, |_, _| Some(output.clone()));
-        }
-        self.space.refresh();
-        self.popups.cleanup();
-        self.track_windows();
-        self.flush();
     }
 
     pub fn settle_state(&self, now: Instant) -> Settle {
@@ -106,10 +127,22 @@ impl Session {
         }
         let acked = now.duration_since(self.last_configure) >= CONFIGURE_WAIT
             || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
+        // The app from the last `run` hasn't shown a window yet (another one is up).
+        let starting = self
+            .last_spawn
+            .is_some_and(|(t, id)| t > self.last_map && now.duration_since(t) < NEW_APP_WAIT && self.is_running(id));
+        if drawing || !acked || starting {
+            return Settle::Busy;
+        }
         // Input counts as activity: the app hasn't necessarily reacted (committed) yet.
-        let quiet = now.duration_since(self.last_commit.max(self.last_input)) >= SETTLE_QUIET;
+        let since_input = now.duration_since(self.last_input);
+        let quiet = now.duration_since(self.last_commit) >= SETTLE_QUIET && since_input >= SETTLE_QUIET;
         let drawn = self.last_render > self.last_commit;
-        if !drawing && acked && quiet && drawn { Settle::Settled } else { Settle::Busy }
+        if quiet && drawn {
+            return Settle::Settled;
+        }
+        let animating = !quiet && now.duration_since(self.busy_since) >= ANIM_DETECT;
+        if animating && since_input >= ANIM_REACT && drawn { Settle::Animating } else { Settle::Busy }
     }
 
     /// Writes the last rendered frame as an RGB PNG, with the cursor drawn in if `cursor`.

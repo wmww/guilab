@@ -30,7 +30,7 @@ guilab end                          # kill everything in the session
 - Coordinates everywhere (screenshots, `tree`, `input`) are screenshot pixels, at any scale.
 - Shells don't keep variables between your tool calls, so pass the literal token with `-t` on every command that needs it. While the session is locked, `run`, `kill`, `output`, `clip set` and `end` need it too. Read-only commands never do. If your token stops working, the human revoked it: run `poll` or ask before you `lock` again. Lost your token? `guilab done` releases the lock without it.
 - After a rebuild: `guilab kill && guilab run -- CMD` (`kill` returns once the app is gone).
-- A window can be bigger than the output (apps have minimum sizes) and the screenshot just crops it. Compare `tree` geometry with the output size if things look cut off.
+- A window can be bigger than the output (apps have minimum sizes); `screenshot` then says it's cut off. Make the output bigger with `guilab output -s WxH`.
 - Each session ends after 30 idle minutes. Don't end sessions you didn't start.
 
 ## Input
@@ -81,7 +81,7 @@ guilab screenshot                   # the outer session shows the inner viewer
 ## Troubleshooting
 
 - No window? Check the app's log (`guilab ps` gives the path), then `guilab tree`.
-- Screenshots wait up to 3 s for drawing to stop. Animated apps (spinners, blinking cursors) always take the full 3 s and print "not settled"; that's normal. Use `--no-settle` when you don't need to wait.
+- Screenshots wait up to 3 s for drawing to stop, and for the window of an app you just `run`. Apps that keep animating (spinners, video) are detected after about a second and shot once your input had 0.3 s to land ("the app keeps animating"). Use `--no-settle` when you don't need to wait.
 - X11-only apps need a session started with `new -x`. Prefer Wayland otherwise; with `DISPLAY` set, some apps quietly pick X.
 - Apps have no D-Bus session bus. Warnings about it are expected.
 - "incompatible build" errors: the server is from another guilab version. `guilab server --stop` (ends all sessions), then retry.

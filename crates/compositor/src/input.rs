@@ -243,6 +243,7 @@ impl Session {
     /// Delivers one event to the seat. The only way input reaches clients.
     pub fn inject(&mut self, ev: InputEvent, source: InputSource) {
         self.last_input = Instant::now();
+        self.dirty = true;
         let time = InputTime::now();
         if source == InputSource::Human {
             self.log_human(&ev);

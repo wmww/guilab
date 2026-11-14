@@ -105,7 +105,12 @@ impl CompositorHandler for Session {
         if self.cursor_commit(surface) {
             return;
         }
-        self.last_commit = Instant::now();
+        let now = Instant::now();
+        if now.duration_since(self.last_commit) >= crate::frame::SETTLE_QUIET {
+            self.busy_since = now;
+        }
+        self.last_commit = now;
+        self.dirty = true;
         tracing::trace!(surface = surface_id(surface), "commit");
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();

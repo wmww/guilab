@@ -1,5 +1,7 @@
 //! `tree`: the session's surfaces with ids and pixel geometry.
 
+use std::time::Instant;
+
 use guilab_proto::{EventData, NodeKind, TreeNode};
 use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
@@ -38,10 +40,11 @@ impl Session {
         }
         for (id, window, app_id, title) in &now {
             match self.seen_windows.iter().find(|s| s.0 == *id) {
-                None => self.log.push(
-                    EventData::WindowMap { id: *id, window: window.to_string(), app_id: app_id.clone(), title: title.clone() },
-                    None,
-                ),
+                None => {
+                    self.last_map = Instant::now();
+                    self.log.push(EventData::WindowMap { id: *id, window: window.to_string(), app_id: app_id.clone(), title: title.clone() },
+                    None)
+                }
                 Some((_, t)) if t != title => self.log.push(EventData::Title { id: *id, title: title.clone() }, None),
                 Some(_) => continue,
             };

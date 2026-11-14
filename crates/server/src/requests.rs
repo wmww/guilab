@@ -163,6 +163,8 @@ impl Server {
             return Some(Response::err(e));
         }
         slot.last_active = Instant::now();
+        // Commands may move windows, change the output, focus...: render the next tick.
+        slot.session.dirty = true;
         if !matches!(cmd, Command::Human { .. }) {
             slot.last_agent = Instant::now();
         }
@@ -557,6 +559,7 @@ impl Server {
             let state = s.settle_state(now);
             let settled = match state {
                 Settle::Settled => Some(true),
+                Settle::Animating => Some(false),
                 // Nothing that could ever draw: don't wait.
                 Settle::NoWindow if s.running_apps() == 0 => Some(true),
                 Settle::NoWindow => (waited >= MAP_CAP).then_some(false),
@@ -571,7 +574,9 @@ impl Server {
             let resp = match s.write_png(&w.path, w.cursor) {
                 Ok((width, height)) => {
                     s.log.push(EventData::Screenshot { path: w.path.clone() }, Some(&w.key));
-                    Response::ok(ShotInfo { path: w.path, width, height, settled })
+                    let animating = state == Settle::Animating;
+                    let cropped = cropped_windows(&s.tree(), width as i32, height as i32);
+                    Response::ok(ShotInfo { path: w.path, width, height, settled, animating, cropped })
                 }
                 Err(e) => Response::err(format!("screenshot: {e:#}")),
             };
@@ -716,6 +721,16 @@ pub(crate) fn human_message(s: &mut Session, text: String, images: Vec<MsgImage>
     }
     s.log.push(EventData::Message { text, images: paths, annotations }, None);
     Ok(())
+}
+
+/// Toplevels that stick out of the output (screenshots crop them). One pixel of slack: at
+/// fractional scales a tiled window can round one pixel larger.
+fn cropped_windows(tree: &[guilab_proto::TreeNode], w: i32, h: i32) -> Vec<guilab_proto::WindowSize> {
+    tree.iter()
+        .filter(|n| matches!(n.kind, guilab_proto::NodeKind::Toplevel | guilab_proto::NodeKind::X11))
+        .filter(|n| n.x < -1 || n.y < -1 || n.x + n.width > w + 1 || n.y + n.height > h + 1)
+        .map(|n| guilab_proto::WindowSize { id: n.id, width: n.width, height: n.height })
+        .collect()
 }
 
 /// A poll showed the agent human messages: it's on them now (the human sees it was picked

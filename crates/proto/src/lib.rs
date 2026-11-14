@@ -417,8 +417,22 @@ pub struct ShotInfo {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
-    /// False if the settle wait timed out (animation, spinner, app not drawing yet).
+    /// False if the settle wait timed out (app not drawing yet) or the app animates.
     pub settled: bool,
+    /// Taken while something keeps redrawing (spinner, video), once input had time to land.
+    #[serde(default)]
+    pub animating: bool,
+    /// Windows that don't fit the output, so the image cuts them off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cropped: Vec<WindowSize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSize {
+    /// `tree` id.
+    pub id: u32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

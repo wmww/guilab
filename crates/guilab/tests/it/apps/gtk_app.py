@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """GTK4 test app. Args: --menu (open a popover menu near the bottom-right corner),
---dialog (open a modal dialog), --second (open a second toplevel)."""
+--dialog (open a modal dialog), --second (open a second toplevel), --spin (a spinning
+spinner: never settles), --big (at least 1000x700)."""
 import sys
 import gi
 gi.require_version("Gtk", "4.0")
@@ -15,6 +16,10 @@ def activate(app):
     win.set_default_size(400, 300)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     box.append(Gtk.Label(label="main window", vexpand=True))
+    if "--spin" in args:
+        box.append(Gtk.Spinner(spinning=True, width_request=64, height_request=64))
+    if "--big" in args:
+        box.set_size_request(1000, 700)
     menu = Gio.Menu()
     for i in range(1, 6):
         menu.append(f"Item {i}", "app.noop")
