@@ -149,7 +149,7 @@ impl Viewer {
         let keyboard_left = std::mem::take(&mut self.host.keyboard_left);
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
-        let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !self.ui.keys_to_egui();
+        let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !self.ui.keys_to_egui(&self.gfx.ctx);
         let events: Vec<egui::Event> = inputs
             .iter()
             .filter_map(|i| match i {

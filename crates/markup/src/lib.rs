@@ -14,6 +14,7 @@
 
 pub mod chat;
 pub mod mark;
+pub mod menu;
 pub mod raster;
 pub mod sketch;
 

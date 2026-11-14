@@ -296,9 +296,10 @@ impl ViewerUi {
         }
     }
 
-    /// Whether keys belong to egui even without a focused text field (a drawing is open).
-    pub fn keys_to_egui(&self) -> bool {
-        self.current.as_deref().and_then(|c| self.sessions.get(c)).is_some_and(|p| p.sketch.drawing_open())
+    /// Whether keys belong to egui even without a focused text field (a drawing or a menu
+    /// is open).
+    pub fn keys_to_egui(&self, ctx: &egui::Context) -> bool {
+        guilab_markup::menu::MenuBar::is_open(ctx, "menubar") || self.current.as_deref().and_then(|c| self.sessions.get(c)).is_some_and(|p| p.sketch.drawing_open())
     }
 
     /// Draws the whole viewer. `inputs`: this frame's host input in order; raw keys in it
@@ -434,57 +435,58 @@ impl ViewerUi {
             let key = sessions.iter().find(|s| s.name == c)?.key;
             Some(self.per(c, key))
         });
-        egui::Panel::top("menu").show_separator_line(false).show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
+        egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill)).show(ui, |ui| {
+            guilab_markup::menu::MenuBar::new("menubar").show(ui, |bar| {
                 let Some(p) = p else {
-                    ui.add_enabled_ui(false, |ui| ["File", "Edit", "View"].map(|m| ui.menu_button(m, |_| {})));
+                    for m in ["File", "Edit", "View"] {
+                        bar.menu_enabled(m, false, |_| {});
+                    }
                     return;
                 };
                 let name = cur.clone().unwrap_or_default();
-                ui.menu_button("File", |ui| {
+                bar.menu("File", |m| {
                     let label = if p.sketch.drawing_open() { "Save drawing as image…" } else { "Save screenshot…" };
-                    if ui.button(label).clicked() {
+                    if m.item(label, None, true) {
                         out.push(Action::SaveScreenshot { session: name.clone(), image: p.sketch.preview() });
                     }
                 });
-                ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(p.sketch.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                bar.menu("Edit", |m| {
+                    if m.item("Undo", Some("Ctrl+Z"), p.sketch.can_undo()) {
                         p.sketch.undo();
                     }
-                    if ui.add_enabled(p.sketch.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z")).clicked() {
+                    if m.item("Redo", Some("Ctrl+Shift+Z"), p.sketch.can_redo()) {
                         p.sketch.redo();
                     }
                 });
-                // Stays open on clicks inside, so zoom can be stepped; choices close it.
-                let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                egui::containers::menu::MenuButton::new("View").config(keep_open).ui(ui, |ui| {
+                bar.menu("View", |m| {
                     let z = &mut p.zoom;
-                    ui.horizontal(|ui| {
-                        ui.label("Zoom");
-                        // Menus draw buttons flat; these are steppers, so frame them.
-                        let fill = ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.6);
-                        let step = |t| egui::Button::new(t).fill(fill).min_size(vec2(24.0, 0.0));
-                        if ui.add(step("−")).clicked() {
-                            z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
-                            z.fit = false;
-                        }
-                        if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).fill(fill).min_size(vec2(52.0, 0.0))).on_hover_text("Actual size (100%)").clicked() {
-                            *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
-                        }
-                        if ui.add(step("+")).clicked() {
-                            z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
-                            z.fit = false;
-                        }
-                    });
-                    if ui.add_enabled(!z.fit, egui::Button::new("Fit to window")).clicked() {
+                    // Steppers: they keep the menu open.
+                    m.custom(
+                        |ui| {
+                            ui.label("Zoom");
+                        },
+                        |ui| {
+                            if ui.add(egui::Button::new("+").min_size(vec2(26.0, 22.0))).clicked() {
+                                z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
+                                z.fit = false;
+                            }
+                            if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(56.0, 22.0))).on_hover_text("Actual size (100%)").clicked() {
+                                *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                            }
+                            if ui.add(egui::Button::new("−").min_size(vec2(26.0, 22.0))).clicked() {
+                                z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
+                                z.fit = false;
+                            }
+                        },
+                    );
+                    if m.item("Fit to window", None, !z.fit) {
                         *z = Zoom::default();
                     }
-                    ui.separator();
-                    ui.label("Chat");
+                    m.separator();
+                    m.heading("Chat");
                     for (place, label) in [(ChatPlace::Off, "Off"), (ChatPlace::Bottom, "Bottom"), (ChatPlace::Right, "Right side")] {
-                        if ui.radio(chat_place == place, label).clicked() {
+                        if m.radio(chat_place == place, label) {
                             chat_place = place;
-                            ui.close();
                         }
                     }
                 });
