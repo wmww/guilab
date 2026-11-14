@@ -389,7 +389,7 @@ send it: guilab done "..." --image p4n2
 - Skill doc: `notes/image-format-doc.md` (the tested text), plus "pull a human drawing, at least cropped to its marks; run the hint". The `poll` hint says the same. The fetch-hint bbox covers every non-base element, text boxes included, even outside the crop.
 
 ## Interface points with work in flight
-- **agent-status** (`work`/`done`, delivery model): phase 3 changes its `--image PATH` to `ID|PATH` and its event's `images: Vec<PathBuf>` to `Vec<ImageRef>`. The `say-SEQ-N` file copies go away. Nothing else depends on its delivery changes: image text rides inside the message event's lines.
+- **agent-status** (`work`/`done`, delivery model): phase 3 changes its `--image PATH` to `ID|PATH` and its event's `images: Vec<PathBuf>` to `Vec<ImageRef>`. The `agent-SEQ-N` file copies go away. Nothing else depends on its delivery changes: image text rides inside the message event's lines.
 - **viewer-cursors**: the editor reports `CanvasOut.cursor`, and the session view applies it over the image, so a tool cursor, never the arrow, shows while a tool takes input.
 - **viewer-sizing**: the open doc has its own `doc_zoom` (fit to its crop) and ignores "lock size to window". Resize handles show on the live view only. Flights use the doc rect from that zoom.
 - **ui-toolkit-pass**: phase 2 creates `guilab-kit` and moves existing widgets into it. The full sweep of hardcoded values and the portal light/dark wiring stay in that issue, done against kit.
