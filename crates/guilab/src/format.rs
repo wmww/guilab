@@ -156,7 +156,7 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             if s.animating {
                 line += " (the app keeps animating; taken once input had time to land)";
             } else if !s.settled {
-                line += " (not settled: still drawing after 3 s)";
+                line += " (not settled: still drawing when the wait ran out)";
             }
             for c in &s.cropped {
                 line += &format!(

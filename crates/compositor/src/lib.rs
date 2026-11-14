@@ -4,6 +4,7 @@
 //! requests). See notes/code-map.md.
 
 mod actions;
+mod bus;
 mod clipboard;
 mod cursor;
 mod focus;

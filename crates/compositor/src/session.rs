@@ -185,6 +185,9 @@ pub struct Session {
     pub(crate) seen_windows: Vec<(u32, Option<String>, Option<u32>)>,
     /// When keyboard focus last moved to an X window (keys wait for X to catch up).
     pub(crate) x_focus_at: Option<Instant>,
+    /// The session's private D-Bus daemon and its address (see bus.rs); None without
+    /// dbus-daemon.
+    pub(crate) bus: Option<(std::process::Child, String)>,
     /// The human's touchpad gesture in progress (logged when it ends).
     pub(crate) gesture: Option<guilab_proto::EventData>,
 }
@@ -354,12 +357,17 @@ impl Session {
             log: EventLog::default(),
             seen_windows: Vec::new(),
             gesture: None,
+            bus: None,
             x_focus_at: None,
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();
         let text = session.keymap.text.clone();
         kb.set_keymap_from_string(&mut session, text).context("setting keymap")?;
+        match crate::bus::start(&session.dir, crate::procs::TAG_VAR, &session.tag) {
+            Ok(b) => session.bus = Some(b),
+            Err(e) => tracing::warn!("{}: no D-Bus session bus for apps: {e:#}", session.name),
+        }
         if cfg.xwayland {
             session.start_xwayland()?;
         }

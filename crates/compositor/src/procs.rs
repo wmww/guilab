@@ -85,12 +85,21 @@ impl Session {
         if let Some(d) = self.x_display() {
             cmd.env("DISPLAY", d);
         }
+        if let Some((_, addr)) = &self.bus {
+            cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
+        }
         // Qt and SDL default to X11 without these; don't override an explicit choice.
         if !env.iter().any(|(k, _)| k == "QT_QPA_PLATFORM") {
             cmd.env("QT_QPA_PLATFORM", "wayland");
         }
         if !env.iter().any(|(k, _)| k == "SDL_VIDEODRIVER") {
             cmd.env("SDL_VIDEODRIVER", "wayland");
+        }
+        // The session bus has no AT-SPI bus (yet): without these, GTK and Qt warn about it.
+        for (k, v) in [("GTK_A11Y", "none"), ("NO_AT_BRIDGE", "1")] {
+            if !env.iter().any(|(e, _)| e == k) {
+                cmd.env(k, v);
+            }
         }
         unsafe {
             cmd.pre_exec(|| {
@@ -203,6 +212,10 @@ impl Session {
                 signal_group(p.info.pid, Signal::TERM);
                 children.push(c);
             }
+        }
+        if let Some((mut bus, _)) = self.bus.take() {
+            let _ = bus.kill();
+            children.push(bus);
         }
         signal_tagged(&tag, Signal::TERM);
         (children, tag)

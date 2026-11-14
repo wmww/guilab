@@ -83,5 +83,5 @@ guilab screenshot                   # the outer session shows the inner viewer
 - No window? Check the app's log (`guilab ps` gives the path), then `guilab tree`.
 - Screenshots wait up to 3 s for drawing to stop, and for the window of an app you just `run`. Apps that keep animating (spinners, video) are detected after about a second and shot once your input had 0.3 s to land ("the app keeps animating"). Use `--no-settle` when you don't need to wait.
 - X11-only apps need a session started with `new -x`. Prefer Wayland otherwise; with `DISPLAY` set, some apps quietly pick X.
-- Apps have no D-Bus session bus. Warnings about it are expected.
+- Each session has its own private D-Bus session bus with no services on it (no portals, notifications or accessibility). Apps logging that such a service "was not provided" is expected.
 - "incompatible build" errors: the server is from another guilab version. `guilab server --stop` (ends all sessions), then retry.

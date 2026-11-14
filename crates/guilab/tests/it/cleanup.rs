@@ -65,3 +65,23 @@ fn server_stop_kills_apps() {
     sleep(Duration::from_millis(200));
     assert!(!alive(pid));
 }
+
+/// Each session has a private D-Bus session bus; it ends with the session.
+#[test]
+fn private_session_bus() {
+    if !crate::have("dbus-daemon") || !crate::have("dbus-send") {
+        return;
+    }
+    let lab = Lab::new();
+    let dir = lab.json(&["new"])["dir"].as_str().unwrap().to_string();
+    let call = "echo $DBUS_SESSION_BUS_ADDRESS; dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId";
+    let log = lab.json(&["run", "--", "sh", "-c", call])["log"].as_str().unwrap().to_string();
+    let out = crate::input::wait_log(&log, "string \"", 5);
+    assert!(out.starts_with(&format!("unix:path={dir}/bus")), "{out}");
+    let conf = format!("{dir}/bus.conf");
+    let daemon = pgrep(&conf);
+    assert_eq!(daemon.len(), 1);
+    lab.run(&["end"]);
+    sleep(Duration::from_millis(300));
+    assert!(!alive(daemon[0]), "dbus-daemon outlived the session");
+}
