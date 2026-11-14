@@ -141,6 +141,24 @@ impl Session {
     /// Raise, activate and give keyboard focus to `w`.
     pub fn focus_window(&mut self, w: &Window) {
         self.space.raise_element(w, true);
+        // Floating windows stay above tiled ones (else they'd be hidden for good), and
+        // dialogs above their parents.
+        let order: Vec<Window> = self.space.elements().cloned().collect();
+        let parent_of = |c: &Window| c.toplevel().and_then(|t| t.parent());
+        let descends = |c: &Window| {
+            let mut p = parent_of(c);
+            while let Some(s) = p {
+                if w.wl_surface().as_deref() == Some(&s) {
+                    return true;
+                }
+                p = self.window_for_surface(&s).and_then(|x| parent_of(&x));
+            }
+            false
+        };
+        let above: Vec<&Window> = order.iter().filter(|c| *c != w && ((is_tiled(w) && !is_tiled(c)) || descends(c))).collect();
+        for c in above {
+            self.space.raise_element(c, false);
+        }
         self.last_configure = Instant::now();
         for e in self.space.elements() {
             if let Some(tl) = e.toplevel()

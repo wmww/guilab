@@ -1,0 +1,237 @@
+//! Locking, input chains and the clipboard, against real apps. The test apps print what
+//! they receive to their log (see tests/it/apps/), which is how these tests check delivery.
+
+use std::time::{Duration, Instant};
+
+use crate::{Lab, app, have, nodes};
+
+fn has_python_module(check: &str) -> bool {
+    let ok = std::process::Command::new("python3").args(["-c", check]).status().is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("skipping: python3 can't run `{check}`");
+    }
+    ok
+}
+
+fn gtk4() -> bool {
+    has_python_module("import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk")
+}
+
+fn qt6() -> bool {
+    has_python_module("import PySide6.QtWidgets")
+}
+
+/// An app's log, read until it contains `needle` (panics after `secs`).
+fn wait_log(log: &str, needle: &str, secs: u64) -> String {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let s = std::fs::read_to_string(log).unwrap_or_default();
+        if s.contains(needle) {
+            return s;
+        }
+        assert!(Instant::now() < deadline, "{needle:?} never appeared in the app log:\n{s}");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// Center of a widget from the app's `pos NAME X Y W H` line, in output pixels.
+fn center(log: &str, name: &str, scale: f64) -> (String, String) {
+    let line = log.lines().find(|l| l.starts_with(&format!("pos {name} "))).unwrap_or_else(|| panic!("no pos for {name}"));
+    let v: Vec<f64> = line.split(' ').skip(2).map(|x| x.parse().unwrap()).collect();
+    let f = |c: f64| format!("{}", (c * scale).round());
+    (f(v[0] + v[2] / 2.0), f(v[1] + v[3] / 2.0))
+}
+
+impl Lab {
+    fn lock(&self) -> String {
+        self.json(&["lock"])["token"].as_str().unwrap().to_string()
+    }
+
+    /// `guilab -t TOKEN input ACTIONS...`
+    fn input(&self, token: &str, actions: &[&str]) -> serde_json::Value {
+        let mut a = vec!["-t", token, "input"];
+        a.extend_from_slice(actions);
+        self.json(&a)
+    }
+}
+
+#[test]
+fn lock_rules() {
+    let lab = Lab::new();
+    lab.run(&["new"]);
+    // Input always needs the lock; other changes only while locked.
+    let (ok, _, err) = lab.try_run(&["input", "move", "1", "1"]);
+    assert!(!ok && err.contains("guilab lock"), "{err}");
+    lab.run(&["run", "--", "true"]);
+    let t = lab.lock();
+    assert_eq!(lab.json(&["-t", &t, "lock"])["token"], t.as_str(), "relocking with the token keeps it");
+    let (ok, _, err) = lab.try_run(&["lock"]);
+    assert!(!ok && err.contains("already locked") && err.contains("--force"), "{err}");
+    let (ok, _, err) = lab.try_run(&["run", "--", "true"]);
+    assert!(!ok && err.contains("-t TOKEN"), "{err}");
+    lab.run(&["-t", &t, "run", "--", "true"]);
+    lab.run(&["ps"]); // read-only: no token needed
+    assert_eq!(lab.input(&t, &["move", "10", "20"])["pointer"], serde_json::json!([10.0, 20.0]));
+    // Bad chains fail before doing anything, naming the action.
+    let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "5", "5", "key", "ctrl+nope"]);
+    assert!(!ok && err.contains("action 2 `key ctrl+nope`: unknown key 'nope'"), "{err}");
+    let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "10"]);
+    assert!(!ok && err.contains("Y"), "{err}");
+    assert_eq!(lab.json(&["-t", &t, "input", "move", "1", "1"])["pointer"], serde_json::json!([1.0, 1.0]));
+    // Sleeping chains don't block other commands.
+    let start = Instant::now();
+    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "600", "move", "2", "2"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    lab.run(&["tree"]);
+    assert!(start.elapsed() < Duration::from_millis(500));
+    assert!(slow.wait().unwrap().success());
+    assert!(start.elapsed() >= Duration::from_millis(600));
+
+    // Taking over: the old token stops working.
+    let t2 = lab.json(&["lock", "--force"])["token"].as_str().unwrap().to_string();
+    assert_ne!(t, t2);
+    let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "1", "1"]);
+    assert!(!ok && err.contains("someone else locked it"), "{err}");
+    lab.run(&["-t", &t2, "unlock"]);
+    let (ok, _, err) = lab.try_run(&["-t", &t2, "input", "move", "1", "1"]);
+    assert!(!ok && err.contains("unlocked"), "{err}");
+    lab.run(&["run", "--", "true"]);
+    lab.run(&["end"]);
+}
+
+#[test]
+fn gtk_input_and_clipboard() {
+    if !gtk4() {
+        return;
+    }
+    let lab = Lab::new();
+    // Fractional scale: coordinates are pixels, the app sees logical positions.
+    let scale = 1.5;
+    lab.run(&["new", "-s", "900x750", "--scale", "1.5"]);
+    let log = lab.json(&["run", "--", &app("gtk_input.py")])["log"].as_str().unwrap().to_string();
+    let l = wait_log(&log, "ready", 15);
+    let c = |n: &str| center(&l, n, scale);
+    let t = lab.lock();
+
+    // Typing, including characters the keymap lacks.
+    let (ex, ey) = c("entry");
+    lab.input(&t, &["move", &ex, &ey, "click", "type", "Hé → ✓!"]);
+    wait_log(&log, "entry 'Hé → ✓!'", 5);
+
+    // Click, double-click and a right-click context menu, dismissed by clicking outside.
+    let (bx, by) = c("button");
+    lab.input(&t, &["move", &bx, &by, "click"]);
+    wait_log(&log, "clicked 1", 5);
+    let (ax, ay) = c("area");
+    lab.input(&t, &["move", &ax, &ay, "click", "2", "click", "right"]);
+    wait_log(&log, "pressed 1 2", 5);
+    let tree = lab.wait_tree("s1", 5, |t| nodes(t).iter().any(|n| n["kind"] == "popup"));
+    let popup = nodes(&tree).into_iter().find(|n| n["kind"] == "popup").unwrap().clone();
+    // Pick the second item (surface-local coordinates), then reopen and click away.
+    let item_y = format!("{}", popup["height"].as_i64().unwrap() / 2);
+    lab.input(&t, &["on", &popup["id"].to_string(), "move", "30", &item_y, "click"]);
+    wait_log(&log, "menu 2", 5);
+    lab.input(&t, &["move", &ax, &ay, "click", "right", "sleep", "300", "move", "20", "20", "click"]);
+    lab.wait_tree("s1", 5, |t| !nodes(t).iter().any(|n| n["kind"] == "popup"));
+    assert_eq!(wait_log(&log, "menu closed", 5).matches("menu closed").count(), 2);
+
+    // Wheel and smooth scrolling.
+    let (sx, sy) = c("scroll");
+    lab.input(&t, &["move", &sx, &sy, "scroll", "0", "2"]);
+    wait_log(&log, "vscroll", 5);
+    lab.input(&t, &["scrollpx", "0", "-1000"]);
+    wait_log(&log, "vscroll 0", 5);
+
+    // Drag and drop (gliding, so the app sees motion after the press).
+    let ((dx, dy), (tx, ty)) = (c("drag"), c("drop"));
+    lab.input(&t, &["move", &dx, &dy, "down", "move", &tx, &ty, "300", "up"]);
+    wait_log(&log, "dropped payload", 5);
+
+    // Touch tap and a touchpad pinch.
+    lab.input(&t, &["tap", &bx, &by]);
+    wait_log(&log, "clicked 2", 5);
+    let (zx, zy) = c("zoom");
+    lab.input(&t, &["move", &zx, &zy, "pinch", "2"]);
+    wait_log(&log, "zoom 2.0", 5);
+
+    // Clipboard both ways: paste ours, copy the app's.
+    lab.run(&["-t", &t, "clip", "set", "clip ü"]);
+    assert_eq!(lab.json(&["clip", "get"]), "clip ü");
+    lab.input(&t, &["move", &ex, &ey, "click", "key", "ctrl+a", "key", "ctrl+v"]);
+    wait_log(&log, "entry 'clip ü'", 5);
+    lab.input(&t, &["type", " copied", "key", "ctrl+a", "key", "ctrl+c"]);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(lab.json(&["clip", "get"]), "clip ü copied");
+}
+
+#[test]
+fn gtk_focus_between_floating_windows() {
+    if !gtk4() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "800x600"]);
+    let log = lab.json(&["run", "--", &app("gtk_input.py"), "--floats"])["log"].as_str().unwrap().to_string();
+    let l = wait_log(&log, "ready", 15);
+    lab.wait_tree("s1", 10, |t| t.as_array().unwrap().len() == 3);
+    let t = lab.lock();
+    let (ex, ey) = center(&l, "entry", 1.0);
+    // float A (300x200, centered) is on top of float B; the main window is tiled below.
+    lab.input(&t, &["move", "400", "300", "click", "type", "a", "move", &ex, &ey, "click", "type", "m"]);
+    wait_log(&log, "A 'a'", 5);
+    wait_log(&log, "entry 'm'", 5);
+    // Focusing the tiled window keeps the floats above it.
+    let tree = lab.json(&["tree"]);
+    let titles: Vec<&str> = tree.as_array().unwrap().iter().map(|n| n["title"].as_str().unwrap()).collect();
+    assert_eq!(titles.last(), Some(&"guilab input"), "{titles:?}");
+    assert_eq!(lab.input(&t, &["move", "400", "300"])["under"], tree[0]["id"]);
+}
+
+#[test]
+fn qt_menu_and_typing() {
+    if !qt6() {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "600x400"]);
+    let log = lab.json(&["run", "--", &app("qt_app.py")])["log"].as_str().unwrap().to_string();
+    let l = wait_log(&log, "ready", 15);
+    let t = lab.lock();
+    let (ex, ey) = center(&l, "edit", 1.0);
+    let (lx, ly) = center(&l, "label", 1.0);
+    lab.input(&t, &["move", &ex, &ey, "click", "type", "qt ☃ ü"]);
+    wait_log(&log, "edit 'qt ☃ ü'", 5);
+    // A QMenu only opens with an input serial.
+    lab.input(&t, &["move", &lx, &ly, "click", "right"]);
+    let tree = lab.wait_tree("s1", 5, |t| nodes(t).iter().any(|n| n["kind"] == "popup"));
+    let popup = nodes(&tree).into_iter().find(|n| n["kind"] == "popup").unwrap().clone();
+    let item3 = format!("{}", popup["height"].as_i64().unwrap() / 2);
+    lab.input(&t, &["on", &popup["id"].to_string(), "move", "40", &item3, "click"]);
+    wait_log(&log, "menu 3", 5);
+    // Clicking the line edit closes a reopened menu; keys right after must reach the edit.
+    lab.input(&t, &["on", "output", "move", &lx, &ly, "click", "right", "sleep", "300", "move", &ex, &ey, "click", "key", "End", "type", "!"]);
+    wait_log(&log, "edit 'qt ☃ ü!'", 5);
+    lab.wait_tree("s1", 5, |t| !nodes(t).iter().any(|n| n["kind"] == "popup"));
+}
+
+#[test]
+fn kitty_types_unicode() {
+    if !have("kitty") {
+        return;
+    }
+    let lab = Lab::new();
+    lab.run(&["new", "-s", "500x300"]);
+    let out = lab.path("typed.txt");
+    lab.run(&["run", "--", "kitty", "-o", "confirm_os_window_close=0", "sh", "-c", &format!("read l; printf %s \"$l\" > {out}")]);
+    lab.wait_tree("s1", 15, |t| t.as_array().is_some_and(|a| !a.is_empty()));
+    let t = lab.lock();
+    // kitty takes a moment after mapping before the shell reads.
+    std::thread::sleep(Duration::from_millis(500));
+    lab.input(&t, &["type", "kitty é→✓ 日本 A!\\n"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&out).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "kitty é→✓ 日本 A!");
+}

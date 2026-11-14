@@ -6,10 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use guilab_compositor::{Session, SessionConfig, Settle};
-use guilab_proto::{Command, Request, Response, SessionInfo, ShotInfo, Target};
+use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle};
+use guilab_proto::{Command, LockInfo, Request, Response, SessionInfo, ShotInfo, Target};
 
-use crate::{DEFAULT_TTL, Server, ShotWait, Slot, send};
+use crate::{ClipWait, DEFAULT_TTL, InputJob, Server, ShotWait, Slot, send};
+
+/// How long the app owning the clipboard gets to send it.
+const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Settle wait caps: once a window is up, and while waiting for the first window.
 const SETTLE_CAP: Duration = Duration::from_secs(3);
@@ -91,13 +94,60 @@ impl Server {
                     Ok(n) => n,
                     Err(e) => return Some(Response::err(e)),
                 };
-                if let Command::End = cmd {
-                    return Some(Response::ok(self.end_session(&name)));
-                }
+                let token = target.token.as_deref();
                 let slot = self.sessions.get_mut(&name).unwrap();
+                if let Err(e) = slot.lock.check(&name, cmd.access(), token) {
+                    return Some(Response::err(e));
+                }
                 slot.last_active = Instant::now();
                 let s = &mut slot.session;
                 match cmd {
+                    Command::End => Response::ok(self.end_session(&name)),
+                    Command::Lock { force } => match slot.lock.take(&name, token, force) {
+                        Ok(token) => {
+                            // Taking over: the old holder's chains stop.
+                            if force {
+                                self.abort_inputs(&name, &Response::err("your lock was taken over (guilab lock --force)"));
+                            }
+                            Response::ok(LockInfo { session: name, token })
+                        }
+                        Err(e) => Response::err(e),
+                    },
+                    Command::Unlock { force } => match slot.lock.release(&name, token, force) {
+                        Ok(_) => {
+                            s.release_all(InputSource::Agent);
+                            self.abort_inputs(&name, &Response::err("the lock was released; input stopped"));
+                            Response::ok(())
+                        }
+                        Err(e) => Response::err(e),
+                    },
+                    Command::Input { actions } => {
+                        if let Err(e) = s.check_chain(&actions) {
+                            return Some(Response::err(e));
+                        }
+                        let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
+                        // Queued behind the session's running chain, if any; else runs now.
+                        let now = Instant::now();
+                        self.inputs.push(InputJob { session: name, stream, chain: Chain::new(actions), resume_at: now });
+                        self.run_inputs(now);
+                        return None;
+                    }
+                    Command::ClipGet => match s.clip_get() {
+                        Ok(ClipRead::Text(t)) => Response::ok(t),
+                        Ok(ClipRead::Pipe(fd)) => {
+                            let pipe = std::fs::File::from(fd);
+                            let _ = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK);
+                            let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
+                            let deadline = Instant::now() + CLIP_TIMEOUT;
+                            self.clips.push(ClipWait { session: name, stream, pipe, buf: Vec::new(), deadline });
+                            return None;
+                        }
+                        Err(e) => Response::err(e),
+                    },
+                    Command::ClipSet { text } => {
+                        s.clip_set(text);
+                        Response::ok(())
+                    }
                     Command::Run { argv, cwd, env } => result(s.spawn(&argv, &cwd, &env)),
                     Command::Kill { id } => result(s.kill(id)),
                     Command::Ps => Response::ok(s.ps()),
@@ -123,7 +173,7 @@ impl Server {
                         self.waiters.push(ShotWait { session: name, stream, path, settle, start: Instant::now() });
                         return None;
                     }
-                    Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::End => unreachable!(),
+                    Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => unreachable!(),
                 }
             }
         };
@@ -210,6 +260,75 @@ impl Server {
                 Err(e) => Response::err(format!("screenshot: {e:#}")),
             };
             send(&w.stream, &resp);
+        }
+    }
+}
+
+impl Server {
+    /// Runs due input chains; one chain per session at a time, in request order.
+    pub(crate) fn run_inputs(&mut self, now: Instant) {
+        let mut busy: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < self.inputs.len() {
+            let name = self.inputs[i].session.clone();
+            if busy.contains(&name) || self.inputs[i].resume_at > now {
+                busy.push(name);
+                i += 1;
+                continue;
+            }
+            let Some(slot) = self.sessions.get_mut(&name) else {
+                let j = self.inputs.remove(i);
+                send(&j.stream, &Response::err(format!("session {name} ended")));
+                continue;
+            };
+            slot.last_active = now;
+            let job = &mut self.inputs[i];
+            match slot.session.run_chain(&mut job.chain) {
+                Ok(Some(delay)) => {
+                    job.resume_at = now + delay;
+                    busy.push(name);
+                    i += 1;
+                }
+                Ok(None) => {
+                    let j = self.inputs.remove(i);
+                    send(&j.stream, &Response::ok(slot.session.input_info()));
+                }
+                Err(e) => {
+                    let j = self.inputs.remove(i);
+                    send(&j.stream, &Response::err(e));
+                }
+            }
+        }
+    }
+
+    /// Reads clipboard pipes; answers at EOF or timeout.
+    pub(crate) fn check_clips(&mut self, now: Instant) {
+        use std::io::Read;
+        let mut i = 0;
+        while i < self.clips.len() {
+            let c = &mut self.clips[i];
+            let mut tmp = [0u8; 65536];
+            let done = loop {
+                match c.pipe.read(&mut tmp) {
+                    Ok(0) => break Some(Ok(())),
+                    Ok(n) => c.buf.extend_from_slice(&tmp[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break None,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => break Some(Err(e.to_string())),
+                }
+            };
+            let done = done.or_else(|| (now >= c.deadline).then(|| Err("the app owning the clipboard didn't send it".to_string())));
+            match done {
+                None => i += 1,
+                Some(r) => {
+                    let c = self.clips.remove(i);
+                    let resp = match r {
+                        Ok(()) => Response::ok(String::from_utf8_lossy(&c.buf)),
+                        Err(e) => Response::err(e),
+                    };
+                    send(&c.stream, &resp);
+                }
+            }
         }
     }
 }

@@ -1,0 +1,370 @@
+//! Agent input chains: turns `input` actions into [`InputEvent`]s.
+//!
+//! A chain runs until it reaches a pause (`sleep`, or the steps of a glide or gesture) and
+//! returns how long to wait; the server resumes it from its timer, so sleeping never blocks
+//! other sessions or requests.
+
+use std::{collections::VecDeque, time::Duration};
+
+use guilab_proto::{Action, Button, InputInfo, TreeNode};
+use smithay::{
+    backend::input::AxisSource,
+    input::keyboard::{Keycode, Keysym},
+    utils::{Logical, Point},
+};
+
+use crate::{
+    handlers::surface_id,
+    input::{InputEvent, InputSource},
+    keys::{KeyPos, char_keysym},
+    session::Session,
+};
+
+/// Interval between the steps of glides and gestures.
+const STEP: Duration = Duration::from_millis(16);
+/// Longest wait for a clicked-away menu to close before keys (see `popup_may_close`).
+const MENU_WAIT: Duration = Duration::from_millis(500);
+/// Logical pixels per wheel notch (libinput's convention).
+const WHEEL_PX: f64 = 15.0;
+
+enum Step {
+    Act(usize, Action),
+    Ev(InputEvent),
+    Sleep(Duration),
+}
+
+pub struct Chain {
+    steps: VecDeque<Step>,
+    /// `on` surface: coordinates are relative to its top-left.
+    origin: Option<u32>,
+    /// How long the next keyboard action has waited for a menu to close.
+    menu_wait: Duration,
+}
+
+/// Failure in the middle of a chain: which action, and why.
+pub fn action_err(i: usize, a: &Action, msg: impl std::fmt::Display) -> String {
+    let done = if i > 0 { " (the actions before it were done)" } else { "" };
+    format!("input action {} `{a}`: {msg}{done}", i + 1)
+}
+
+fn button_code(b: Button) -> u32 {
+    match b {
+        Button::Left => 0x110,
+        Button::Right => 0x111,
+        Button::Middle => 0x112,
+        Button::Back => 0x113,
+        Button::Forward => 0x114,
+    }
+}
+
+fn find_node(nodes: &[TreeNode], id: u32) -> Option<&TreeNode> {
+    nodes.iter().find_map(|n| if n.id == id { Some(n) } else { find_node(&n.children, id) })
+}
+
+impl Chain {
+    pub fn new(actions: Vec<Action>) -> Chain {
+        Chain { steps: actions.into_iter().enumerate().map(|(i, a)| Step::Act(i, a)).collect(), origin: None, menu_wait: Duration::ZERO }
+    }
+}
+
+impl Session {
+    /// Checks what can be checked before running anything (key names, text).
+    pub fn check_chain(&self, actions: &[Action]) -> Result<(), String> {
+        for (i, a) in actions.iter().enumerate() {
+            let r = match a {
+                Action::Key { keys } => keys.iter().try_for_each(|k| self.keymap.key(k).map(drop)),
+                Action::KeyDown { key } | Action::KeyUp { key } => self.keymap.key(key).map(drop),
+                Action::Type { text } => match text.chars().find(|c| char_keysym(*c).is_none()) {
+                    Some(c) => Err(format!("can't type control character {c:?}")),
+                    None => Ok(()),
+                },
+                _ => Ok(()),
+            };
+            r.map_err(|e| format!("input action {} `{a}`: {e} (nothing was done)", i + 1))?;
+        }
+        Ok(())
+    }
+
+    /// Runs the chain until it finishes (`Ok(None)`) or must wait (`Ok(Some(delay))`).
+    pub fn run_chain(&mut self, chain: &mut Chain) -> Result<Option<Duration>, String> {
+        while let Some(step) = chain.steps.pop_front() {
+            match step {
+                Step::Sleep(d) => return Ok(Some(d)),
+                Step::Ev(ev) => self.inject(ev, InputSource::Agent),
+                Step::Act(i, a) => {
+                    // Keys right after a click that may close a menu: give the app a moment
+                    // to close it, or the keys go to the menu.
+                    let keyboard = matches!(a, Action::Key { .. } | Action::KeyDown { .. } | Action::KeyUp { .. } | Action::Type { .. });
+                    if keyboard && chain.menu_wait < MENU_WAIT && self.popup_may_close() {
+                        chain.menu_wait += STEP;
+                        chain.steps.push_front(Step::Act(i, a));
+                        return Ok(Some(STEP));
+                    }
+                    chain.menu_wait = Duration::ZERO;
+                    let mut later = Vec::new();
+                    self.act(chain, &a, &mut later).map_err(|e| action_err(i, &a, e))?;
+                    for s in later.into_iter().rev() {
+                        chain.steps.push_front(s);
+                    }
+                }
+            }
+        }
+        self.popup_may_close();
+        Ok(None)
+    }
+
+    pub fn input_info(&self) -> InputInfo {
+        let scale = self.output.current_scale().fractional_scale();
+        let p = self.pointer_location();
+        let under = self.surface_under(p).and_then(|(s, _)| surface_id(&s));
+        let focus = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|s| surface_id(&s));
+        let r = |v: f64| (v * scale * 10.0).round() / 10.0;
+        InputInfo { pointer: [r(p.x), r(p.y)], under, focus }
+    }
+
+    /// Output pixels (or `on`-surface pixels) -> global logical point, bounds-checked.
+    fn point(&self, chain: &Chain, x: f64, y: f64) -> Result<Point<f64, Logical>, String> {
+        let (mut gx, mut gy) = (x, y);
+        if let Some(id) = chain.origin {
+            let tree = self.tree();
+            let n = find_node(&tree, id).ok_or_else(|| format!("surface {id} (from `on {id}`) is gone; see guilab tree"))?;
+            gx += n.x as f64;
+            gy += n.y as f64;
+        }
+        let o = self.output_info();
+        if gx < 0.0 || gy < 0.0 || gx > o.width as f64 || gy > o.height as f64 {
+            let rel = if chain.origin.is_some() { format!(" (output pixel {gx},{gy})") } else { String::new() };
+            return Err(format!("{x},{y}{rel} is outside the {}x{} output", o.width, o.height));
+        }
+        let scale = o.scale;
+        Ok((gx / scale, gy / scale).into())
+    }
+
+    fn to_logical(&self, px: f64) -> f64 {
+        px / self.output.current_scale().fractional_scale()
+    }
+
+    fn need_focus(&self) -> Result<(), String> {
+        if self.seat.get_keyboard().and_then(|k| k.current_focus()).is_none() {
+            return Err("no window has keyboard focus (click one first)".into());
+        }
+        Ok(())
+    }
+
+    fn key(&mut self, code: Keycode, pressed: bool) {
+        self.inject(InputEvent::Key { code, pressed }, InputSource::Agent);
+    }
+
+    /// Taps a key with its modifiers (modifiers already held aren't touched).
+    fn tap(&mut self, k: &KeyPos) {
+        let held = self.seat.get_keyboard().map(|kb| kb.pressed_keys()).unwrap_or_default();
+        let mods: Vec<Keycode> = k.mods.iter().copied().filter(|m| !held.contains(m)).collect();
+        for m in &mods {
+            self.key(*m, true);
+        }
+        self.key(k.code, true);
+        self.key(k.code, false);
+        for m in mods.iter().rev() {
+            self.key(*m, false);
+        }
+    }
+
+    fn type_text(&mut self, text: &str) -> Result<(), String> {
+        self.need_focus()?;
+        let syms: Vec<Keysym> = text.chars().map(|c| char_keysym(c).ok_or_else(|| format!("can't type {c:?}"))).collect::<Result<_, _>>()?;
+        let spare = self.keymap.spare_count();
+        let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
+        let mut swapped = false;
+        let mut i = 0;
+        while i < syms.len() {
+            // The longest run whose missing keysyms fit on the spare keycodes.
+            let mut extra: Vec<Keysym> = Vec::new();
+            let mut j = i;
+            while j < syms.len() {
+                let s = syms[j];
+                if self.keymap.find(s).is_none() && !extra.contains(&s) {
+                    if extra.len() == spare {
+                        break;
+                    }
+                    extra.push(s);
+                }
+                j += 1;
+            }
+            if j == i {
+                return Err("no spare keycodes to type non-keyboard characters".into());
+            }
+            let mut placed = Vec::new();
+            if !extra.is_empty() {
+                let (text, p) = self.keymap.extended(&extra).ok_or("couldn't build a keymap for these characters")?;
+                kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
+                placed = p;
+                swapped = true;
+            }
+            for s in &syms[i..j] {
+                let k = match self.keymap.find(*s) {
+                    Some(k) => k.clone(),
+                    None => KeyPos { code: placed.iter().find(|(p, _)| p == s).unwrap().1, mods: Vec::new() },
+                };
+                self.tap(&k);
+            }
+            i = j;
+        }
+        if swapped {
+            let base = self.keymap.text.clone();
+            kb.set_keymap_from_string(self, base).map_err(|e| format!("restoring keymap: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Steps for a glide from `from` to `to` over `ms`, ending exactly at `to`.
+    fn glide(from: Point<f64, Logical>, to: Point<f64, Logical>, ms: u32, ev: impl Fn(Point<f64, Logical>) -> InputEvent) -> Vec<Step> {
+        let n = (ms as u64 / STEP.as_millis() as u64).max(1);
+        let dt = Duration::from_millis(ms as u64) / n as u32;
+        let mut out = Vec::new();
+        for k in 1..=n {
+            let t = k as f64 / n as f64;
+            out.push(Step::Sleep(dt));
+            out.push(Step::Ev(ev(from + (to - from).upscale(t))));
+        }
+        out
+    }
+
+    fn act(&mut self, chain: &mut Chain, a: &Action, later: &mut Vec<Step>) -> Result<(), String> {
+        match a {
+            Action::Move { x, y, ms } => {
+                let to = self.point(chain, *x, *y)?;
+                if *ms == 0 {
+                    self.inject(InputEvent::PointerMotion { pos: to }, InputSource::Agent);
+                } else {
+                    *later = Self::glide(self.pointer_location(), to, *ms, |pos| InputEvent::PointerMotion { pos });
+                }
+            }
+            Action::Down { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, InputSource::Agent),
+            Action::Up { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, InputSource::Agent),
+            Action::Click { button, count } => {
+                for _ in 0..*count {
+                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, InputSource::Agent);
+                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, InputSource::Agent);
+                }
+            }
+            Action::Scroll { dx, dy } => self.inject(
+                InputEvent::PointerAxis { source: AxisSource::Wheel, delta: (dx * WHEEL_PX, dy * WHEEL_PX), steps: Some((*dx, *dy)), stop: false },
+                InputSource::Agent,
+            ),
+            Action::ScrollPx { dx, dy } => {
+                // Touchpad-style: a few frames, then the fingers rest before lifting (the stop),
+                // so toolkits see no velocity and don't add kinetic scrolling.
+                let (lx, ly) = (self.to_logical(*dx), self.to_logical(*dy));
+                let n = 5;
+                for _ in 0..n {
+                    later.push(Step::Ev(InputEvent::PointerAxis { source: AxisSource::Finger, delta: (lx / n as f64, ly / n as f64), steps: None, stop: false }));
+                    later.push(Step::Sleep(STEP));
+                }
+                later.push(Step::Sleep(Duration::from_millis(200)));
+                later.push(Step::Ev(InputEvent::PointerAxis { source: AxisSource::Finger, delta: (0.0, 0.0), steps: None, stop: true }));
+            }
+            Action::Key { keys } => {
+                self.need_focus()?;
+                let mut press: Vec<Keycode> = Vec::new();
+                for k in keys {
+                    let k = self.keymap.key(k)?;
+                    for code in k.mods.iter().chain([&k.code]) {
+                        if !press.contains(code) {
+                            press.push(*code);
+                        }
+                    }
+                }
+                for c in &press {
+                    self.key(*c, true);
+                }
+                for c in press.iter().rev() {
+                    self.key(*c, false);
+                }
+            }
+            Action::KeyDown { key } => {
+                self.need_focus()?;
+                let k = self.keymap.key(key)?;
+                for code in k.mods.iter().chain([&k.code]) {
+                    self.key(*code, true);
+                }
+            }
+            Action::KeyUp { key } => {
+                let k = self.keymap.key(key)?;
+                for code in [&k.code].into_iter().chain(k.mods.iter().rev()) {
+                    self.key(*code, false);
+                }
+            }
+            Action::Type { text } => self.type_text(text)?,
+            Action::TouchDown { id, x, y } => {
+                if self.held.touches.contains_key(id) {
+                    return Err(format!("finger {id} is already down"));
+                }
+                let pos = self.point(chain, *x, *y)?;
+                self.inject(InputEvent::TouchDown { slot: *id, pos }, InputSource::Agent);
+                self.inject(InputEvent::TouchFrame, InputSource::Agent);
+            }
+            Action::TouchMove { id, x, y, ms } => {
+                let Some(from) = self.held.touches.get(id).copied() else {
+                    return Err(format!("finger {id} isn't down (use touch down {id} X Y first)"));
+                };
+                let to = self.point(chain, *x, *y)?;
+                let slot = *id;
+                for s in Self::glide(from, to, *ms, |pos| InputEvent::TouchMotion { slot, pos }) {
+                    let is_ev = matches!(s, Step::Ev(_));
+                    later.push(s);
+                    if is_ev {
+                        later.push(Step::Ev(InputEvent::TouchFrame));
+                    }
+                }
+                if *ms == 0 {
+                    // No pause needed for a jump.
+                    later.retain(|s| !matches!(s, Step::Sleep(_)));
+                }
+            }
+            Action::TouchUp { id } => {
+                if !self.held.touches.contains_key(id) {
+                    return Err(format!("finger {id} isn't down"));
+                }
+                self.inject(InputEvent::TouchUp { slot: *id }, InputSource::Agent);
+                self.inject(InputEvent::TouchFrame, InputSource::Agent);
+            }
+            Action::Tap { x, y } => {
+                let pos = self.point(chain, *x, *y)?;
+                let slot = (0..).find(|s| !self.held.touches.contains_key(s)).unwrap();
+                for ev in [InputEvent::TouchDown { slot, pos }, InputEvent::TouchFrame, InputEvent::TouchUp { slot }, InputEvent::TouchFrame] {
+                    self.inject(ev, InputSource::Agent);
+                }
+            }
+            Action::Pinch { scale, rotate } => {
+                let n = 10;
+                later.push(Step::Ev(InputEvent::PinchBegin { fingers: 2 }));
+                for k in 1..=n {
+                    later.push(Step::Sleep(STEP));
+                    let s = scale.powf(k as f64 / n as f64);
+                    later.push(Step::Ev(InputEvent::PinchUpdate { delta: (0.0, 0.0).into(), scale: s, rotation: rotate / n as f64 }));
+                }
+                later.push(Step::Ev(InputEvent::PinchEnd { cancelled: false }));
+            }
+            Action::Swipe { dx, dy, fingers } => {
+                let n = 10;
+                let d: Point<f64, Logical> = (self.to_logical(*dx) / n as f64, self.to_logical(*dy) / n as f64).into();
+                later.push(Step::Ev(InputEvent::SwipeBegin { fingers: *fingers }));
+                for _ in 0..n {
+                    later.push(Step::Sleep(STEP));
+                    later.push(Step::Ev(InputEvent::SwipeUpdate { delta: d }));
+                }
+                later.push(Step::Ev(InputEvent::SwipeEnd { cancelled: false }));
+            }
+            Action::On { surface } => {
+                if let Some(id) = surface
+                    && find_node(&self.tree(), *id).is_none()
+                {
+                    return Err(format!("no surface {id}; see guilab tree"));
+                }
+                chain.origin = *surface;
+            }
+            Action::Sleep { ms } => later.push(Step::Sleep(Duration::from_millis(*ms as u64))),
+        }
+        Ok(())
+    }
+}

@@ -9,7 +9,7 @@ use anyhow::{Context, bail};
 use smithay::{
     backend::renderer::element::default_primary_scanout_output_compare,
     desktop::utils::{
-        OutputPresentationFeedback, surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
+        OutputPresentationFeedback, send_frames_surface_tree, surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
         update_surface_primary_scanout_output,
     },
     output::{Mode, Scale},
@@ -41,7 +41,9 @@ impl Session {
     /// Driven by the server's timer at the output refresh rate.
     pub fn tick(&mut self) {
         let gpu = self.gpu.clone();
-        let res = self.frame.render(&mut gpu.borrow_mut(), &self.output, &self.space);
+        let icon = self.dnd_icon.clone();
+        let pointer = self.pointer_location();
+        let res = self.frame.render(&mut gpu.borrow_mut(), &self.output, &self.space, icon.as_ref().map(|s| (s, pointer)));
         self.last_render = Instant::now();
         let now = self.clock.now();
         let output = self.output.clone();
@@ -72,6 +74,9 @@ impl Session {
         for w in self.space.elements() {
             w.send_frame(&output, now, Some(Duration::from_secs(1)), surface_primary_scanout_output);
         }
+        if let Some(icon) = &icon {
+            send_frames_surface_tree(icon, &output, now, None, |_, _| Some(output.clone()));
+        }
         self.space.refresh();
         self.popups.cleanup();
         self.flush();
@@ -86,7 +91,8 @@ impl Session {
         let drawing = self.unmapped.iter().any(|w| w.toplevel().is_some_and(|t| t.is_initial_configure_sent()));
         let acked = now.duration_since(self.last_configure) >= CONFIGURE_WAIT
             || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
-        let quiet = now.duration_since(self.last_commit) >= SETTLE_QUIET;
+        // Input counts as activity: the app hasn't necessarily reacted (committed) yet.
+        let quiet = now.duration_since(self.last_commit.max(self.last_input)) >= SETTLE_QUIET;
         let drawn = self.last_render > self.last_commit;
         if !drawing && acked && quiet && drawn { Settle::Settled } else { Settle::Busy }
     }

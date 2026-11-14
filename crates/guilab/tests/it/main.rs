@@ -4,6 +4,7 @@
 
 mod apps;
 mod cleanup;
+mod input;
 mod sessions;
 
 use std::{

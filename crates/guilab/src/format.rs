@@ -1,6 +1,6 @@
 //! Compact text output for agents.
 
-use guilab_proto::{Command, NodeKind, OutputInfo, ProcInfo, ProcState, SessionInfo, ShotInfo, TreeNode};
+use guilab_proto::{Command, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, SessionInfo, ShotInfo, TreeNode};
 use serde::de::DeserializeOwned;
 
 fn get<T: DeserializeOwned>(v: serde_json::Value) -> Result<T, String> {
@@ -89,6 +89,37 @@ pub fn print(cmd: &Command, v: serde_json::Value) -> Result<(), String> {
             line
         }
         Command::Output { .. } => output(&get(v)?),
+        Command::Lock { .. } => {
+            let l: LockInfo = get(v)?;
+            format!(
+                "token {} (session {}). Pass it to commands that change the session: guilab -t {} input ...",
+                l.token, l.session, l.token
+            )
+        }
+        Command::Unlock { .. } => "unlocked".into(),
+        Command::Input { .. } => {
+            let i: InputInfo = get(v)?;
+            let n = |v: f64| if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v}") };
+            let mut line = format!("pointer {},{}", n(i.pointer[0]), n(i.pointer[1]));
+            match i.under {
+                Some(s) => line += &format!(" over surface {s}"),
+                None => line += " over nothing",
+            }
+            match i.focus {
+                Some(s) => line += &format!("; keyboard focus {s}"),
+                None => line += "; no keyboard focus",
+            }
+            line
+        }
+        Command::ClipGet => {
+            let t: String = get(v)?;
+            print!("{t}");
+            if !t.ends_with('\n') {
+                println!();
+            }
+            return Ok(());
+        }
+        Command::ClipSet { .. } => return Ok(()),
         Command::Ping | Command::Shutdown => return Ok(()),
     };
     println!("{text}");

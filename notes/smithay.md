@@ -13,16 +13,9 @@ Enabled per session (`Session::new`): compositor v6, subcompositor, shm, xdg-she
 - Skipped: layer-shell, session-lock, screencopy/image-copy-capture, output management, foreign-toplevel, security-context, drm-lease, fifo/commit-timing. If fifo/commit-timing are enabled, their barriers must be signalled every tick (anvil `pre_repaint`/`post_repaint`).
 - For Xwayland glamor, linux-dmabuf must be v4+ with feedback naming our render node (it is).
 
-## Input injection (verified pointer, button, keys)
-- Seat already has keyboard (`us`, repeat rate 0), pointer and touch. xkb needs xkeyboard-config at runtime.
-- **Pointer**: `ptr.motion(s, Some((surface, surface_origin_global)), &MotionEvent { location: global, serial, time })`, then `ptr.frame(s)`. Buttons: `ptr.button(s, &ButtonEvent { button: 0x110 /*BTN_LEFT*/, state, .. })`. Scroll: `ptr.axis(s, AxisFrame::new(time).source(AxisSource::Wheel).value(Axis::Vertical, dy).v120(..))`.
-  - The client receives `location - surface_origin`. For `on SURFACE`, compute the surface's global origin (window location + popup offset from `popups_for_surface` + subsurface offset; `tree.rs` already does this walk) and add the local point.
-  - Normal moves should hit-test with `space.element_under` + `Window::surface_under(p, WindowSurfaceType::ALL)` (covers popups and subsurfaces). An active grab (popup, DnD) sees events first.
-  - CLI coordinates are output pixels (like `tree` and screenshots); divide by the output scale to get logical coordinates.
-- **Gestures**: `ptr.gesture_{swipe,pinch,hold}_{begin,update,end}` (the pointer-gestures global exists).
-- **Touch**: `touch.down(s, Some((surface, origin)), &DownEvent { slot, location, serial, time })`, then `motion`/`up`/`frame`; focus is fixed at `down`.
-- **Time**: `InputTime::now()` (`smithay::backend::input`).
-- **Keyboard**: `kb.input::<(), _>(s, Keycode::new(evdev + 8), KeyState::Pressed, serial, time, |_, _, _| FilterResult::Forward)`. Chords: press modifiers in order. `kb.keycode_for_keysym(sym)` doesn't say which level, so press Shift yourself for level-1 symbols (check `key_get_syms_by_level`).
-- **Typing any text**: `kb.inject_text_keysyms(s, &keysyms, time)` builds a throwaway keymap, taps, restores. Verified (kitty typed `é→`). Gotcha: it maps keysyms to xkb codes from 9 = evdev KEY_ESC, so raw-keycode clients see Esc (weston demos quit). Copy the function (~80 lines, MIT) and use spare codes (200–255, chunked); use real key presses for characters in the keymap. No-op without keyboard focus. Slow and racy for Xwayland clients.
+## Input
+Built (`input.rs`, `actions.rs`, `keys.rs`; behaviours in `code-map.md`). Still useful:
+- `InputTime::now()` for synthetic events. Gestures: `ptr.gesture_{swipe,pinch,hold}_*`, then `ptr.frame`. Touch focus is fixed at `down`.
 - Text-input-v3 only routes to an IME; smithay has no compositor-side `commit_string`, so it isn't a typing path.
-- Popup grabs (`shell.rs`, from anvil) are untested with real input; Qt doesn't even open a `QMenu` without an input serial (step 3 should test both).
+- Typing via keymap swap is racy for Xwayland clients (MappingNotify vs key events); check in step 4.
+- Not built: hold gestures, `screenshot --cursor` (anvil `cursor.rs` + `drawing.rs`), DnD icon `wl_surface.offset` (icon is drawn at the pointer).

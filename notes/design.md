@@ -2,7 +2,7 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Plan steps 1-2 (skeleton, headless compositor) are built; see `plan.md` for what's next and `code-map.md` for the code.
+Plan steps 1-3 (skeleton, headless compositor, input and locking) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
@@ -22,6 +22,7 @@ Plan steps 1-2 (skeleton, headless compositor) are built; see `plan.md` for what
 - **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session. Each session is its own smithay state type (`Display<Session>`, handlers on `Session`), not one shared state with lookups, and has its own calloop loop (data = the session) nested in the server's loop, which is what X11Wm and smithay's per-display getters need.
 - **Window policy:** the first toplevel fills the output (tiled states, no decorations). Dialogs (with a parent) and later toplevels float centered on top. X override-redirect windows (menus, tooltips) go in their own position.
 - Key repeat is off by default, so a held key in an agent input chain doesn't auto-repeat.
+- Floating windows always stack above tiled ones, and dialogs above their parents; clicking a window focuses and raises it within that order.
 - **Session resolution:** `--session NAME` > `$GUILAB_SESSION` > the session created from the cwd's git worktree root > the only session, if there's exactly one. A new session defaults to the worktree's name. Goal: one agent per worktree, each with its own session, and no naming needed.
 
 ## IPC
@@ -29,8 +30,9 @@ Plan steps 1-2 (skeleton, headless compositor) are built; see `plan.md` for what
 - The CLI is the only client. No MCP.
 
 ## Locking
-- An agent must `guilab lock` before anything that changes a session (input, output size, run/kill). Lock returns a token, and those commands require it. One holder per session, so two agents can't drive the same session.
-- Read-only commands (screenshot, tree, log, poll) need no lock.
+- `guilab lock` returns a short random token. One holder per session, so two agents can't drive the same session. `lock` again with the token returns the same token; `lock --force` takes over (the old token stops working); `unlock` releases everything still held (keys, buttons, touches).
+- `input` always needs the lock (it competes with the human's input). Other changing commands (run, kill, output changes, clip set, end) need the token only while the session is locked. Read-only ones (screenshot, tree, ps, clip get, log, poll) never do. Why not lock for everything: the build/kill/run loop and scripts on an unlocked session stay token-free, and run/kill don't fight the human's input. A stale or revoked token is always an error, so an agent learns it lost the lock.
+- Token passing: `-t TOKEN` on any command (agent shells don't keep env between calls) or `$GUILAB_TOKEN`. Errors say exactly what to run.
 - While locked, the human's input to that session is blocked by default. They can still view, screenshot, draw and send messages.
 - The viewer has two buttons:
   - **Revoke:** drops the agent's lock. Its token stops working until it locks again.
@@ -81,9 +83,9 @@ Drawing flow:
   - sessions: `new [NAME] [-s WxH] [--scale S] [--ttl SECS] [-x]`, `end`, `ls`; `-S NAME` / `--session NAME` on any command
   - apps: `run -- CMD...`, `kill [ID]`, `ps` (with exit status). No restart or watch mode: `build && guilab kill && guilab run ...` is enough.
   - control: `lock`, `unlock`, `output [-s WxH] [--scale S]` (no args: show)
-  - input chain: `input [--surface ID] ACTION...`. Actions: `move X Y`, `down/up/click [BTN]`, `scroll DX DY`, `key CHORD`, `keydown/keyup KEY`, `type TEXT`, `touch down|move|up ID [X Y]`, `on SURFACE` (switches coordinates to that surface's local space), `sleep MS`
+  - input chain: `input ACTION...`, grammar and docs in `guilab input --help` (`proto/src/input.rs` `HELP`): `move X Y [MS]` (MS = glide), `down/up [BTN]`, `click [BTN] [N]`, `scroll DX DY` (wheel notches), `scrollpx DX DY` (touchpad), `key CHORD`, `keydown/keyup KEY`, `type TEXT`, `touch down|move|up ID [X Y] [MS]`, `tap X Y`, `pinch SCALE [DEG]`, `swipe DX DY [FINGERS]`, `on ID|output` (surface-local pixels from the surface's `tree` origin; events still go to whatever is on top), `sleep MS`. Chains are parsed and key names checked before anything runs. Sleeps don't block the server; a session's chains run one at a time in order. Replies with the pointer position, surface under it and keyboard focus.
   - inspect: `tree` (toplevels topmost first, with popups and subsurfaces nested, X windows: IDs, app_id/title, pid, geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir), `log`
-  - clipboard: `clip get`, `clip set`
+  - clipboard: `clip get`, `clip set [TEXT]` (stdin without TEXT); text only, clipboard selection only (no primary)
   - messaging: `poll [--follow]`, `say TEXT [--image PATH]`
 
 ## Later

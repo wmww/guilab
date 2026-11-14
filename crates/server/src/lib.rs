@@ -1,6 +1,7 @@
 //! The guilab daemon: one calloop loop holding the control socket, the frame timer and
 //! every session's nested loop. Single-threaded.
 
+pub mod lock;
 mod requests;
 
 use std::{
@@ -25,7 +26,7 @@ use calloop::{
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
-use guilab_compositor::{Gpu, Session, SharedGpu, procs};
+use guilab_compositor::{Chain, Gpu, InputSource, Session, SharedGpu, procs};
 use guilab_proto::{Response, ServerInfo};
 
 pub struct Options {
@@ -42,7 +43,25 @@ pub(crate) struct Slot {
     pub root: Option<PathBuf>,
     pub ttl: u64,
     pub last_active: Instant,
+    pub lock: lock::LockState,
     token: RegistrationToken,
+}
+
+/// An input chain paused at a sleep (or queued behind another chain of its session).
+pub(crate) struct InputJob {
+    pub session: String,
+    pub stream: UnixStream,
+    pub chain: Chain,
+    pub resume_at: Instant,
+}
+
+/// A `clip get` reading the owning client's pipe.
+pub(crate) struct ClipWait {
+    pub session: String,
+    pub stream: UnixStream,
+    pub pipe: File,
+    pub buf: Vec<u8>,
+    pub deadline: Instant,
 }
 
 /// A screenshot request waiting for its session to settle.
@@ -67,6 +86,8 @@ pub struct Server {
     pub(crate) gpu: SharedGpu,
     pub(crate) sessions: BTreeMap<String, Slot>,
     pub(crate) waiters: Vec<ShotWait>,
+    pub(crate) inputs: Vec<InputJob>,
+    pub(crate) clips: Vec<ClipWait>,
     graveyard: Vec<Grave>,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) info: ServerInfo,
@@ -141,6 +162,8 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         gpu: Rc::new(RefCell::new(gpu)),
         sessions: BTreeMap::new(),
         waiters: Vec::new(),
+        inputs: Vec::new(),
+        clips: Vec::new(),
         graveyard: Vec::new(),
         sessions_dir,
         info,
@@ -222,6 +245,8 @@ impl Server {
             slot.session.tick();
             slot.session.reap_tick(now);
         }
+        self.run_inputs(now);
+        self.check_clips(now);
         self.check_waiters(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
@@ -269,16 +294,30 @@ impl Server {
         drop(slot);
         self.graveyard.push(Grave { children, tag, kill_at: Instant::now() + procs::KILL_GRACE, killed: false });
         let _ = fs::remove_dir_all(&dir);
-        let mut i = 0;
-        while i < self.waiters.len() {
-            if self.waiters[i].session == name {
-                let w = self.waiters.remove(i);
-                send(&w.stream, &Response::err(format!("session {name} ended")));
-            } else {
-                i += 1;
-            }
+        let ended = Response::err(format!("session {name} ended"));
+        for w in self.waiters.extract_if(.., |w| w.session == name) {
+            send(&w.stream, &ended);
+        }
+        self.abort_inputs(name, &ended);
+        for c in self.clips.extract_if(.., |c| c.session == name) {
+            send(&c.stream, &ended);
         }
         Some(info)
+    }
+
+    /// Fails the session's running and queued input chains.
+    pub(crate) fn abort_inputs(&mut self, name: &str, resp: &Response) {
+        for j in self.inputs.extract_if(.., |j| j.session == name) {
+            send(&j.stream, resp);
+        }
+    }
+
+    /// Viewer's Revoke button: drop the agent's lock, stop its input, release held keys.
+    pub fn revoke_lock(&mut self, name: &str) {
+        let Some(slot) = self.sessions.get_mut(name) else { return };
+        slot.lock.revoke();
+        slot.session.release_all(InputSource::Agent);
+        self.abort_inputs(name, &Response::err("the human revoked your lock; input stopped"));
     }
 
     /// Registers a session's nested loop in the server loop.
@@ -306,7 +345,7 @@ impl Server {
             })
             .map_err(|e| e.error)?;
         let _ = fs::set_permissions(&session.dir, fs::Permissions::from_mode(0o700));
-        self.sessions.insert(name, Slot { session, root, ttl, last_active: Instant::now(), token });
+        self.sessions.insert(name, Slot { session, root, ttl, last_active: Instant::now(), lock: Default::default(), token });
         Ok(())
     }
 }

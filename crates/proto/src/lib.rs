@@ -14,6 +14,9 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub mod input;
+pub use input::{Action, Button};
+
 /// `$XDG_RUNTIME_DIR/guilab`.
 pub fn runtime_dir() -> io::Result<PathBuf> {
     match std::env::var_os("XDG_RUNTIME_DIR") {
@@ -36,6 +39,9 @@ pub struct Target {
     /// The CLI's git worktree root, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
+    /// Lock token (`-t` or `$GUILAB_TOKEN`), for commands that change a locked session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +92,39 @@ pub enum Command {
     },
     /// Change and/or show the output. Reply: [`OutputInfo`].
     Output { size: Option<[u32; 2]>, scale: Option<f64> },
+    /// Take the session's lock. Reply: [`LockInfo`]. With the current token: same token.
+    /// `force` takes it from another holder.
+    Lock { force: bool },
+    /// Release the lock (and any held keys, buttons, touches). Reply: null.
+    Unlock { force: bool },
+    /// Run an input chain; needs the lock. Reply: [`InputInfo`] after the chain finished.
+    Input { actions: Vec<Action> },
+    /// Reply: the clipboard's text (String).
+    ClipGet,
+    /// Set the clipboard to text (owned by the server). Reply: null.
+    ClipSet { text: String },
+}
+
+/// What a command may do to a session, for the lock check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Never needs a token.
+    Read,
+    /// Needs the token while the session is locked.
+    Change,
+    /// Always needs the lock (it competes with the human's input).
+    Drive,
+}
+
+impl Command {
+    pub fn access(&self) -> Access {
+        match self {
+            Command::Input { .. } => Access::Drive,
+            Command::Run { .. } | Command::Kill { .. } | Command::End | Command::ClipSet { .. } => Access::Change,
+            Command::Output { size, scale } if size.is_some() || scale.is_some() => Access::Change,
+            _ => Access::Read,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +237,24 @@ pub struct ShotInfo {
     pub settled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockInfo {
+    pub session: String,
+    pub token: String,
+}
+
+/// State after an input chain. Pointer in output pixels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputInfo {
+    pub pointer: [f64; 2],
+    /// Surface under the pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<u32>,
+    /// Surface with keyboard focus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<u32>,
+}
+
 /// A blocking client connection.
 pub struct Client {
     reader: BufReader<UnixStream>,
@@ -238,7 +295,7 @@ mod tests {
     #[test]
     fn request_roundtrip() {
         let req = Request {
-            target: Target { name: Some("a".into()), root: None },
+            target: Target { name: Some("a".into()), ..Default::default() },
             cmd: Command::Screenshot { path: None, settle: true },
         };
         let s = serde_json::to_string(&req).unwrap();

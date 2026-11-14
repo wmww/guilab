@@ -73,8 +73,9 @@ fn worktree_root() -> Option<PathBuf> {
 }
 
 impl Conn {
-    pub fn request(&mut self, session: Option<String>, cmd: Command) -> Result<serde_json::Value, String> {
-        let req = Request { target: Target { name: session, root: worktree_root() }, cmd };
+    pub fn request(&mut self, mut target: Target, cmd: Command) -> Result<serde_json::Value, String> {
+        target.root = worktree_root();
+        let req = Request { target, cmd };
         self.client.call_as(&req)
     }
 

@@ -20,12 +20,13 @@ use anyhow::Context;
 use smithay::{
     backend::renderer::element::RenderElementStates,
     desktop::{PopupManager, Space, Window},
-    input::{Seat, SeatState, keyboard::XkbConfig, pointer::CursorImageStatus},
+    input::{Seat, SeatState, keyboard::{XkbConfig, xkb}, pointer::CursorImageStatus},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, LoopHandle, Mode as CMode, PostAction, generic::Generic},
         wayland_server::{
             Display, DisplayHandle, ListeningSocket,
+            protocol::wl_surface::WlSurface,
             backend::{ClientData, ClientId, DisconnectReason},
         },
     },
@@ -58,6 +59,8 @@ use smithay::{
 };
 
 use crate::{
+    input::Held,
+    keys::Keymap,
     procs::Procs,
     render::{Frame, Gpu},
 };
@@ -131,6 +134,17 @@ pub struct Session {
     pub last_render: Instant,
     /// When we last sent a toplevel configure.
     pub last_configure: Instant,
+    /// When input was last delivered (settle waits for the app to react).
+    pub last_input: Instant,
+
+    pub keymap: Keymap,
+    pub held: Held,
+    /// A button was pressed while a popup grab was active (see `popup_may_close`).
+    pub click_in_grab: bool,
+    /// Mime types of a client-owned clipboard selection (None: empty or ours).
+    pub clip_mimes: Option<Vec<String>>,
+    /// Icon surface of an active drag.
+    pub dnd_icon: Option<WlSurface>,
 }
 
 impl Session {
@@ -211,6 +225,14 @@ impl Session {
         // Repeat rate 0: no client-side key repeat, so held keys in agent input chains don't repeat.
         seat.add_keyboard(XkbConfig { layout: "us", ..Default::default() }, 600, 0)
             .context("keyboard (is xkeyboard-config installed?)")?;
+        // Same keymap, as text we keep (keys.rs extends it to type arbitrary characters).
+        let keymap_text = {
+            let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+                .context("keymap (is xkeyboard-config installed?)")?
+                .get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)
+        };
+        let keymap = Keymap::new(keymap_text)?;
         seat.add_pointer();
         seat.add_touch();
 
@@ -266,7 +288,17 @@ impl Session {
             last_commit: now,
             last_render: now,
             last_configure: now,
+            last_input: now,
+            keymap,
+            held: Held::default(),
+            click_in_grab: false,
+            clip_mimes: None,
+            dnd_icon: None,
         };
+        let mut session = session;
+        let kb = session.seat.get_keyboard().unwrap();
+        let text = session.keymap.text.clone();
+        kb.set_keymap_from_string(&mut session, text).context("setting keymap")?;
         Ok((session, event_loop))
     }
 

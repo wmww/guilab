@@ -1,14 +1,14 @@
 //! smithay handler traits for `Session` (except xdg-shell, see `shell.rs`).
 
-use std::time::Instant;
+use std::{os::fd::OwnedFd, sync::Arc, time::Instant};
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
     delegate_dispatch2,
     input::{
         Seat, SeatHandler, SeatState,
-        dnd::DndGrabHandler,
-        pointer::{CursorImageStatus, PointerHandle},
+        dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source},
+        pointer::{CursorImageStatus, Focus, PointerHandle},
     },
     reexports::{
         calloop::Interest,
@@ -17,7 +17,7 @@ use smithay::{
             protocol::{wl_buffer, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -32,7 +32,7 @@ use smithay::{
         pointer_constraints::{PointerConstraintsHandler, with_pointer_constraint},
         seat::WaylandFocus,
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionSource, SelectionTarget,
             data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus},
             ext_data_control,
             primary_selection::{PrimarySelectionHandler, PrimarySelectionState, set_primary_focus},
@@ -164,15 +164,50 @@ impl smithay::input::tablet::TabletSeatHandler for Session {
 }
 
 impl SelectionHandler for Session {
-    type SelectionUserData = ();
+    /// Text set by `clip set`.
+    type SelectionUserData = Arc<str>;
+
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        if ty == SelectionTarget::Clipboard {
+            self.clip_mimes = source.map(|s| s.mime_types());
+        }
+    }
+
+    fn send_selection(&mut self, _: SelectionTarget, _mime: String, fd: OwnedFd, _: Seat<Self>, text: &Arc<str>) {
+        crate::clipboard::send_text(text.clone(), fd);
+    }
 }
 impl DataDeviceHandler for Session {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
     }
 }
-impl WaylandDndGrabHandler for Session {}
-impl DndGrabHandler for Session {}
+impl WaylandDndGrabHandler for Session {
+    // From anvil: a client started a drag (after a press); the grab moves the offer around.
+    fn dnd_requested<S: Source>(&mut self, source: S, icon: Option<WlSurface>, seat: Seat<Self>, serial: Serial, ty: GrabType) {
+        self.dnd_icon = icon;
+        match ty {
+            GrabType::Pointer => {
+                let ptr = seat.get_pointer().unwrap();
+                let Some(start) = ptr.grab_start_data() else { return source.cancel() };
+                ptr.set_grab(self, DnDGrab::new_pointer(&self.dh, start, source, seat), serial, Focus::Keep);
+            }
+            GrabType::Touch => {
+                let touch = seat.get_touch().unwrap();
+                let Some(start) = touch.grab_start_data() else { return source.cancel() };
+                touch.set_grab(self, DnDGrab::new_touch(&self.dh, start, source, seat), serial);
+            }
+        }
+    }
+}
+impl DndGrabHandler for Session {
+    fn dropped(&mut self, _: Option<DndTarget<'_, Self>>, _: bool, _: Seat<Self>, _: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+    fn cancelled(&mut self, _: Seat<Self>, _: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+}
 impl PrimarySelectionHandler for Session {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state

@@ -15,7 +15,7 @@ use smithay::{
         renderer::{
             Bind, ExportMem, ImportDma, Offscreen,
             damage::OutputDamageTracker,
-            element::{RenderElementStates, surface::WaylandSurfaceRenderElement},
+            element::{Kind, RenderElementStates, surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree}},
             gles::{GlesRenderer, GlesTexture},
             pixman::PixmanRenderer,
         },
@@ -23,7 +23,8 @@ use smithay::{
     desktop::{Space, Window, space::render_output},
     output::Output,
     reexports::pixman,
-    utils::{DeviceFd, Physical, Rectangle, Size},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size},
 };
 
 #[allow(clippy::large_enum_variant)] // one per server
@@ -132,17 +133,31 @@ impl Frame {
         Ok(())
     }
 
-    /// Draws the space into the frame.
-    pub fn render(&mut self, gpu: &mut Gpu, output: &Output, space: &Space<Window>) -> anyhow::Result<Rendered> {
+    /// Draws the space into the frame, with `overlay` (a drag icon at a global logical
+    /// point) on top.
+    pub fn render(
+        &mut self,
+        gpu: &mut Gpu,
+        output: &Output,
+        space: &Space<Window>,
+        overlay: Option<(&WlSurface, Point<f64, Logical>)>,
+    ) -> anyhow::Result<Rendered> {
         let size = output.current_mode().context("output has no mode")?.size;
         self.ensure_target(gpu, size)?;
         let (target, _) = self.target.as_mut().unwrap();
         let age = self.age;
         macro_rules! go {
             ($r:expr, $t:expr, $R:ty) => {{
+                let scale = output.current_scale().fractional_scale();
+                let custom: Vec<WaylandSurfaceRenderElement<$R>> = match overlay {
+                    Some((surface, pos)) => render_elements_from_surface_tree(
+                        $r, surface, pos.to_physical(scale).to_i32_round(), scale, 1.0, Kind::Unspecified,
+                    ),
+                    None => Vec::new(),
+                };
                 let mut fb = $r.bind($t)?;
                 let res = render_output::<_, WaylandSurfaceRenderElement<$R>, _, _>(
-                    output, $r, &mut fb, 1.0, age, [space], &[], &mut self.damage, CLEAR,
+                    output, $r, &mut fb, 1.0, age, [space], &custom, &mut self.damage, CLEAR,
                 )
                 .map_err(|e| anyhow!("render: {e:?}"))?;
                 Rendered { damaged: res.damage.is_some_and(|d| !d.is_empty()), states: res.states }

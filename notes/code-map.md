@@ -1,7 +1,7 @@
 # Code map
 
 ## Crates (`crates/`)
-- `proto` (`guilab-proto`): control protocol types (`Request`/`Command`/`Response` + reply structs), socket paths, blocking `Client`. serde only. Everything the CLI and server agree on lives here.
+- `proto` (`guilab-proto`): control protocol types (`Request`/`Command`/`Response` + reply structs, `Command::access()` for the lock rules), socket paths, blocking `Client`. `input.rs`: the `input` grammar (`Action`, `parse`, `Display`, and `HELP`, which is `guilab input --help`). serde only, has the cheap unit tests.
 - `compositor` (`guilab-compositor`): smithay. `Session` = one Wayland display. No IPC, no CLI.
   - `session.rs`: `Session` struct, globals, socket, seat, output. `Session::new` returns the session plus its own `EventLoop<Session>`.
   - `handlers.rs`: all smithay handler traits except xdg-shell, `delegate_dispatch2!`, surface ids (`SurfaceId` in each surface's data map, assigned in `new_surface`), dmabuf blocker pre-commit hook.
@@ -9,7 +9,11 @@
   - `frame.rs`: `tick()` (render, presentation feedback, frame callbacks), settle detection, PNG writing, `set_output`.
   - `render.rs`: `Gpu` (GLES on a render node, pixman fallback; `GUILAB_RENDERER=pixman|/dev/dri/renderD*`), per-session offscreen `Frame` with a damage tracker.
   - `tree.rs`: `tree` reply. `procs.rs`: run/kill/ps and cleanup.
-- `server` (`guilab-server`): the daemon. Outer calloop loop: control socket, connections, a 16 ms timer, signals, each session's nested loop. `requests.rs`: request dispatch, session resolution, `new`, screenshot waiters.
+  - `input.rs`: `InputEvent` + `Session::inject(ev, InputSource)`, the only path from any input to the seat (event log / human-blocking hook). Hit-testing, click-to-focus, held buttons/touches (`release_all`), popup-grab workarounds.
+  - `actions.rs`: agent chains: `Chain` of proto `Action`s -> events. `run_chain` returns `Some(delay)` at sleeps/glide steps; the server resumes it. Output pixels -> logical here.
+  - `keys.rs`: keysym lookup over the seat keymap (key + Shift/AltGr), key name aliases, and the extended keymap for typing characters the keymap lacks.
+  - `clipboard.rs`: `clip set` (server-owned selection, written from a thread) and `clip get` (own text, or a pipe from the owning client).
+- `server` (`guilab-server`): the daemon. Outer calloop loop: control socket, connections, a 16 ms timer, signals, each session's nested loop. `requests.rs`: request dispatch, session resolution, lock check, `new`, deferred replies (screenshot waiters, input jobs, clipboard pipes, all polled from the tick). `lock.rs`: `LockState` (take/release/check, and `revoke`/`set_shared`/`human_input_allowed` for the viewer).
 - `guilab`: the binary. `main.rs` (clap CLI), `client.rs` (connect + autostart, stale-server warning, `server`), `format.rs` (text output). Integration tests in `tests/it/` (one test binary).
 - Planned: a viewer crate (egui, host window) and an annotation/queue crate depending only on egui + image types (see design.md).
 
@@ -23,8 +27,8 @@
 - smithay APIs taking `LoopHandle<'static, D>` (e.g. `X11Wm::start_wm`) get `session.handle`.
 
 ## Seams for later steps
-- **Lock/input/log**: all requests go through `Server::handle` (`requests.rs`) after `resolve`, so a lock check or a log entry has one place to go. Input will live in the compositor (`Session` has `seat`, pointer, keyboard (repeat rate 0) and touch already).
-- **Xwayland**: per session, in the session loop. `client_compositor_state` must also accept `XWaylandClientData`. `SeatHandler::KeyboardFocus` is `WlSurface` today; X11 focus needs an enum target (anvil's `focus.rs`) so `X11Surface` does SetInputFocus. `Procs::spawn` will need `DISPLAY`. Window policy in `shell.rs` decides at the initial configure; X11 windows need the same tiled/floating rule.
+- **Log**: agent commands all pass `Server::handle` (`requests.rs`); all input passes `Session::inject` (with its `InputSource`).
+- **Xwayland**: per session, in the session loop. `client_compositor_state` must also accept `XWaylandClientData`. `SeatHandler::{Keyboard,Pointer,Touch}Focus` are `WlSurface` today; X11 needs an enum target (anvil's `focus.rs`) so `X11Surface` does SetInputFocus; `input.rs` `surface_under`/`focus_at` and `focus_window` must handle X windows, `actions.rs` is target-agnostic. `SelectionHandler::new_selection`/`send_selection` must forward to the X11Wm (anvil does) for clipboard bridging. `Procs::spawn` will need `DISPLAY`. Window policy in `shell.rs` decides at the initial configure; X11 windows need the same tiled/floating rule.
 - **Viewer**: `render::Frame` already keeps a persistent GLES texture target per session that the viewer can sample.
 - **Event log**: app exits are detected in `Session::reap` (pidfd), window map/unmap in `shell.rs`.
 
@@ -36,12 +40,17 @@
 - `tree` lists toplevels topmost first, coordinates in output pixels (edges rounded half-down).
 - Window policy: a parentless toplevel tiles if no other tiled one exists; otherwise it floats, centered, with `bounds` = output (so an oversized default size fills the output anyway).
 - Popups are positioned by smithay's positioner (flip/slide/resize) against the output, relative to their parent window.
+- Stacking: floating windows always above tiled, dialogs above their parents (`focus_window`). Click/touch-down focuses and raises, unless a grab is active.
+- Settle treats delivered input like a commit (`last_input`), so a screenshot right after `input` waits for the app to react.
+- Popup grabs (smithay, spec-conformant): clicks on the popup client's own surfaces don't dismiss; the client closes its menu itself. smithay quirks worked around in `input.rs`: an ended popup pointer grab swallows the next motion (we resend it); the popup keyboard grab keeps focus on the dead popup until the next key (`popup_may_close` hands focus back; chains wait up to 500 ms before keys after a click while a menu is open, or the keys go to the closing menu).
+- Typing: characters on the keymap use their real keys (+Shift/AltGr). Others: the seat keymap is swapped for one with them added on spare keycodes <= 255 (16 in `us`, chunked), then swapped back; sent to all clients of the session. Replaces smithay's `inject_text_keysyms` (its codes start at 9 = Esc for raw-keycode clients).
+- Lock tokens: 8 chars from `/dev/urandom`. Unlock/revoke/force-takeover abort the session's queued input chains with an error.
 - Edition 2024 `if let` keeps temporaries alive through the block: `if let Some(w) = self.space.elements().find(..).cloned() { self.space.map_element(..) }` fails to borrow-check; bind the result first.
 
 ## Build and test
 - smithay is git master pinned in the root `Cargo.toml` (crates.io 0.7 lacks `delegate_dispatch2!`, `inject_text_keysyms`, etc.). Bump the rev deliberately.
 - Only `cargo test --workspace` (narrow with `--test it <module>::` or a name filter) and `cargo clippy --workspace --all-targets`. No `-p`, no feature flags, no per-command env (each combination builds another copy of the tree). Dev profile only; deps at opt-level 2, line-tables debuginfo, compressed debug sections (`.cargo/config.toml`).
 - compositor and server libs have `test = false`: each lib test binary would link all of smithay. Prefer integration tests in `crates/guilab/tests/it/`, or unit tests in `proto`.
-- Integration tests start a private server per test (`Lab`, runtime dir `$XDG_RUNTIME_DIR/glt-<pid>-<n>`) and skip tests whose apps aren't installed. Test apps: `tests/it/apps/gtk_app.py` (PyGObject GTK4: `--menu` popover in the bottom-right corner, `--dialog`, `--second`), `qt_app.py` (PySide6: `--menu`).
-- Numbers (24-core machine): clean build ~75 s; no-op 0.05 s; one-line edit in compositor or server + test build ~0.6 s; `cargo test --workspace` runs in ~5.5 s; `target/` ~1.1 GB. 3x worse at low load means something's wrong.
+- Integration tests start a private server per test (`Lab`, runtime dir `$XDG_RUNTIME_DIR/glt-<pid>-<n>`) and skip tests whose apps aren't installed. Test apps: `tests/it/apps/gtk_app.py` (PyGObject GTK4: `--menu` popover in the bottom-right corner, `--dialog`, `--second`), `gtk_input.py` (entry, button, double-click/context-menu area, scroll list, DnD, zoom gesture; `--floats`), `qt_app.py` (PySide6: line edit, right-click QMenu, `--menu`). The input apps print each event and their widget positions (`pos NAME X Y W H`) to their log; tests read it (`input.rs` `wait_log`, `center`).
+- Numbers (24-core machine): clean build ~75 s; no-op 0.05 s; one-line edit in compositor or server + test build ~0.6 s; `cargo test --workspace` runs in ~5.5 s (tests run in parallel; the slowest are the GTK input ones); `target/` ~1.1 GB. 3x worse at low load means something's wrong.
 - Manual testing: the CLI against the real runtime dir works fine; `guilab server --stop` after rebuilding (the CLI warns when the server's binary is older than itself). `GUILAB_LOG=warn,guilab_compositor=trace guilab server` runs a foreground server with commit tracing.
