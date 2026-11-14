@@ -37,8 +37,8 @@ Plan steps 1-7 (skeleton, headless compositor, input and locking, Xwayland, even
 - Token passing: `-t TOKEN` on any command (agent shells don't keep env between calls) or `$GUILAB_TOKEN`. Errors say exactly what to run.
 - While locked, the human's input to that session is blocked by default. They can still view, screenshot, draw and send messages.
 - The viewer has two buttons:
-  - **Revoke:** drops the agent's lock. Its token stops working until it locks again.
-  - **Share:** unblocks the human's input while the agent keeps its lock. Both act at once.
+  - **Revoke** (the lock toast's Stop): drops the agent's lock. Its token stops working until it locks again.
+  - **Share:** unblocks the human's input while the agent keeps its lock (`debug share`; no viewer button at the moment).
 
 ## Event log
 - Each session has an append-only, timestamped (unix ms), numbered (`seq`) log: agent commands with args, human input, app start/exit (code, signal, after `kill` or not), window open/close/title (toplevels and X windows; diffed each frame), output changes, lock/unlock/revoke/share, human messages, `say`, screenshots, the expiry warning. In memory, capped at 100k events (oldest dropped); it dies with the session.
@@ -65,7 +65,7 @@ Start with basic functionality. Don't build UI or features we aren't sure we nee
 
 Layout:
 - **Top:** one tab per session (🔒 when locked).
-- **Main area:** a bar with the lock controls (Revoke, Share, status) and zoom controls (−, %, +, Fit, 1:1), then the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. The human uses the app directly here, unless locked out (then a banner says so and input is dropped; releases of held keys/buttons still go through).
+- **Main area:** the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. The human uses the app directly here, unless locked out (then input is dropped and the lock toast shows; releases of held keys/buttons still go through).
   - Zoom is host physical pixels per session pixel (100% = pixel-exact). Fit is the default and follows the window, capped at the larger of 1:1 and the session's logical size (so a scale-2 session on a 1x host shows pixel-exact, a scale-1 session on a 2x host at its normal size).
   - Top: a menu bar (File: save screenshot or the open drawing via the system save dialog, rfd: portal, else zenity, on a thread; Edit: undo/redo; View: zoom in/out, fit, 1:1), then session tabs. No status bar: nothing says a session is unlocked or locked until the human tries to use a locked app; then a toast "Agent using app" with Stop (revokes the lock). Toasts sit at the bottom of the view (`guilab_markup::toast`); the frozen-screenshot bar is one too. The UI has no Share button now (the server still supports share).
   - Mouse scheme: with "Use the app", plain clicks, drags, scrolling and touchpad gestures over the image go to the app. Scrolling that doesn't go to the app (drawing/Move tools, outside the image) moves the view per `NavMode`: ScrollZooms (wheel zooms at the pointer) or ScrollPans (two-axis scroll pans, pinch zooms at the pointer). `NavSetting::Auto` picks ScrollPans for smooth scrolling when the host offers pinch gestures, else ScrollZooms; a user setting may come later. Ctrl+scroll always zooms; middle-drag anywhere or any drag outside the image pans. A middle click that doesn't move still reaches the app (sent on release). Rejected: plain scroll to zoom over the app and space+drag (both take input the app needs).
