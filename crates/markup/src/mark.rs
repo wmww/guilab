@@ -38,12 +38,13 @@ impl Tool {
 }
 
 /// The palette.
-pub const COLORS: [(Color32, &str); 5] = [
+pub const COLORS: [(Color32, &str); 6] = [
     (Color32::from_rgb(230, 40, 40), "Red"),
     (Color32::from_rgb(255, 200, 0), "Yellow"),
     (Color32::from_rgb(30, 170, 60), "Green"),
     (Color32::from_rgb(30, 110, 240), "Blue"),
     (Color32::from_rgb(255, 255, 255), "White"),
+    (Color32::from_rgb(0, 0, 0), "Black"),
 ];
 
 /// The palette name of a color ("Red"), if it's one of [`COLORS`].
