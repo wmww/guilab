@@ -1,7 +1,7 @@
 //! Small shared widgets. All colors and sizes come from [`Theme`]; each has hover, pressed
 //! and disabled states and the right cursor.
 
-use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Painter, Pos2, Rect, Response, Sense, Stroke, TextureId, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, Id, Painter, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::Theme;
 
@@ -167,24 +167,6 @@ pub fn tab(ui: &mut Ui, selected: bool, label: &str, selected_fill: Color32) -> 
     };
     p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, color);
     resp
-}
-
-/// A thumbnail: the image in `rect` with a thin outline, lit on hover.
-pub fn thumb_frame(ui: &mut Ui, texture: TextureId, size: Vec2, sense: Sense) -> Response {
-    let t = Theme::get(ui.ctx());
-    let (rect, resp) = ui.allocate_exact_size(size, sense);
-    let p = ui.painter();
-    p.image(texture, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    let color = if resp.hovered() { t.colors.outline_focus } else { t.colors.outline };
-    p.rect_stroke(rect, t.radius.small, Stroke::new(t.size.line, color), egui::StrokeKind::Outside);
-    resp
-}
-
-/// Shows `texture` (natural size `size`) at most `preview_max` big, e.g. in a hover tooltip.
-pub fn preview(ui: &mut Ui, texture: TextureId, size: Vec2) {
-    let max = Theme::get(ui.ctx()).size.preview_max;
-    let k = (max.x / size.x).min(max.y / size.y).min(1.0);
-    ui.image((texture, size * k));
 }
 
 /// The frame of a text box (message box): field fill, outline brighter while focused.

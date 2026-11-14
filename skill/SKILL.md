@@ -61,7 +61,8 @@ The human runs `guilab show` to open the viewer. There they can watch, use the a
 - When a human message arrives, every command says so on stderr (`[guilab: a human message waiting since ...; read it now: guilab poll]`), until you run `guilab poll`, which then returns it at once, even while working. Only `poll` shows messages. Reading one marks you working ("read your message"), so finish with `done`.
 - `--image` takes an image id (a screenshot, or one you made with `image make`) or a PNG/JPEG/SVG file.
 - Messages may come with drawings; see Images.
-- Short messages refer to what the human is looking at: read the human input lines printed with them (where they clicked, where the pointer rests). A message without images comes with the image id of their screen as they sent it, their pointer drawn in; look at it.
+- Short messages refer to what the human is looking at: read the human input lines printed with them (where they clicked, where the pointer rests). A message without images comes with the image id of their screen as they sent it, their pointer drawn in; look at it. If they had an image open in their editor, the message names it too.
+- The human can open any image in the chat, yours included, and draw on it. What they send is a new image whose `parent` is the one they drew on: a copy of it with their changes (usually marks added after its elements; they can also move or delete elements).
 - Every command prints, on stderr, what happened since your previous command (human clicks and typing, windows opening, apps exiting). Those lines are context, not errors.
 
 ## Images

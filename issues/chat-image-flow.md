@@ -1,28 +1,6 @@
-# Screenshot editor ↔ chat integration
+# Screenshot editor ↔ chat integration: animations
 
-Queued feature spec from the user. Do it together with or after `image-system.md`, which defines the image model this relies on.
-
-## Mental model
-A screenshot is one physical object. While you edit it, it's **already attached** to your next message. You can delete it, but there's no "queue or discard" step. Past images (sent ones, the agent's) are never edited. Editing one implicitly makes a pending copy, and the copy is what you edit.
-
-## Image model (get this right; no hacks)
-- An image is: an unbaked base (pixels exactly as captured), a crop rect (optional), and a list of marks. Renderings (PNG with marks baked in, cropped, shrunk) are outputs only.
-- **The editor only ever opens image objects, never rendered files.** Opening any image shows its base with its marks as editable items: text can be edited, items moved, and so on. Invariant: there must be no path inside guilab by which a baked-in annotation becomes part of an editable base. Only out-of-band tools (a system screenshot, an agent running GIMP) could do that.
-- Crops carry through. If the agent pulled a cropped version, opening it in the editor shows the same crop of the unbaked base, with its marks.
-- Images the agent attaches are always image ids (see `image-system.md`), so there is no path from a rendering back into the editor.
-
-## Composer (bottom chat box)
-- Pending images appear as thumbnails **inside the text box, above the text**, the same size and look as in the chat log. This replaces the current "drawing attached" text that shifts the box.
-- Each pending thumbnail has an × at the top right. Deleting doesn't ask for confirmation; undo brings it back. Undo covers composer actions as well as mark edits.
-- Send (Enter or the button) is possible when there's text **or** at least one pending image (the instructions may be on the image), and impossible when both are empty.
-- Sent user messages look the same in the chat log as in the composer: images above the text, matching how agent images appear.
-
-## Opening and closing the editor
-- Drawing on the live app with any tool starts a new pending image. It shouldn't feel like a screenshot was taken (no flash, nothing on the main view changes), just like drawing on the app. A new pending slot animates into the composer.
-- Switching back to the app-interaction tool closes the editor.
-- Clicking any image (pending, your sent ones, the agent's) opens it in the editor. Opening a past image doesn't make it pending. The first edit does, by creating a pending copy (see below).
-- Chat thumbnails: on hover (no delay, or a very short one), grow a bit for a better look. Click opens in the editor. This replaces the current delayed big preview.
-- The screenshot view is never locked to the window, even when "lock size to window" is on for the app view. Pan and zoom always work while editing.
+Spec from the user. Everything but the animations is built (image-system phase 6; how it works: `notes/image-system-design.md` "Viewer glue", `notes/design.md` "Drawing flow"). The animations are phase 7, designed in the same note's "Flights and glow"; the viewer already keeps the hooks (slot rects, the open image's rect, `Canvas.visible`, empty and outlined slots, `cross_fade` on copy-on-edit).
 
 ## Animations ("whoosh")
 Use whooshes consistently, everywhere an image moves between the editor and a chat slot. Snappy and unobtrusive.
@@ -34,5 +12,4 @@ Use whooshes consistently, everywhere an image moves between the editor and a ch
 - The open image's pending slot (the empty one) gets a visual indicator such as an outline, so it's clear which one is in the editor.
 
 ## Notes
-- Removes the Queue/Discard bar from the current editor.
 - Animation timing and easing belong in the theme module (see design.md's theming rule).

@@ -1,8 +1,8 @@
 # Image system design
 
-The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
+The design of the image system (user spec: `issues/image-system.md`, `chat-image-flow.md`; the move tool's spec is the "Move tool" section) and the shared toolkit. It describes the code as built, plus phase 7's design.
 
-**Status:** phases 1 (`crates/image`), 2 (`crates/kit`), 3 (agent side: server store, CLI, protocol), 4 (`crates/editor`) and 5 (`crates/chat`) are built and tested; those sections describe the code as it is. Editor and chat aren't wired into the viewer yet (phase 6). Phases 6–7 not started.
+**Status:** phases 1–6 are built and tested (core, kit, agent side, editor, chat, viewer integration); those sections describe the code as it is. Phase 7 (motion: flights, glow, slot fades) is next; its design is the "Flights and glow" section.
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -28,7 +28,7 @@ editor → image, kit        chat → kit
 viewer → image, editor, chat, kit, proto
 server → image, viewer, proto, compositor        guilab (CLI) → proto, server
 ```
-`guilab-markup` is deleted at the end (phase 6). Reusability: editor + image + kit make a mobile image editor (the host supplies a `Store` and a pan/zoom view). Chat + kit make another agent harness's chat (the host supplies keys and thumbnails).
+Reusability: editor + image + kit make a mobile image editor (the host supplies a `Store` and a pan/zoom view). Chat + kit make another agent harness's chat (the host supplies keys and thumbnails).
 
 ## guilab-image (core)
 
@@ -210,7 +210,7 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
-Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent, slot_empty/slot_open; sizes incl. thumb_h, feed_thumb_h, faint_scale/faint_opacity, thumb_aspect_max, composer_lines, jump_button, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`(`_on` a given painter), `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
+Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent, slot_empty/slot_open; sizes incl. feed_thumb_h, faint_scale/faint_opacity, thumb_aspect_max, composer_lines, jump_button, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`(`_on` a given painter), `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
 
 ## guilab-editor (built)
 ```rust
@@ -260,7 +260,7 @@ impl Editor {
 - `insert` places a picture at natural size (shrunk to 90% of `fit`), centered, cascading 20×scale px off a picture already at that spot.
 - Host contract: none for switching docs. The editor remembers the `DocId` its gesture/typing/hover belong to and drops them when another doc shows up (a doc arriving where there was none keeps the pending marks). It also checks every frame that the elements they refer to still exist (host undo mid-drag just ends the drag).
 
-### Move tool (spec: `move-tool.md`)
+### Move tool (the user's spec, as built)
 On press, the first match wins (`hit_test`):
 1. **Key point** within `key_point_hit_r` (4 pt; drawn at `key_point_r` 5 pt), topmost element first, nearest point of that element → reshape (`Element::drag_key`): pictures keep aspect unless Shift, marks keep it only with Shift; text scales its size; pen scales points; line/arrow move that end. The grab offset is kept, so nothing jumps.
 2. **Item or near it** (`hit_slop` 6 pt + half stroke; topmost first) → move; Shift locks to an axis. The locked base never hits.
@@ -303,38 +303,43 @@ impl<K> Chat<K> {
 - **Undo split**: the text box keeps its own undo only for edits since it got focus; otherwise Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y in it become `ChatEvent::Undo`/`Redo` for the host (so "× then Ctrl+Z" restores the image even with the text focused). Unfocused, the host handles the keys itself.
 - **Slots**: extreme aspects are center-cropped to `thumb_aspect_max`. A new composer key grows in (width and scale, neighbors slide), a removed one shrinks out with its last texture (`Thumbs` should keep it alive for `slot_grow`), a key coming back (undo) grows back in place. Hover grows a shown thumbnail to `hover_grow` of full size (faint ones from their small size) on an `Order::Foreground` layer with a shadow, no relayout, shifted to stay on screen; the hit area follows the grown rect so its edge doesn't flicker; hovering the × keeps it grown. `Away` slots don't grow: they show `slot_empty` with an outline lit on hover, plus a 2 pt `slot_open` outline (fades in/out over `fade`) when `outlined`. State changes are instant (flights land without a pop) unless `cross_fade` was asked. Clicks on any slot, empty ones too, emit `Open` with the drawn rect; the host decides what a click on the open image's slot means (close).
 - **Hooks for phase 7**: `ChatOut.slots` = drawn rect of every slot laid out (grown, growing in, or empty), feed slots scrolled away included, with `feed_clip` to tell; `composer`. `Away` + `outlined` + `cross_fade` cover empty slots, the open-image outline and the copy-on-edit fade; flights and the glow are drawn by the host from those rects.
-- `guilab-markup` keeps its own old `Chat` until phase 6 switches the viewer and deletes markup.
 
-## Viewer glue (`crates/viewer`)
-`ui.rs` splits into `ui/mod.rs` (tabs, menus, panels), `ui/view.rs` (session view: zoom/pan, input forwarding; viewer-sizing's code), `ui/workspace.rs` (below), `ui/flight.rs` (whooshes and the glow) and `ui/thumbs.rs` (texture cache: renders by image id, renders by draft key and revision, 2× display size).
+## Viewer glue (`crates/viewer/src/ui/`, built)
+`mod.rs` (`ViewerUi`: tabs, menus, panels, host keys), `view.rs` (session view: zoom/pan, input forwarding, the canvas, resize handles, cursors), `workspace.rs` (below), `thumbs.rs` (`ThumbSource`/`ThumbCache`: the chat's `Thumbs`, CPU renders by image id or by draft key + `Doc::rev`, at the height the chat asks; unused textures go after 3 s). Phase 7 adds `flight.rs`.
 
 ```rust
 struct Workspace {                    // per session (PerSession)
     editor: Editor, chat: Chat<Att>,
     pending: Vec<Draft>,              // composer order
+    shelf: Vec<Draft>,                // out of the composer; undo/redo may bring them back
     open: Open,
     history: History<Op>,
-    flights: Vec<Flight>,
-    doc_zoom: Zoom,                   // the open image's own zoom/pan (fit to its crop); never locked to the window
+    doc_zoom: Zoom,                   // the open image's own zoom/pan; never locked to the window
+    slots, shown,                     // last frame's slot rects and doc rect (phase 7 hooks)
 }
 struct Draft { key: DraftKey, doc: Doc, parent: Option<ImageId> }   // the doc holds its assets
 enum Att { Draft(DraftKey), Image(ImageId) }
-enum Open { Live, Capturing { ticket: u64, key: DraftKey }, Draft(DraftKey), Past { image: ImageId, slot: SlotId, doc: Doc } }
-enum Op { Edit(DraftKey, Edit), Create(Draft /* as created */), Remove { at: usize, draft: Draft }, Copy { from: ImageId, slot: SlotId, key: DraftKey } }
+enum Open { Live, Capturing { ticket, doc: Option<(Doc, ImageId)>, inserts }, Draft(DraftKey), Past { image, slot: SlotId, doc: Doc } }
+enum Op { Edit(DraftKey, Edit), Create { key, at }, Remove { key, at }, Copy { from: ImageId, slot: SlotId, key } }
 ```
-Store access: `Viewer::draw(renderer, sessions, store: &Store, now)`. Reads only, and thumbnails are rendered from `Arc<Image>` and assets.
+- The server owns the `ViewerUi` (`Server::viewer_ui`, made with the server's `Fonts`), so drafts, the open image, chats and View choices survive hide/show; `ViewerUi::detach` on hide drops the old egui context's textures (thumbs, `Editor::forget_textures`). `ViewerUi::start` is the egui clock, kept across windows. `Viewer::draw(renderer, &mut ViewerUi, sessions, &Store, now)`: the store is read only.
+- Server → UI: `push_feed(Item<ImageId>)`, `captured(session, ticket, Result<Arc<Image>>, &Store)`, `inserted(session, Result<(AssetId, Arc<Asset>)>)`. UI → server (`Action`): `Capture { ticket }`, `Message { text, drafts: Vec<(parent, Doc)>, viewing }`, `Save { png: Option }` (the open image rendered and marked in the viewer; None = the server captures and renders), `Insert` (the server's file dialog; picks land in `Server::viewer_picks`, loaded by `Images::picture` on the tick).
 
 ### Flows (`chat-image-flow.md`)
-- **Draw on the live app**: `CanvasOut.begin` → push `Action::Capture { session, ticket }` and set `Open::Capturing`. The session view keeps painting the live texture under the editor, so nothing changes visibly: no flash, no extra frame. The server answers `Viewer::captured(session, ticket, image)`. The editor keeps the marks drawn meanwhile (`pending`); the glue makes the `Draft` from that screenshot's body (`parent` = it), and the editor commits the pending marks into it as ordinary edits. When the first edit commits, `Create` + `Edit` go in one history group, the slot is pushed into `pending` (its grow-in animation plays), and the state is `Away { outlined }`. If no edit commits (a tiny click), the draft is dropped and no slot appears.
-- **Open an image** (`ChatEvent::Open`): a draft → `Open::Draft`. A past image → `Open::Past` with a scratch `Doc` (the store image itself is never touched). Either way a flight goes from the slot to the view, and the slot is `Away`.
-- **Copy-on-edit**: the first `CanvasOut.edits` while `Open::Past`. The edit has already been applied to the scratch doc, so the glue moves that doc into a new `Draft` (`parent` = the past image). `Copy` + `Edit` go in one group. The feed slot goes back to `Shown` (the widget cross-fades it), and the new composer slot grows in as `Away { outlined }`. There's no flight. Undoing that group removes the draft and returns to `Open::Past` on a fresh doc.
-- **Switch images**: one flight from the view back to the old slot and one from the new slot to the view, at the same time. **Close** (Interact tool selected, or a click on the open image's own slot) → flight back to the slot, then `Open::Live`.
-- **Remove** (`ChatEvent::Remove`): `Op::Remove` (undo puts it back at its index). If the image is open, the editor closes without a flight. Removal never asks for confirmation.
-- **Undo/redo** (Edit menu, Ctrl+Z while no text field has focus): apply or revert the op. If it changes a draft that isn't open, that draft opens first (with a flight), so a change never happens out of sight.
-- **Send** (`ChatEvent::Send`): `Action::Message { session, text, drafts }`. The server freezes each draft (`Store::add_image(.., &draft.doc)`) and logs the message with `ImageRef`s. The glue clears `pending` and `history.retain`s ops of other drafts. The feed item arrives from the log the next tick, and its slots show the frozen images.
-- The Queue/Discard bar and `Sketch` go away. "Hiding the viewer drops unsent state" goes away too: the server keeps the `ViewerUi` (no GPU state) across hide/show and drops only `Gfx`/`HostState`, and texture caches rebuild lazily.
+- **Draw on the live app**: `CanvasOut.begin` → `Open::Capturing` + `Action::Capture`. The live texture keeps painting, and the canvas paints the frozen doc over it once it's there (same pixels): nothing visibly changes. The editor keeps marks drawn meanwhile and commits them into the doc; the first edits make the `Draft` (`Create` + `Edit`s in one history group), it's open, its composer slot is `Away { outlined }`, and `doc_zoom` starts as the session's zoom (same canvas, same fit rule), so nothing jumps. `abandon` (a stray click) drops it. "Use the app" closes the editor, also when the screenshot arrives after it was picked (end of `show`).
+- **Open** (`ChatEvent::Open`): a draft → `Open::Draft`; a store image → `Open::Past` on a scratch doc (the store image is never touched); `doc_zoom` fits; Interact switches to Move. A click on the open image's own slot closes it. Esc (editor idle) closes and selects "Use the app".
+- **Copy-on-edit**: the first edits while `Open::Past` move the scratch doc (already edited) into a new draft (`parent` = the past image): `Copy` + `Edit`s, `chat.cross_fade` on the feed slot, the copy grows into the composer, open. Undoing it shelves the draft and goes back to `Open::Past` on a fresh doc.
+- **Remove** (×): `Op::Remove`, the draft goes on the shelf; an open one closes. **Undo/redo**: Edit menu, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y when the keys are the viewer's (an image open or the canvas wants keys) and no text field has focus, and `ChatEvent::Undo/Redo` from the composer. A step that edits a draft that isn't open opens it first, unless the step makes or unmakes that draft.
+- **Send**: commits typing, takes every pending draft (`Action::Message`), closes an open draft (tool back to "Use the app"), `history.retain`s other drafts' ops and prunes the shelf. The server freezes each draft (`Images::freeze` = `add_image(parent, body, Made::Human, g, &doc)`). The feed item arrives from the log next tick. `viewing` = the open past image, if any.
+- **Insert image** (File menu): into the open doc (a past image → copy-on-edit); on the live app it starts a capture and inserts once the doc is there (`Capturing.inserts`).
+- **Feed** (`server/src/viewer.rs` `feed_items`): human messages `Item::me` with their images, agent messages `Item::them("Agent")`, agent screenshots and `image make` previews as faint activity lines (`screenshot → ID`, the `screenshot` command line itself is skipped), other commands and work/done as activity lines. A message's `screen` capture isn't shown.
 
-### Flights and glow (`ui/flight.rs`)
+### Hosting the canvas (`view.rs`)
+- One `Zoom { fit, zoom, pan }` type for the live app (`PerSession::zoom`) and the open image (`doc_zoom`); zoom = host physical px per image px, the canvas's `Xf.zoom = zoom / pixels_per_point`, `offset` puts the editor's `view_region` on the image rect. Fit is capped like the live app's (1:1, or the content's logical size).
+- `editing` = a tool other than "Use the app", or anything but `Open::Live`: then pointer input never goes to the app; the canvas owns primary presses over the view (its claim is the whole view), the host keeps middle-drag, wheel/pinch, and drags off the image with drawing tools. `CanvasOut.pan` pans the shown zoom. `keys_to_egui` = last frame's `CanvasOut.wants_keys` || a menu is open.
+- Order in the central panel: raw input loop, live texture (not for an open image), `canvas()`, then the resize handles as `ui.interact` widgets (so the canvas leaves their presses alone; the raw loop skips presses on them), then the view's toasts after the editor's (`VIEW_TOASTS` stack: crop toast lowest, then "Agent using app", then notices). Handles only on the live app. The input overlay isn't painted while an image is open.
+
+### Flights and glow (`ui/flight.rs`, phase 7)
 ```rust
 struct Flight { att: Att, from: End, to: End, t0: f64, motion: Motion }
 enum End { Slot(SlotId), View }   // resolved every frame: ChatOut.slots, or the doc's on-screen crop rect
@@ -344,20 +349,17 @@ enum End { Slot(SlotId), View }   // resolved every frame: ChatOut.slots, or the
 - **Glow**: while an image is open and nothing is flying, soft rays (a feathered quad, `colors.glow`) go from its `Away` slot rect to the doc's on-screen rect. Both rects are re-resolved every frame, so the glow tracks pan and zoom. It's hidden when the slot is scrolled out of view (then the slot's edge glows instead).
 - Timing and easing come only from `Theme.motion`.
 
-### Input routing
-When a doc is open or a drawing tool is selected, the editor owns primary-button pointer input over the view. The host applies `CanvasOut.pan` to the doc's zoom, or to the session's zoom on the live view. The host keeps middle-drag, Ctrl+scroll and drags outside the image. `Canvas.input` is false in the pass where a press closes a menu (today's `menu_was_open`) and while a dialog is up. The resize handles become egui widgets registered after `canvas()`, so the canvas leaves their presses alone. `keys_to_egui` = `CanvasOut.wants_keys` || a menu is open. `Sketch::mark_at`, which the view called back into, goes away.
-
 ## Server glue (`server/src/images.rs`, built)
 - `Server.images: Images { store, fonts, last_capture }`, one `Group` per session (`Slot::group`). The tick sweeps once a second; `end_session` drops the group.
-- `capture(session, group, cursor, by_agent, crop) -> ImageId`: `Session::capture` (opaque RGBA, cursor drawn in if asked), `Raster::from_live_frame`, a screenshot body. While the session's `frame_seq` and size are unchanged (and no cursor), the last raster is reused. Agent `screenshot`, the viewer's `Freeze`, `debug message --draw` and the message `screen` all use it.
+- `capture(session, group, cursor, by_agent, crop) -> ImageId`: `Session::capture` (opaque RGBA, cursor drawn in if asked), `Raster::from_live_frame`, a screenshot body. While the session's `frame_seq` and size are unchanged (and no cursor), the last raster is reused. Agent `screenshot`, the viewer's `Capture`, File → Save of the live app, `debug message --draw` and the message `screen` all use it.
 - `render_file(img, opts, dir, out)`: `s/<session>/img/<id>[-c<x>_<y>_<w>x<h>][-m<w>x<h>][-nomarks].png` (render mark included), reused if it exists; `-o PATH` always writes.
-- `make` (core `make`, `Made::Agent`), `attach(spec)` (an id, or an absolute path: `load_file` → one picture element at natural size; a rendering is refused with "attach the image itself: --image ID"), `drawing(base, marks)` (viewer marks on a copy of the frozen base, `Made::Human`, parent = base), `image_ref` (listing snapshot + marks bbox).
-- Every image a message (either way) references is held until the session ends, and so is each `Freeze` base (the drawing may be sent much later; a discarded one stays held until session end, which is cheap thanks to raster reuse).
-- Viewer glue until phase 6: `Freeze` captures the base into the store and passes its id as the markup sketch's tag; `Annotated` carries `tag`, `marks`, `scale`; on send the server converts each markup `Mark` to an `Element` (coordinates rounded to whole pixels; text `width` kept only if the core layout wraps there) and ignores the markup composites. The feed renders message images from the store (at most 1600 px). Faint agent screenshots in the feed are phase 7; `image make` shows as a gray log line.
+- `make` (core `make`, `Made::Agent`), `attach(spec)` (an id, or an absolute path: `load_file` → one picture element at natural size; a rendering is refused with "attach the image itself: --image ID"), `freeze(parent, &doc)` (a viewer draft → image, `Made::Human`), `picture(path)` (File → Insert image: an asset with an id, refusing renderings), `image_ref` (listing snapshot + marks bbox).
+- Every image a message (either way) references is held until the session ends, and so is each `Capture` base (the draft may be sent much later; a discarded one stays held until session end, which is cheap thanks to raster reuse).
+- The human's actions go through `server/src/human.rs` (see `code-map.md`): `human_capture` (a held screenshot for a new drawing), `human_message` (resolves every image, then holds them all and logs; drafts via `Images::freeze`).
 
 ## CLI and protocol (built)
 ```rust
-// proto (PROTO 3)
+// proto
 pub struct ImageRef { pub id: String, pub size: [u32; 2], pub listing: String, pub marks: Option<[i32; 4]> }  // fetch(), elements()
 SessionCmd::Screenshot { path, settle, cursor, crop: Option<String>, max: Option<[u32; 2]> }   // Access::Read
 SessionCmd::Image { id, path, crop /* "X,Y WxH" | "none" */, max, marks, list, points }      // Access::Read
@@ -368,7 +370,7 @@ HumanOp::Message { text, images: Vec<String>, draw: Vec<String> }   // draw: ele
 ShotInfo { image, header, path, width, height /* PNG */, shows: [i32; 4], zoom, settled, animating, cropped }
 ImageInfo { id, listing: Option<String>, render: Option<RenderInfo { path, width, height, shows, zoom }> }   // RenderInfo::mapping() = the "PNG shows" line
 // events
-EventData::Message { text, images: Vec<ImageRef>, screen: Option<String> }   // screen: capture with pointer, only when there are no images
+EventData::Message { text, images: Vec<ImageRef>, screen: Option<String>, viewing: Option<String> }   // screen: capture with pointer, only without images; viewing: a past image open in their editor
 EventData::AgentMessage { text, images: Vec<ImageRef> }
 EventData::Screenshot { image: String, path }       // log tier
 EventData::ImageMade { image: String }              // log tier, kind image_made (group agent)
@@ -394,26 +396,14 @@ send it: guilab done "..." --image p4n2
 - A human message in `poll` and deliveries: the message line, each image's listing indented, `(see what the marks point at: guilab image ID --crop '…')` (or `(see it: guilab image ID)` without marks), then for image-less messages `(their screen as they sent it, with their pointer: image ID; see it: guilab image ID)`, then the `guilab done` hint. One-line forms (`describe`, `--follow`, `log`): `[image w8dn: 6 elements]`, `[their screen: image ID]`, agent messages `[image ID]`.
 - The fetch hint is the bbox of every non-base element (text boxes included, even outside the crop) plus 20 px, clamped to the canvas.
 
-## Interface points with work in flight
-- **viewer-cursors**: the editor reports `CanvasOut.cursor`, and the session view applies it over the image, so a tool cursor, never the arrow, shows while a tool takes input.
-- **viewer-sizing**: the open doc has its own `doc_zoom` (fit to its crop) and ignores "lock size to window". Resize handles show on the live view only. Flights use the doc rect from that zoom.
-- **ui-toolkit-pass**: kit, the value sweep and portal light/dark are done; the issue keeps the pass over the rebuilt editor and chat UI (after P7).
-- **Phase 6 and the chat**: the server builds `Status.note` (today's `quiet` hint text) and maps feed events to `Item`s (commands/work/done/image_made = `Activity`, agent screenshots `faint`); viewer thumbs implement `Thumbs` over the texture cache.
-
 ## Phases
-Each phase leaves main green (`cargo test --workspace`, clippy) and working end to end.
+Phases 1–6 are done (core, kit, agent side, editor, chat, integration). Each phase leaves main green (`cargo test --workspace`, clippy) and working end to end.
 
 | # | phase | needs | touches |
 |---|---|---|---|
-| 1 | **(done)** **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
-| 2 | **(done)** **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
-| 3 | **(done)** **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in message/agent events, feed renders from the store, skill doc "Images", `tests/it/images.rs`. Also (beyond the original plan): human messages already go through the store (the current viewer's marks are rebuilt as elements on the frozen base, so nothing baked enters it), `Annotation` is gone, `debug message --draw`, and the `screen` id on image-less messages. Tested end to end on 2 fresh agents. | 1 | proto, server, guilab, viewer, markup, skill |
-| 4 | **(done)** **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
-| 5 | **(done)** **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
-| 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured (replaces `Freeze` + sketch tag), Message with drafts → freeze (replaces the markup-mark conversion in `server/src/viewer.rs`), the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` already checks the listing) and the skill doc. | 3, 4, 5 | viewer, server, skill |
-| 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
+| 7 | **Motion and polish**: flights, glow, the slot fades and grow-ins timed with them, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
 
-**Parallelism** (at most 3 worktrees): **P4 ∥ P5** (new crates, no overlap). **P6** alone (it touches everything). **P7** alone (viewer UI). What's left of `ui-toolkit-pass` comes after P7.
+What's left of `ui-toolkit-pass` comes after P7.
 
 ## Open questions
 See the end of the issue (`image-system.md`). Defaults are used unless the user decides otherwise.

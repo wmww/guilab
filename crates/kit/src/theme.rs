@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Vec2, vec2};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, vec2};
 
 use crate::anim::{Easing, Motion};
 
@@ -53,7 +53,7 @@ pub struct Colors {
     /// Chat authors: the human using the UI, and the agent.
     pub me: Color32,
     pub agent: Color32,
-    /// Editor (later phases): glow from a slot to the open image, key points, hover outline.
+    /// Editor and viewer: glow from a slot to the open image (phase 7), key points, hover outline.
     pub glow: Color32,
     pub key_point: Color32,
     pub key_point_hot: Color32,
@@ -109,11 +109,8 @@ pub struct Sizes {
     pub window_border: f32,
     pub send_button: f32,
     pub close_badge: f32,
-    /// Thumbnail heights: queued drawings and feed images.
-    pub thumb_h: f32,
+    /// Chat thumbnail height (feed and composer).
     pub feed_thumb_h: f32,
-    /// Largest hover preview of an image.
-    pub preview_max: Vec2,
     /// Toasts: distance from the bottom, and the gap between stacked toasts.
     pub toast_bottom: f32,
     pub toast_gap: f32,
@@ -131,7 +128,7 @@ pub struct Sizes {
     pub composer_lines: f32,
     /// Width of the feed's "jump to the latest message" button.
     pub jump_button: f32,
-    /// Extra hit distance around marks, and key point radii (later phases).
+    /// Extra hit distance around marks, and key point radii.
     pub hit_slop: f32,
     pub key_point_r: f32,
     pub key_point_hit_r: f32,
@@ -265,9 +262,7 @@ fn sizes() -> Sizes {
         window_border: 5.0,
         send_button: 28.0,
         close_badge: 16.0,
-        thumb_h: 56.0,
         feed_thumb_h: 80.0,
-        preview_max: vec2(720.0, 480.0),
         toast_bottom: 20.0,
         toast_gap: 8.0,
         handle_band: 10.0,

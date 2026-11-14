@@ -1,6 +1,6 @@
 # Viewer window: how it works and what to know
 
-Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/kit`, `crates/server/src/viewer.rs`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
+`crates/viewer`, `crates/server/src/viewer.rs`; widgets from `crates/kit`, `crates/editor`, `crates/chat` (their design and the glue: `image-system-design.md`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
 
 ## Shape
 - Our own sctk client on a separate `Connection` (not smithay's winit backend: its renderer dies with the window, and winit refuses a second `EventLoop` per process, so show/hide/show would be impossible).
@@ -25,7 +25,6 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/kit`, `crates
 ## Input (host.rs, ui.rs)
 - Host input is one ordered list (`HostInput`: egui events and raw evdev keys), so "click, type, click" stays in order when one frame has all of it. egui gets the egui events (minus Key/Text when keys go to the session); the UI walks the full list.
 - `HostState::take_input` hands out one batch per UI pass: it ends after a button event, before a press that follows motion, before a touch start (in a pass of its own) and after a touch end (where a touch goes, app or UI, depends on the state the input before it left). So keys typed right after a click are routed by the focus that click gave (keys go to the session unless egui wants them, decided per pass), a click arriving with the pointer's first move isn't lost (egui needs a hover pass), and egui sees one click per pass. Leftover input keeps `has_input` true, so the next tick runs the next batch. Scripted viewer tests need no sleeps between steps for this.
-- `Chat` decides Enter-sends after the text box took the pass's typing ("type hello key Return" in one pass sends "hello").
 - Keys are forwarded as raw evdev codes (+8 = xkb code), so the session keeps its own keymap. Modifiers reach egui via `update_modifiers`.
 - The UI tracks the buttons and keys it pressed in a session and releases them on tab switch, lock (blocked), keyboard leave and hide.
 - Host touch (`wl_touch`, `HostInput::Touch`): `Viewer::route_touches` sends a touch that starts on the image with "Use the app" (`ViewerUi::touch_to_app`, last frame's rect) to the UI, which forwards it as session touch (each followed by a touch frame); the first other touch is turned into egui pointer events (tap = click, drag = drag), more fingers are dropped.
@@ -54,16 +53,16 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/kit`, `crates
 - The UI decides via egui's cursor; for an image cursor it sets `Default` and `ViewerUi::host_cursor` swaps in the image if nothing overrode it.
 - `screenshot --cursor` draws the same cursor at the pointer (named shapes from the xcursor theme, `XCURSOR_THEME`/`XCURSOR_SIZE`, default `default`→Adwaita), which is how tests check the host's cursor (`viewer::app_cursors`, app `gtk_cursors.py`).
 
-## Chat and drawing (ui.rs, markup)
-- Panel order matters in egui: tabs (top), toolbar (left, full height), chat (bottom), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.
-- The UI only runs when the viewer draws. When it ran on input but couldn't present (waiting for a frame callback), `Viewer::draw` sets `host.dirty` so the new state still gets shown.
-- The frozen screenshot arrives one frame after the press (`Action::Freeze` -> server -> `set_screenshot`); the first mark is already being dragged on the live image meanwhile.
-- Feed scrolling: egui's `stick_to_bottom` lost track after `scroll_to_cursor`; `Chat` tracks "at the end" itself from the `ScrollArea` output and follows new items only then (and after sending). A frame that asked to scroll to the end counts as at the end (the scroll lands next frame).
-- The text box uses a non-wrapping layouter: computing its width before the TextEdit sees the frame's typed text made it wrap.
+## Editor and chat (ui/)
+- Panel order matters in egui: menu (top), tabs (top), toolbar (left, full height), chat (bottom or right), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.
+- The chat panel fills itself (`set_min_size(available)`): an egui panel stores its content's size, so content smaller than the panel shrinks it every frame. Likewise a bottom-aligned row (`left_to_right(Align::Max)`) fills its panel's previous height, so the chat's composer row is top-aligned (else the box never shrank after a send).
+- The UI only runs when the viewer draws. When it ran on input but couldn't present (waiting for a frame callback), `Viewer::draw` sets `host.dirty` so the new state still gets shown. The server sets `host.dirty` after `captured`/`inserted`/new feed items.
+- A drawing's screenshot (`Action::Capture`) is applied right after the pass that asked, so the next pass has the doc; the first mark is already drawn on the live image meanwhile (the editor keeps it until the doc arrives).
+- The text box uses a non-wrapping layouter (computing its width before the TextEdit sees the frame's typed text made it wrap). Enter-sends is decided after the text box took the pass's typing ("type hello key Return" in one pass sends "hello").
 
 ## Testing
 - Host = a second guilab server's session (tests: `tests/it/viewer.rs`; it pins the coordinate mapping by moving the host pointer and reading the viewed session's human motion event). Lab commands drop `WAYLAND_DISPLAY`, so a test can never open on the real desktop.
-- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=133, text y=262 with one session (no tab bar); message box near the bottom). Layout changes move them. Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
+- `draw_and_send` and `insert_image` click fixed viewer positions in a 1200x800 window (toolbar at x=19: box y=140, arrow y=236, text y=268 with one session (no tab bar); message box y=768; the newest feed image at 100,645). Layout changes move them. They wait on `ping`'s `drafts` before steps that race the viewer's input (hide, a send after `debug insert`). Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
 - egui gotchas: `consume_key` ignores Shift (use `consume_plain_enter` for Enter-sends); a TextEdit with a custom `.frame()` ignores `.margin()`.
 - Manually: `GUILAB_DIR=$XDG_RUNTIME_DIR/glv-h guilab new host -s 1400x900`, then `GUILAB_DIR=$XDG_RUNTIME_DIR/glv-v WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/glv-h/s/host/wayland-0 guilab show` (the viewed server), drive the host session with `input`, screenshot it. Strip the real `WAYLAND_DISPLAY` from every other command.
 - The real desktop's `WAYLAND_DISPLAY` is usually set in agent shells; never run `guilab show` without overriding it.

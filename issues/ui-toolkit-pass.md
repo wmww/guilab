@@ -1,6 +1,6 @@
 # UI code pass: what's left
 
-The toolkit and theming parts are done (`guilab-kit`: theme tokens light/dark following the XDG portal, View > Appearance, menus with keyboard navigation, shared widgets; viewer and markup use it). Left for after image-system phases 4–7, which rebuild the editor (toolbar, canvas) and chat (feed, composer):
+The toolkit and theming parts are done (`guilab-kit`: theme tokens light/dark following the XDG portal, View > Appearance, menus with keyboard navigation, shared widgets; the viewer, editor and chat use it). Left for after image-system phase 7 (motion):
 - Go over the new editor and chat UI per design.md's "UI quality" rule (states, keyboard, focus, spacing, cursors, tooltips); build them on kit widgets and tokens only.
 - Keyboard access to the menu bar itself (e.g. F10): keys go to the session app unless egui has focus, so there's no free key yet. Decide whether to reserve one.
 - Tooltips are egui's (placed below the pointer). Restyle if they look off next to the new UI.
