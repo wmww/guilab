@@ -1,7 +1,8 @@
 //! Session sizing from the viewer: "Resize to window" / "Lock size to window" (the
 //! session's logical size follows the view) and resize handles around the session image.
 
-use egui::{Color32, CursorIcon, Pos2, Rect, Stroke, Vec2, pos2, vec2};
+use egui::{CursorIcon, Pos2, Rect, Stroke, Vec2, pos2, vec2};
+use guilab_kit::Theme;
 
 /// Output pixel limits (as `Session::set_output` allows, with a usable minimum).
 pub const MIN_PX: u32 = 32;
@@ -9,12 +10,6 @@ pub const MAX_PX: u32 = 16384;
 /// Seconds between resizes sent while dragging or following the window (apps shouldn't be
 /// flooded with configures).
 pub const THROTTLE: f64 = 0.1;
-/// Width of the grab band just outside each image edge (points).
-const BAND: f32 = 10.0;
-/// Handle bar size along / across an edge (points), and its gap to the image.
-const BAR_LEN: f32 = 28.0;
-const BAR_W: f32 = 4.0;
-const GAP: f32 = 3.0;
 
 /// Output pixels whose logical size (at `scale`) fills `view` (points = host logical px).
 pub fn fit_pixels(view: Rect, scale: f64) -> (u32, u32) {
@@ -42,45 +37,46 @@ impl Edge {
 
 /// The handle under `p`: the band just outside the image's edges and corners. Only where
 /// the band fits inside `view` ("when there's room").
-pub fn handle_at(img: Rect, view: Rect, p: Pos2) -> Option<Edge> {
-    if !img.expand(BAND).contains(p) || img.contains(p) || !view.shrink(1.0).contains(p) {
+pub fn handle_at(t: &Theme, img: Rect, view: Rect, p: Pos2) -> Option<Edge> {
+    let band = t.size.handle_band;
+    if !img.expand(band).contains(p) || img.contains(p) || !view.shrink(1.0).contains(p) {
         return None;
     }
     let side = |v: f32, lo: f32, hi: f32| if v < lo { -1 } else if v > hi { 1 } else { 0 };
     let e = Edge { x: side(p.x, img.min.x, img.max.x), y: side(p.y, img.min.y, img.max.y) };
-    room(img, view, e).then_some(e)
+    room(band, img, view, e).then_some(e)
 }
 
 /// Whether the handle for `e` fits in the view.
-fn room(img: Rect, view: Rect, e: Edge) -> bool {
+fn room(band: f32, img: Rect, view: Rect, e: Edge) -> bool {
     let ok = |d: i8, lo: f32, hi: f32, vlo: f32, vhi: f32| match d {
-        -1 => lo - BAND >= vlo,
-        1 => hi + BAND <= vhi,
+        -1 => lo - band >= vlo,
+        1 => hi + band <= vhi,
         _ => true,
     };
     ok(e.x, img.min.x, img.max.x, view.min.x, view.max.x) && ok(e.y, img.min.y, img.max.y, view.min.y, view.max.y)
 }
 
 /// Draws the eight handles that have room. `hot`: the hovered or dragged one.
-pub fn paint_handles(painter: &egui::Painter, visuals: &egui::Visuals, img: Rect, view: Rect, hot: Option<Edge>) {
-    let base = visuals.widgets.inactive.fg_stroke.color.gamma_multiply(0.45);
-    let lit = visuals.widgets.hovered.fg_stroke.color;
+pub fn paint_handles(painter: &egui::Painter, t: &Theme, img: Rect, view: Rect, hot: Option<Edge>) {
+    let s = &t.size;
+    let (base, lit) = (t.colors.handle, t.colors.handle_hot);
     for x in -1i8..=1 {
         for y in -1i8..=1 {
             let e = Edge { x, y };
-            if (x, y) == (0, 0) || !room(img, view, e) {
+            if (x, y) == (0, 0) || !room(s.handle_band, img, view, e) {
                 continue;
             }
             let color = if hot == Some(e) { lit } else { base };
-            let o = GAP + BAR_W / 2.0;
+            let o = s.handle_gap + s.handle_w / 2.0;
             let at = |d: i8, lo: f32, hi: f32| match d {
                 -1 => lo - o,
                 1 => hi + o,
                 _ => (lo + hi) / 2.0,
             };
             let c = pos2(at(x, img.min.x, img.max.x), at(y, img.min.y, img.max.y));
-            let stroke = Stroke::new(BAR_W, color);
-            let half = BAR_LEN / 2.0;
+            let stroke = Stroke::new(s.handle_w, color);
+            let half = s.handle_len / 2.0;
             match (x, y) {
                 (0, _) => {
                     painter.line_segment([c - vec2(half, 0.0), c + vec2(half, 0.0)], stroke);
@@ -145,23 +141,4 @@ impl Resizing {
     pub fn due(&self, now: f64) -> bool {
         self.sent.is_none_or(|(s, t)| s != self.size && now - t >= THROTTLE)
     }
-}
-
-/// The size readout shown while dragging, beside `at`, kept inside `view`.
-pub fn readout(ctx: &egui::Context, visuals: &egui::Visuals, view: Rect, at: Pos2, size: (u32, u32)) {
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("resize-readout")));
-    let galley = painter.layout_no_wrap(format!("{} × {}", size.0, size.1), egui::FontId::proportional(13.0), visuals.strong_text_color());
-    let pad = vec2(8.0, 4.0);
-    let box_size = galley.size() + 2.0 * pad;
-    let mut min = at + vec2(16.0, 16.0);
-    // Flip to the other side of the pointer where it would leave the view.
-    if min.x + box_size.x > view.max.x {
-        min.x = at.x - 16.0 - box_size.x;
-    }
-    if min.y + box_size.y > view.max.y {
-        min.y = at.y - 16.0 - box_size.y;
-    }
-    let r = Rect::from_min_size(min, box_size);
-    painter.rect(r, 4.0, visuals.window_fill, visuals.window_stroke, egui::StrokeKind::Inside);
-    painter.galley(r.min + pad, galley, Color32::WHITE);
 }

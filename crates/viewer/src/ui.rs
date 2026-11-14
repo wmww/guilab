@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
+use guilab_kit::{MenuBar, Theme, ThemePref, WindowButton};
 use guilab_markup::{Annotated, Chat, FeedItem, Sketch, Tool};
 
 use crate::{
@@ -239,6 +240,8 @@ pub struct ViewerUi {
     pub csd: bool,
     pub maximized: bool,
     window_ops: Vec<WindowOp>,
+    /// Light/dark (View menu); System follows the desktop.
+    pub theme: ThemePref,
 }
 
 /// Where the chat panel goes (View menu).
@@ -249,12 +252,6 @@ pub enum ChatPlace {
     Bottom,
     Right,
 }
-
-/// Behind the session image.
-const VIEW_BG: Color32 = Color32::from_gray(24);
-
-/// How long toasts stay up after the thing that raised them (seconds).
-const TOAST_SECS: f64 = 4.0;
 
 fn linux_button(b: PointerButton) -> u32 {
     match b {
@@ -285,7 +282,7 @@ impl ViewerUi {
     /// Whether a touch starting at `p` is the app's (its image, no drawing tool, no menu
     /// open; as of the last frame). Blocked ones go there too (and are dropped).
     pub fn touch_to_app(&self, ctx: &egui::Context, p: Pos2) -> bool {
-        self.touch_area.is_some_and(|r| r.contains(p)) && !guilab_markup::menu::MenuBar::is_open(ctx, "menubar")
+        self.touch_area.is_some_and(|r| r.contains(p)) && !MenuBar::is_open(ctx, MENU_BAR)
     }
 
     /// The cursor the host should show, given the cursor egui picked this frame.
@@ -361,7 +358,7 @@ impl ViewerUi {
     /// Whether keys belong to egui even without a focused text field (a drawing or a menu
     /// is open).
     pub fn keys_to_egui(&self, ctx: &egui::Context) -> bool {
-        guilab_markup::menu::MenuBar::is_open(ctx, "menubar") || self.current.as_deref().and_then(|c| self.sessions.get(c)).is_some_and(|p| p.sketch.drawing_open())
+        MenuBar::is_open(ctx, MENU_BAR) || self.current.as_deref().and_then(|c| self.sessions.get(c)).is_some_and(|p| p.sketch.drawing_open())
     }
 
     /// Draws the whole viewer. `inputs`: this frame's host input in order; raw keys in it
@@ -375,17 +372,25 @@ impl ViewerUi {
         self.sessions.retain(|k, p| sessions.iter().any(|s| s.name == k && s.key == p.key));
 
         let now = ui.input(|i| i.time);
+        if ui.ctx().options(|o| o.theme_preference) != self.theme.egui() {
+            ui.ctx().set_theme(self.theme.egui());
+        }
+        let t = Theme::get(ui.ctx());
+        // A press outside an open menu only closes it (as on the desktop), so the view
+        // must ignore presses this frame.
+        let menu_was_open = MenuBar::is_open(ui.ctx(), MENU_BAR);
         self.menu_bar(ui, sessions, &mut out);
 
         // Session tabs, only when there's a choice. The selected one takes the view's color
         // below it, so it reads as attached to the session it shows.
         if sessions.len() > 1 {
-            egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: 6, right: 6, top: 2, bottom: 0 })).show(ui, |ui| {
+            let (sm, xs) = ((t.space.sm + 2.0) as i8, t.space.xs as i8);
+            egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(t.colors.panel).inner_margin(egui::Margin { left: sm, right: sm, top: xs, bottom: 0 })).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().item_spacing.x = t.space.xs;
                     for s in sessions {
                         let sel = self.current.as_deref() == Some(s.name);
-                        if session_tab(ui, sel, s.name).clicked() && !sel {
+                        if guilab_kit::tab(ui, sel, s.name, t.colors.view_bg).clicked() && !sel {
                             self.current = Some(s.name.to_string());
                         }
                     }
@@ -414,7 +419,7 @@ impl ViewerUi {
         self.per(s.name, s.key);
         let mut p = self.sessions.remove(s.name).unwrap();
 
-        egui::Panel::left("tools").resizable(false).exact_size(40.0).show(ui, |ui| {
+        egui::Panel::left("tools").resizable(false).exact_size(t.size.toolbar_w).show(ui, |ui| {
             ui.vertical_centered(|ui| p.sketch.toolbar(ui));
         });
         let panel = match self.chat_place {
@@ -436,9 +441,9 @@ impl ViewerUi {
             let drawing = p.sketch.active();
             self.last_view = Some(view);
             self.follow_window(s, &mut p.sizing, view, now, &mut out, ui.ctx());
-            self.view(ui, s, &mut p, view, resp.contains_pointer(), inputs, &mut out);
+            self.view(ui, s, &mut p, view, resp.contains_pointer() && !menu_was_open, inputs, menu_was_open, &mut out);
             if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
-                p.viz.update(log, now);
+                p.viz.update(log, now, &t.overlay);
                 let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 185.0);
                 p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now, light);
             }
@@ -451,9 +456,10 @@ impl ViewerUi {
             if !s.blocked() {
                 self.blocked_at = None;
             }
-            if let Some(t) = self.blocked_at {
+            let secs = t.motion.toast_secs;
+            if let Some(at) = self.blocked_at {
                 let (mut share, mut stop) = (false, false);
-                let r = guilab_markup::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
+                let r = guilab_kit::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
                     ui.label("Agent using app");
                     share = ui.button("Share").on_hover_text("Use the app alongside the agent").clicked();
                     stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
@@ -464,16 +470,16 @@ impl ViewerUi {
                     self.blocked_at = None;
                 } else if r.hovered() {
                     self.blocked_at = Some(now);
-                } else if now - t > TOAST_SECS {
+                } else if now - at > secs {
                     self.blocked_at = None;
                 } else {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TOAST_SECS - (now - t) + 0.05));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs - (now - at) + 0.05));
                 }
             }
             // Shared: both drive the app, which is unusual and worth keeping in view.
             if s.locked && s.shared {
                 let (mut unshare, mut stop) = (false, false);
-                guilab_markup::toast(ui, egui::Id::new("shared-toast"), view, slot, |ui| {
+                guilab_kit::toast(ui, egui::Id::new("shared-toast"), view, slot, |ui| {
                     ui.label("Sharing the app with the agent");
                     unshare = ui.button("Stop sharing").on_hover_text("Leave the app to the agent").clicked();
                     stop = ui.button("Take over").on_hover_text("Take the app back from the agent").clicked();
@@ -491,14 +497,14 @@ impl ViewerUi {
                 n.clear();
                 self.notice = Some((text, now));
             }
-            if let Some((text, t)) = &self.notice {
-                guilab_markup::toast(ui, egui::Id::new("notice-toast"), view, slot, |ui| {
+            if let Some((text, at)) = &self.notice {
+                guilab_kit::toast(ui, egui::Id::new("notice-toast"), view, slot, |ui| {
                     ui.label(text.as_str());
                 });
-                if now - t > TOAST_SECS {
+                if now - at > secs {
                     self.notice = None;
                 } else {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TOAST_SECS - (now - t) + 0.05));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs - (now - at) + 0.05));
                 }
             }
         });
@@ -512,8 +518,9 @@ impl ViewerUi {
     /// Client-side decorations in the menu bar's free part: a drag area (move; double-click
     /// maximizes) with the title, and minimize / maximize / close buttons at the right.
     fn title_bar(&mut self, ui: &mut egui::Ui, free: Rect) {
-        let n = 3.0;
-        let buttons = Rect::from_min_max(pos2(free.max.x - n * WINDOW_BUTTON_W, free.min.y), free.max);
+        let t = Theme::get(ui.ctx());
+        let bw = t.size.window_button_w;
+        let buttons = Rect::from_min_max(pos2(free.max.x - 3.0 * bw, free.min.y), free.max);
         let drag = Rect::from_min_max(free.min, pos2(buttons.min.x, free.max.y));
         let resp = ui.interact(drag, egui::Id::new("title-drag"), Sense::click_and_drag());
         if resp.double_clicked() {
@@ -521,51 +528,19 @@ impl ViewerUi {
         } else if resp.drag_started() {
             self.window_ops.push(WindowOp::Move);
         }
-        let v = ui.visuals().clone();
-        let p = ui.painter();
-        p.text(free.center(), egui::Align2::CENTER_CENTER, "guilab", egui::FontId::proportional(14.0), v.weak_text_color());
-        let ops = [WindowOp::Minimize, WindowOp::ToggleMaximize, WindowOp::Close];
-        for (i, op) in ops.into_iter().enumerate() {
-            let r = Rect::from_min_size(pos2(buttons.min.x + i as f32 * WINDOW_BUTTON_W, free.min.y), vec2(WINDOW_BUTTON_W, free.height()));
-            let resp = ui.interact(r, egui::Id::new(("window-button", i)), Sense::click());
-            let close = op == WindowOp::Close;
-            let fill = match (resp.hovered(), resp.is_pointer_button_down_on(), close) {
-                (true, _, true) => CLOSE_HOVER,
-                (true, true, false) => v.widgets.active.weak_bg_fill,
-                (true, false, false) => v.widgets.hovered.weak_bg_fill,
-                _ => Color32::TRANSPARENT,
-            };
-            p.rect_filled(r, 0.0, fill);
-            let fg = if close && resp.hovered() { Color32::WHITE } else { v.text_color() };
-            let stroke = egui::Stroke::new(1.0, fg);
-            let c = r.center();
-            let h = 5.0;
-            match op {
-                WindowOp::Minimize => {
-                    p.line_segment([c + vec2(-h, h * 0.6), c + vec2(h, h * 0.6)], stroke);
-                }
-                WindowOp::ToggleMaximize if self.maximized => {
-                    // Restore: two overlapping squares.
-                    p.rect_stroke(Rect::from_center_size(c + vec2(-1.5, 1.5), vec2(2.0 * h - 2.0, 2.0 * h - 2.0)), 0.0, stroke, egui::StrokeKind::Middle);
-                    p.line_segment([c + vec2(-h + 2.5, -h), c + vec2(h, -h)], stroke);
-                    p.line_segment([c + vec2(h, -h), c + vec2(h, h - 2.5)], stroke);
-                }
-                WindowOp::ToggleMaximize => {
-                    p.rect_stroke(Rect::from_center_size(c, vec2(2.0 * h, 2.0 * h)), 0.0, stroke, egui::StrokeKind::Middle);
-                }
-                _ => {
-                    p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], stroke);
-                    p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], stroke);
-                }
-            }
-            if resp.clicked() {
+        ui.painter().text(free.center(), egui::Align2::CENTER_CENTER, "guilab", t.font.body.clone(), t.colors.weak);
+        let max = if self.maximized { WindowButton::Restore } else { WindowButton::Maximize };
+        let kinds = [(WindowButton::Minimize, WindowOp::Minimize), (max, WindowOp::ToggleMaximize), (WindowButton::Close, WindowOp::Close)];
+        for (i, (kind, op)) in kinds.into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(buttons.min.x + i as f32 * bw, free.min.y), vec2(bw, free.height()));
+            if guilab_kit::window_button(ui, egui::Id::new(("window-button", i)), r, kind).clicked() {
                 self.window_ops.push(op);
             }
         }
         // Resize borders around the window (not when maximized).
         if !self.maximized
             && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-            && let Some((x, y)) = window_edge(ui.ctx().content_rect(), pos)
+            && let Some((x, y)) = window_edge(ui.ctx().content_rect(), t.size.window_border, pos)
         {
             ui.ctx().set_cursor_icon(crate::sizing::Edge { x, y }.cursor());
         }
@@ -602,10 +577,12 @@ impl ViewerUi {
         let mut chat_place = self.chat_place;
         let sv = cur.as_deref().and_then(|c| sessions.iter().find(|s| s.name == c));
         let last_view = self.last_view;
-        let menu_open = guilab_markup::menu::MenuBar::is_open(ui.ctx(), "menubar");
+        let menu_open = MenuBar::is_open(ui.ctx(), MENU_BAR);
+        let mut theme = self.theme;
+        let t = Theme::get(ui.ctx());
         let p = sv.map(|s| self.per(s.name, s.key));
-        let free = egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill)).show(ui, |ui| {
-            guilab_markup::menu::MenuBar::new("menubar").show(ui, |bar| {
+        let free = egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(t.colors.panel)).show(ui, |ui| {
+            MenuBar::new(MENU_BAR).show(ui, |bar| {
                 let Some(p) = p else {
                     for m in ["File", "Edit", "View"] {
                         bar.menu_enabled(m, false, |_| {});
@@ -631,20 +608,21 @@ impl ViewerUi {
                     let fixed = p.sizing.follow;
                     let z = &mut p.zoom;
                     // Steppers: they keep the menu open.
+                    let step = vec2(t.size.menu_item_h, 0.0);
                     m.custom(
                         |ui| {
                             ui.label("Zoom");
                         },
                         |ui| {
                             ui.add_enabled_ui(!fixed, |ui| {
-                                if ui.add(egui::Button::new("+").min_size(vec2(26.0, 22.0))).clicked() {
+                                if ui.add(egui::Button::new("+").min_size(step)).on_hover_text("Zoom in").clicked() {
                                     z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
                                     z.fit = false;
                                 }
-                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(56.0, 22.0))).on_hover_text("Actual size (100%)").clicked() {
+                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(step * 2.0)).on_hover_text("Actual size (100%)").clicked() {
                                     *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
                                 }
-                                if ui.add(egui::Button::new("−").min_size(vec2(26.0, 22.0))).clicked() {
+                                if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Zoom out").clicked() {
                                     z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
                                     z.fit = false;
                                 }
@@ -664,10 +642,18 @@ impl ViewerUi {
                             chat_place = place;
                         }
                     }
+                    m.separator();
+                    m.heading("Appearance");
+                    for (pref, label) in ThemePref::ALL {
+                        if m.radio(theme == pref, label) {
+                            theme = pref;
+                        }
+                    }
                 });
             })
         });
         self.chat_place = chat_place;
+        self.theme = theme;
         if self.csd {
             self.title_bar(ui, free.inner);
         }
@@ -675,7 +661,9 @@ impl ViewerUi {
 
     #[allow(clippy::too_many_arguments)]
     /// `drawing`: the sketch owns the pointer over the image; nothing goes to the app.
-    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, p: &mut PerSession, view: Rect, hovered: bool, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+    /// `menu_was_open`: presses this frame only close the menu.
+    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, p: &mut PerSession, view: Rect, hovered: bool, inputs: Vec<HostInput>, menu_was_open: bool, out: &mut Vec<Action>) {
+        let t = Theme::get(ui.ctx());
         let (z, sketch) = (&mut p.zoom, &p.sketch);
         let drawing = sketch.active();
         // "Lock size to window": always fit, no zoom or pan.
@@ -903,14 +891,14 @@ impl ViewerUi {
                         }
                         continue;
                     }
-                    if !ours(pos) || self.panning.is_some() || self.resizing.is_some() {
+                    if !ours(pos) || menu_was_open || self.panning.is_some() || self.resizing.is_some() {
                         continue;
                     }
                     let on_image = img.contains(pos);
                     if handles
                         && button == PointerButton::Primary
                         && self.held_buttons.is_empty()
-                        && let Some(edge) = sizing::handle_at(img, view, pos)
+                        && let Some(edge) = sizing::handle_at(&t, img, view, pos)
                     {
                         self.resizing = Some((s.name.to_string(), Resizing::new(edge, pos, img, s.size, z.fit)));
                         z.fit = false;
@@ -1009,29 +997,29 @@ impl ViewerUi {
         }
 
         let painter = ui.painter_at(view);
-        painter.rect_filled(view, 0.0, VIEW_BG);
+        painter.rect_filled(view, 0.0, t.colors.view_bg);
         match s.texture {
             Some(tex) => {
                 painter.image(tex, img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             None => {
-                painter.text(view.center(), egui::Align2::CENTER_CENTER, "(no frame yet)", egui::FontId::proportional(14.0), Color32::GRAY);
+                painter.text(view.center(), egui::Align2::CENTER_CENTER, "(no frame yet)", t.font.body.clone(), t.colors.weak);
             }
         }
-        painter.rect_stroke(img, 0.0, egui::Stroke::new(1.0, Color32::from_gray(60)), egui::StrokeKind::Outside);
+        painter.rect_stroke(img, 0.0, egui::Stroke::new(t.size.line, t.colors.outline), egui::StrokeKind::Outside);
         let pointer = ui.input(|i| i.pointer.latest_pos());
         let hot_handle = match &self.resizing {
             Some((_, r)) => Some(r.edge),
-            None if handles && hovered && self.panning.is_none() => pointer.and_then(|p| sizing::handle_at(img, view, p)),
+            None if handles && hovered && self.panning.is_none() => pointer.and_then(|p| sizing::handle_at(&t, img, view, p)),
             None => None,
         };
         if handles {
-            sizing::paint_handles(&painter, ui.visuals(), img, view, hot_handle);
+            sizing::paint_handles(&painter, &t, img, view, hot_handle);
         }
         if let Some((_, r)) = &mut self.resizing {
-            painter.rect_stroke(r.target(), 0.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
+            painter.rect_stroke(r.target(), 0.0, egui::Stroke::new(t.size.line, t.colors.accent), egui::StrokeKind::Outside);
             if let Some(p) = pointer {
-                sizing::readout(ui.ctx(), ui.visuals(), view, p, r.size);
+                guilab_kit::pointer_label(ui.ctx(), egui::Id::new("resize-readout"), view, p, format!("{} × {}", r.size.0, r.size.1));
             }
             if r.due(now) {
                 out.push(Action::Resize { session: s.name.to_string(), size: Some(r.size), scale: None });
@@ -1072,17 +1060,12 @@ impl ViewerUi {
     }
 }
 
+/// The menu bar's id.
+const MENU_BAR: &str = "menubar";
 
-/// Width of a title bar window button (client-side decorations).
-const WINDOW_BUTTON_W: f32 = 40.0;
-/// The close button's hover fill (a desktop-style deep red, readable under white).
-const CLOSE_HOVER: Color32 = Color32::from_rgb(196, 43, 28);
-/// Width of the resize border around the window (client-side decorations).
-const WINDOW_BORDER: f32 = 5.0;
-
-/// The window edge `p` is on, if within the resize border.
-pub fn window_edge(screen: Rect, p: Pos2) -> Option<(i8, i8)> {
-    let side = |v: f32, lo: f32, hi: f32| if v < lo + WINDOW_BORDER { -1 } else if v > hi - WINDOW_BORDER { 1 } else { 0 };
+/// The window edge `p` is on, if within `border` of it.
+pub fn window_edge(screen: Rect, border: f32, p: Pos2) -> Option<(i8, i8)> {
+    let side = |v: f32, lo: f32, hi: f32| if v < lo + border { -1 } else if v > hi - border { 1 } else { 0 };
     let e = (side(p.x, screen.min.x, screen.max.x), side(p.y, screen.min.y, screen.max.y));
     (e != (0, 0)).then_some(e)
 }
@@ -1092,7 +1075,7 @@ const SCALES: [f64; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// The View menu's session size section: resize to / lock to the window, size and scale.
 #[allow(clippy::too_many_arguments)]
-fn session_size(m: &mut guilab_markup::menu::MenuUi, s: &SessionView, sz: &mut Sizing, z: &mut Zoom, view: Option<Rect>, menu_open: bool, name: &str, out: &mut Vec<Action>) {
+fn session_size(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizing, z: &mut Zoom, view: Option<Rect>, menu_open: bool, name: &str, out: &mut Vec<Action>) {
     if !menu_open || sz.follow || s.locked {
         // Opening (or not editable): show the session's current values.
         sz.edit_size = s.size;
@@ -1157,29 +1140,4 @@ fn session_size(m: &mut guilab_markup::menu::MenuUi, s: &SessionView, sz: &mut S
     if s.locked {
         m.note("The agent is using the app; its size is frozen");
     }
-}
-
-/// One session tab: rounded top corners, an accent line on the selected one.
-fn session_tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
-    let v = ui.visuals().clone();
-    let text_color = if selected { v.strong_text_color() } else { v.weak_text_color() };
-    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), text_color);
-    let size = egui::vec2((galley.size().x + 32.0).max(80.0), 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if selected {
-        VIEW_BG
-    } else if resp.hovered() {
-        v.widgets.hovered.weak_bg_fill
-    } else {
-        Color32::TRANSPARENT
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
-    if selected {
-        let top = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 0.0), egui::vec2(rect.width() - 12.0, 2.0));
-        p.rect_filled(top, 1.0, v.selection.bg_fill);
-    }
-    let text_color = if !selected && resp.hovered() { v.text_color() } else { text_color };
-    p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, text_color);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

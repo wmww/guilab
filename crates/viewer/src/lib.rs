@@ -12,6 +12,7 @@
 mod clipboard;
 pub mod gfx;
 pub mod host;
+pub mod portal;
 pub mod sizing;
 pub mod source;
 pub mod ui;
@@ -74,6 +75,8 @@ pub struct Viewer {
     /// Host touch points going to the app, and the one acting as egui's pointer.
     touch_app: Vec<i32>,
     touch_egui: Option<i32>,
+    /// The desktop's light/dark preference as of the last draw.
+    scheme: Option<egui::Theme>,
 }
 
 impl Viewer {
@@ -87,6 +90,7 @@ impl Viewer {
     ) -> anyhow::Result<Viewer> {
         let host = HostState::new(c, "guilab", "guilab", gbm, node, force_shm)?;
         let gfx = gfx::Gfx::new(renderer)?;
+        guilab_kit::theme::install(&gfx.ctx);
         Ok(Viewer {
             host,
             gfx,
@@ -98,6 +102,7 @@ impl Viewer {
             frames: 0,
             touch_app: Vec::new(),
             touch_egui: None,
+            scheme: portal::color_scheme(),
         })
     }
 
@@ -127,7 +132,7 @@ impl Viewer {
     /// there's new input (handled right away even if the frame has to wait).
     pub fn wants_draw(&mut self, now: Instant, sessions: &[SessionFrame]) -> bool {
         self.host.tick_repeat(now);
-        if self.ui.notices().lock().is_ok_and(|n| !n.is_empty()) {
+        if self.ui.notices().lock().is_ok_and(|n| !n.is_empty()) || portal::color_scheme() != self.scheme {
             self.host.dirty = true;
         }
         let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
@@ -181,10 +186,11 @@ impl Viewer {
         }
         let (w, h) = self.host.size.unwrap_or((1, 1));
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
+        let border = guilab_kit::Theme::get(&self.gfx.ctx).size.window_border;
         inputs
             .into_iter()
             .filter(|i| match i {
-                HostInput::Egui(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }) => match ui::window_edge(screen, *pos) {
+                HostInput::Egui(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }) => match ui::window_edge(screen, border, *pos) {
                     Some((x, y)) => {
                         self.host.window_op(host::WindowOp::Resize(x, y));
                         false
@@ -283,6 +289,7 @@ impl Viewer {
             })
             .collect();
 
+        self.scheme = portal::color_scheme();
         let (w, h) = self.host.size.unwrap_or((1, 1));
         let ppp = self.host.scale as f32;
         let mut raw = egui::RawInput {
@@ -292,6 +299,7 @@ impl Viewer {
             focused: self.host.focused,
             events,
             max_texture_side: Some(self.gfx.max_texture_side()),
+            system_theme: self.scheme,
             ..Default::default()
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);

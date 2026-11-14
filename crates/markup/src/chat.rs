@@ -5,7 +5,8 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use egui::{Color32, ColorImage, Id, RichText, Sense, TextureHandle, TextureOptions, Ui, vec2};
+use egui::{ColorImage, Id, RichText, Sense, TextureHandle, TextureOptions, Ui, vec2};
+use guilab_kit::Theme;
 
 use crate::{
     raster::downscale,
@@ -44,9 +45,6 @@ pub struct Status {
 /// Quiet for this long (seconds), the status line says so. Long compiles are normal, so
 /// it's only a dim hint; the status stays.
 pub const QUIET_HINT: u64 = 120;
-
-const HUMAN_COLOR: Color32 = Color32::from_rgb(110, 170, 255);
-const AGENT_COLOR: Color32 = Color32::from_rgb(120, 210, 140);
 
 /// A message the human sent: text plus the queued drawings (and the open one).
 pub struct Outgoing {
@@ -111,8 +109,9 @@ impl Chat {
     /// the human sends one (Enter or Send); it takes `sketch`'s queue and open drawing.
     pub fn show(&mut self, ui: &mut Ui, sketch: &mut Sketch) -> Option<Outgoing> {
         let mut sent = None;
+        let t = Theme::get(ui.ctx());
         egui::Panel::bottom(self.id.with("input")).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(t.space.sm + 2.0);
             ui.horizontal(|ui| {
                 sketch.queue_strip(ui);
                 if sketch.drawing_open() {
@@ -123,38 +122,32 @@ impl Chat {
                 let focused = ui.memory(|m| m.has_focus(draft_id));
                 // Plain Enter sends; take it before the text box turns it into a newline (and
                 // decide after the box took this pass's typing, which may precede the Enter).
-                let enter = focused && ui.input_mut(crate::consume_plain_enter);
+                let enter = focused && ui.input_mut(guilab_kit::consume_plain_enter);
                 // A rounded box holding the text and a round send button; a dim outline,
-                // a little brighter while typing.
-                let v = ui.visuals();
-                let stroke_color = if focused { v.widgets.inactive.fg_stroke.color.gamma_multiply(0.45) } else { v.widgets.noninteractive.bg_stroke.color };
+                // brighter while typing.
                 let mut click = false;
-                // A touch lighter than the panel (not the black text-field default).
-                let fill = if v.dark_mode { Color32::from_gray(36) } else { Color32::from_gray(250) };
-                let boxed = egui::Frame::new()
-                    .fill(fill)
-                    .stroke(egui::Stroke::new(1.0, stroke_color))
-                    .corner_radius(10.0)
-                    .inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 })
+                let (sm, md) = (t.space.sm as i8, (t.space.md + 2.0) as i8);
+                let boxed = guilab_kit::field_frame(&t, focused)
+                    .inner_margin(egui::Margin { left: md, right: sm, top: sm, bottom: sm })
                     .show(ui, |ui| {
                         // Bottom-aligned, so the button stays at the last line as the text grows.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| {
-                            let button = 28.0;
+                            let button = t.size.send_button;
                             let edit = egui::TextEdit::multiline(&mut self.draft)
                                 .id(draft_id)
                                 // A custom frame replaces `.margin()`, so the padding goes here.
-                                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
+                                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, (t.space.sm + 2.0) as i8)))
                                 .hint_text("What's next?")
                                 .desired_rows(1)
                                 .min_size(vec2(0.0, button))
-                                .desired_width(ui.available_width() - button - 8.0);
+                                .desired_width(ui.available_width() - button - t.space.md);
                             ui.add(edit);
                             let can_send = !self.draft.trim().is_empty() || has_images;
-                            click = send_button(ui, button, can_send).clicked();
+                            click = guilab_kit::send_button(ui, can_send).clicked();
                         });
                     });
                 // Clicking the box's padding focuses the text too.
-                if boxed.response.interact(Sense::click()).clicked() {
+                if boxed.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::Text).clicked() {
                     ui.memory_mut(|m| m.request_focus(draft_id));
                 }
                 if (enter || click) && (!self.draft.trim().is_empty() || has_images) {
@@ -165,7 +158,7 @@ impl Chat {
                     self.scroll_to_end = true;
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(t.space.md);
         });
 
         let id = self.id;
@@ -175,10 +168,10 @@ impl Chat {
                 ui.weak("Messages, and what the agent does, show up here.");
             }
             for item in self.items.iter_mut() {
-                show_item(ui, item);
+                show_item(ui, &t, item);
             }
             if let Some(st) = &self.status {
-                show_status(ui, st);
+                show_status(ui, &t, st);
             }
             if scroll {
                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
@@ -190,26 +183,26 @@ impl Chat {
     }
 }
 
-fn show_item(ui: &mut Ui, item: &mut Item) {
+fn show_item(ui: &mut Ui, t: &Theme, item: &mut Item) {
     let f = &item.feed;
     match f.who {
         Who::Log => {
             // Activity, not a message: a prompt mark, dim, the time on hover.
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new("›").small().monospace().weak());
-                ui.label(RichText::new(&f.text).small().monospace().weak()).on_hover_text(&f.time);
+                ui.spacing_mut().item_spacing.x = t.space.sm + 2.0;
+                ui.label(RichText::new("›").font(t.font.mono_small.clone()).color(t.colors.weak));
+                ui.label(RichText::new(&f.text).font(t.font.mono_small.clone()).color(t.colors.weak)).on_hover_text(&f.time);
             });
         }
         Who::Human | Who::Agent => {
-            ui.add_space(2.0);
+            ui.add_space(t.space.xs);
             ui.horizontal_wrapped(|ui| {
                 let (name, color) = match f.who {
-                    Who::Human => ("You", HUMAN_COLOR),
-                    _ => ("Agent", AGENT_COLOR),
+                    Who::Human => ("You", t.colors.me),
+                    _ => ("Agent", t.colors.agent),
                 };
                 ui.label(RichText::new(name).strong().color(color));
-                ui.label(RichText::new(&f.time).small().weak());
+                ui.label(RichText::new(&f.time).font(t.font.small.clone()).color(t.colors.weak));
             });
             if !f.text.is_empty() {
                 ui.add(egui::Label::new(&f.text).selectable(true));
@@ -222,19 +215,17 @@ fn show_item(ui: &mut Ui, item: &mut Item) {
                             let size = t.size;
                             (ui.ctx().load_texture("feed-thumb", t, TextureOptions::LINEAR), size)
                         });
-                        let s = vec2(size[0] as f32, size[1] as f32) * (80.0 / size[1] as f32);
-                        let resp = ui.add(egui::Image::new((tex.id(), s)).sense(Sense::hover()));
+                        let s = vec2(size[0] as f32, size[1] as f32) * (t.size.feed_thumb_h / size[1] as f32);
+                        let resp = guilab_kit::thumb_frame(ui, tex.id(), s, Sense::hover());
                         let full = &mut item.full[i];
                         resp.on_hover_ui(|ui| {
                             let tex = full.get_or_insert_with(|| ui.ctx().load_texture("feed-image", (**img).clone(), TextureOptions::LINEAR));
-                            let size = vec2(img.size[0] as f32, img.size[1] as f32);
-                            let k = (720.0 / size.x).min(480.0 / size.y).min(1.0);
-                            ui.image((tex.id(), size * k));
+                            guilab_kit::preview(ui, tex.id(), vec2(img.size[0] as f32, img.size[1] as f32));
                         });
                     }
                 });
             }
-            ui.add_space(2.0);
+            ui.add_space(t.space.xs);
         }
     }
 }
@@ -249,48 +240,26 @@ fn duration(secs: u64) -> String {
 }
 
 /// The agent's status line: three pulsing dots, the status, the time it's been working.
-fn show_status(ui: &mut Ui, st: &Status) {
-    ui.add_space(4.0);
+fn show_status(ui: &mut Ui, t: &Theme, st: &Status) {
+    ui.add_space(t.space.sm);
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().item_spacing.x = t.space.md;
         let (rect, _) = ui.allocate_exact_size(vec2(26.0, 14.0), Sense::hover());
-        let t = ui.input(|i| i.time);
+        let now = ui.input(|i| i.time);
         for i in 0..3 {
             // A wave passing left to right, about once a second.
-            let phase = (t * 1.2 - i as f64 * 0.18).rem_euclid(1.0);
+            let phase = (now * 1.2 - i as f64 * 0.18).rem_euclid(1.0);
             let k = (1.0 - (phase * 2.0 - 0.5).abs().min(1.0) * 2.0).max(0.0) as f32;
             let c = egui::pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y - k * 2.0);
-            ui.painter().circle_filled(c, 3.0, AGENT_COLOR.gamma_multiply(0.35 + 0.65 * k));
+            ui.painter().circle_filled(c, 3.0, t.colors.agent.gamma_multiply(0.35 + 0.65 * k));
         }
-        ui.label(RichText::new(&st.text).color(AGENT_COLOR));
-        ui.label(RichText::new(duration(st.elapsed)).small().weak()).on_hover_text("Time the agent has been working");
+        ui.label(RichText::new(&st.text).color(t.colors.agent));
+        ui.label(RichText::new(duration(st.elapsed)).font(t.font.small.clone()).color(t.colors.weak)).on_hover_text("Time the agent has been working");
         if st.quiet >= QUIET_HINT {
-            ui.label(RichText::new(format!("no guilab activity for {}m", st.quiet / 60)).small().weak().italics());
+            ui.label(RichText::new(format!("no guilab activity for {}m", st.quiet / 60)).font(t.font.small.clone()).color(t.colors.weak).italics());
         }
     });
-    ui.add_space(2.0);
+    ui.add_space(t.space.xs);
     // Stepped, not every frame: enough for the dots and the clock, cheap while it works for hours.
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-}
-
-/// A round button with an up arrow: accent-filled when there's something to send.
-fn send_button(ui: &mut Ui, size: f32, enabled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), if enabled { Sense::click() } else { Sense::hover() });
-    let v = ui.visuals();
-    let (fill, fg) = if enabled {
-        let fill = if resp.hovered() { v.selection.bg_fill.gamma_multiply(1.25) } else { v.selection.bg_fill };
-        (fill, Color32::WHITE)
-    } else {
-        (v.widgets.inactive.bg_fill, v.weak_text_color())
-    };
-    let p = ui.painter();
-    let c = rect.center();
-    let r = size / 2.0;
-    p.circle_filled(c, r, fill);
-    let stroke = egui::Stroke::new(2.0, fg);
-    let (top, bottom) = (c - vec2(0.0, r * 0.45), c + vec2(0.0, r * 0.45));
-    p.line_segment([bottom, top], stroke);
-    p.line_segment([top, top + vec2(-r * 0.38, r * 0.38)], stroke);
-    p.line_segment([top, top + vec2(r * 0.38, r * 0.38)], stroke);
-    resp.on_hover_text("Send (Enter)")
 }

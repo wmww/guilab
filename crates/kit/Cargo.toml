@@ -1,0 +1,14 @@
+[package]
+name = "guilab-kit"
+description = "Small egui toolkit: theme tokens (light/dark), motion, undo history, and desktop-style widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Depends only on egui; no guilab types, so other egui apps can use it.
+
+[lib]
+doctest = false
+
+[dependencies]
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }

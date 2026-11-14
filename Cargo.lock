@@ -801,10 +801,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "guilab-kit"
+version = "0.1.0"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "guilab-markup"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "guilab-kit",
  "png",
 ]
 
@@ -845,6 +853,7 @@ dependencies = [
  "egui",
  "egui_glow",
  "glow",
+ "guilab-kit",
  "guilab-markup",
  "guilab-proto",
  "libc",

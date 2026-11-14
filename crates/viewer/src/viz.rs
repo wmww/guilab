@@ -9,39 +9,16 @@ use std::collections::{BTreeMap, VecDeque};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
 use guilab_proto::viz::{TouchPhase, VizKind, VizLog};
 
-/// Colors over dark content, and deeper ones over light content (picked from the color
-/// under the pointer).
-/// Colors by input type (the same for agents and humans).
-struct Palette {
-    pointer: Color32,
-    touch: Color32,
-    /// Glow layer opacity.
-    glow: f64,
-}
-const DARK_BG: Palette = Palette { pointer: Color32::from_rgb(110, 180, 255), touch: Color32::from_rgb(120, 230, 150), glow: 0.14 };
-const LIGHT_BG: Palette = Palette { pointer: Color32::from_rgb(20, 95, 215), touch: Color32::from_rgb(20, 145, 70), glow: 0.2 };
-/// Seconds to cross-fade between the two palettes.
-const PALETTE_FADE: f64 = 0.3;
+use guilab_kit::theme::OverlayPalette as Palette;
 
-impl Palette {
-    fn mix(a: &Palette, b: &Palette, t: f32) -> Palette {
-        let c = |x: Color32, y: Color32| Color32::from_rgb(lerp(x.r(), y.r(), t), lerp(x.g(), y.g(), t), lerp(x.b(), y.b(), t));
-        Palette { pointer: c(a.pointer, b.pointer), touch: c(a.touch, b.touch), glow: a.glow + (b.glow - a.glow) * t as f64 }
-    }
+fn mix(a: &Palette, b: &Palette, t: f32) -> Palette {
+    let c = |x: Color32, y: Color32| Color32::from_rgb(lerp(x.r(), y.r(), t), lerp(x.g(), y.g(), t), lerp(x.b(), y.b(), t));
+    Palette { pointer: c(a.pointer, b.pointer), touch: c(a.touch, b.touch), glow: a.glow + (b.glow - a.glow) * t }
 }
 
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
 }
-/// Seconds things stay visible.
-const TRAIL: f64 = 0.5;
-const RIPPLE: f64 = 0.45;
-const KEYS: f64 = 3.0;
-/// The keys' fade-out, at the end of `KEYS`.
-const KEY_FADE: f64 = 0.4;
-/// Glow fade after the pointer leaves; scroll marks' life.
-const LEAVE: f64 = 0.3;
-const SCROLL: f64 = 0.5;
 
 #[derive(Default)]
 pub struct Overlay {
@@ -75,12 +52,12 @@ fn tint(c: Color32, a: f64) -> Color32 {
 
 impl Overlay {
     /// Takes in new events; `now` is egui time.
-    pub fn update(&mut self, log: &VizLog, now: f64) {
+    pub fn update(&mut self, log: &VizLog, now: f64, o: &guilab_kit::theme::Overlay) {
         let from = self.next;
         self.next = log.end();
         for ev in log.events.iter().filter(|e| e.seq >= from) {
             let age = ev.at.elapsed().as_secs_f64();
-            if age > KEYS {
+            if age > o.keys_secs {
                 continue;
             }
             let t = now - age;
@@ -141,21 +118,21 @@ impl Overlay {
                 VizKind::Key(k) | VizKind::Note(k) => self.keys.push_back((k.clone(), t, agent)),
             }
         }
-        while self.trail.front().is_some_and(|e| now - e.1 > TRAIL) {
+        while self.trail.front().is_some_and(|e| now - e.1 > o.trail) {
             self.trail.pop_front();
         }
-        self.ripples.retain(|r| now - r.1 < RIPPLE);
-        self.dropped.retain(|d| now - d.1 < TRAIL);
-        self.notches.retain(|n| now - n.1 < SCROLL);
-        while self.smooth.front().is_some_and(|e| now - e.0 > SCROLL) {
+        self.ripples.retain(|r| now - r.1 < o.ripple);
+        self.dropped.retain(|d| now - d.1 < o.trail);
+        self.notches.retain(|n| now - n.1 < o.scroll);
+        while self.smooth.front().is_some_and(|e| now - e.0 > o.scroll) {
             self.smooth.pop_front();
         }
-        if self.left.is_some_and(|t| now - t > LEAVE) {
+        if self.left.is_some_and(|t| now - t > o.leave) {
             self.pointer = None;
             self.left = None;
         }
-        self.touches.retain(|_, t| !t.2 || now - t.1 < RIPPLE);
-        while self.keys.len() > 12 || self.keys.front().is_some_and(|k| now - k.1 > KEYS) {
+        self.touches.retain(|_, t| !t.2 || now - t.1 < o.ripple);
+        while self.keys.len() > 12 || self.keys.front().is_some_and(|k| now - k.1 > o.keys_secs) {
             self.keys.pop_front();
         }
     }
@@ -163,13 +140,15 @@ impl Overlay {
     /// Paints over the session `view`, whose image (of `size` pixels) is at `img`.
     /// `light`: the content under the pointer is light (the palette fades toward it).
     pub fn paint(&mut self, ui: &Ui, view: Rect, img: Rect, size: (f32, f32), now: f64, light: bool) {
+        let theme = guilab_kit::Theme::get(ui.ctx());
+        let o = &theme.overlay;
         let dt = (now - self.last_paint).clamp(0.0, 0.1);
         self.last_paint = now;
         let target = if light { 1.0 } else { 0.0 };
-        let step = (dt / PALETTE_FADE) as f32;
+        let step = (dt / o.palette_fade) as f32;
         let fading = self.light != target;
         self.light = if self.light < target { (self.light + step).min(target) } else { (self.light - step).max(target) };
-        let pal = &Palette::mix(&DARK_BG, &LIGHT_BG, self.light);
+        let pal = &mix(&o.on_dark, &o.on_light, self.light);
         let mut animating = fading;
         let to_screen = |p: Pos2| img.min + vec2(p.x / size.0 * img.width(), p.y / size.1 * img.height());
         let painter = ui.painter_at(view);
@@ -190,12 +169,12 @@ impl Overlay {
                 flush(&mut run, run_agent);
                 run_agent = agent;
             }
-            run.push((to_screen(p), (1.0 - (now - t) / TRAIL) as f32));
+            run.push((to_screen(p), (1.0 - (now - t) / o.trail) as f32));
             prev_t = t;
             animating = true;
         }
         flush(&mut run, run_agent);
-        let drags = self.drag.iter().map(|(path, a)| (path, 1.0, *a)).chain(self.dropped.iter().map(|(path, t, a)| (path, (1.0 - (now - t) / TRAIL) as f32, *a)));
+        let drags = self.drag.iter().map(|(path, a)| (path, 1.0, *a)).chain(self.dropped.iter().map(|(path, t, a)| (path, (1.0 - (now - t) / o.trail) as f32, *a)));
         for (path, f, _) in drags {
             let pts: Vec<(Pos2, f32)> = path.iter().map(|p| (to_screen(*p), f)).collect();
             strip(&painter, &pts, 2.75, pal.pointer, 0.85);
@@ -205,12 +184,12 @@ impl Overlay {
         // button is held. Smooth scrolling stretches it into a droplet whose tail trails
         // opposite the scroll direction, longer the faster it scrolls.
         if let Some((p, _, _, down)) = self.pointer {
-            let f = self.left.map_or(1.0, |t| 1.0 - (now - t) / LEAVE);
+            let f = self.left.map_or(1.0, |t| 1.0 - (now - t) / o.leave);
             let mut tail = egui::Vec2::ZERO;
             if let Some(&(last, _, _)) = self.smooth.back() {
                 let window = 0.15;
                 let sum = self.smooth.iter().filter(|e| last - e.0 < window).fold(vec2(0.0, 0.0), |s, e| s + e.1);
-                let k = (1.0 - (now - last) / SCROLL).max(0.0) as f32;
+                let k = (1.0 - (now - last) / o.scroll).max(0.0) as f32;
                 // Speed (session px/s) -> tail length, growing slower than linear.
                 let speed = sum.length() / window as f32;
                 if speed > 0.0 {
@@ -222,7 +201,7 @@ impl Overlay {
                 let c = pal.pointer;
                 let at = to_screen(p);
                 for r in [14.0, 10.5, 7.0, 4.5] {
-                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * pal.glow));
+                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * pal.glow as f64));
                 }
                 if down {
                     painter.circle_stroke(at, 8.0, Stroke::new(2.0, tint(c, 0.85)));
@@ -236,7 +215,7 @@ impl Overlay {
                     animating = true;
                     continue;
                 }
-                let f = (age / SCROLL) as f32;
+                let f = (age / o.scroll) as f32;
                 let c = tint(pal.pointer, (1.0 - f as f64) * 0.9);
                 let tip = to_screen(*at) + *dir * (16.0 + 14.0 * f);
                 let n = vec2(-dir.y, dir.x) * 5.0;
@@ -246,7 +225,7 @@ impl Overlay {
             }
         }
         for (p, t, touch) in &self.ripples {
-            let f = ((now - t) / RIPPLE) as f32;
+            let f = ((now - t) / o.ripple) as f32;
             let c = if *touch { pal.touch } else { pal.pointer };
             // A quick bright flash, then the ring spreads.
             if f < 0.35 {
@@ -256,7 +235,7 @@ impl Overlay {
             animating = true;
         }
         for (p, t, up) in self.touches.values() {
-            let f = if *up { 1.0 - (now - t) / RIPPLE } else { 1.0 };
+            let f = if *up { 1.0 - (now - t) / o.ripple } else { 1.0 };
             let at = to_screen(*p);
             painter.circle_filled(at, 18.0, tint(pal.touch, f * 0.15));
             painter.circle_stroke(at, 18.0, Stroke::new(2.0, tint(pal.touch, f * 0.8)));
@@ -264,12 +243,12 @@ impl Overlay {
         }
         // Key stream, newest at the bottom: big bold labels in equal-width boxes (wider
         // for symbol keys), growing for chords.
-        let font = 42.5;
-        let key_color = Color32::from_rgb(200, 145, 255);
+        let font = o.key_font;
+        let key_color = o.keys;
         let mut y = view.max.y - 14.0;
         for (label, t, _) in self.keys.iter().rev() {
             let age = now - t;
-            let f = if age > KEYS - KEY_FADE { (KEYS - age) / KEY_FADE } else { 1.0 };
+            let f = if age > o.keys_secs - o.key_fade { (o.keys_secs - age) / o.key_fade } else { 1.0 };
             let color = tint(key_color, f);
             // "Ctrl+Enter" -> text "Ctrl+" and an Enter symbol.
             let (prefix, key) = match label.rfind('+') {
@@ -287,7 +266,7 @@ impl Overlay {
             let min_w = if icon && !arrow { font * 1.9 } else { font * 1.5 };
             let size = vec2((content + font * 0.6).max(min_w), h + font * 0.3);
             let r = Rect::from_min_size(pos2(view.max.x - 14.0 - size.x, y - size.y), size);
-            painter.rect_filled(r, font * 0.25, Color32::from_black_alpha((f * 180.0) as u8));
+            painter.rect_filled(r, font * 0.25, o.key_chip.gamma_multiply(f as f32));
             let x0 = r.center().x - content / 2.0;
             let ty = r.center().y - g.size().y / 2.0;
             // Faux bold: the default font has no bold face.

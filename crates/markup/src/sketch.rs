@@ -275,30 +275,17 @@ impl Sketch {
 
     /// The vertical tool strip.
     pub fn toolbar(&mut self, ui: &mut Ui) {
-        let size = vec2(28.0, 28.0);
-        ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
-        for t in Tool::ALL {
-            let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-            let sel = self.tool == t;
-            let vis = ui.style().interact_selectable(&resp, sel);
-            if sel || resp.hovered() {
-                ui.painter().rect_filled(rect, 4.0, vis.weak_bg_fill);
-            }
-            tool_icon(ui.painter(), rect.shrink(6.0), t, vis.fg_stroke.color);
-            if resp.on_hover_text(t.name()).clicked() {
-                self.tool = t;
+        let t = guilab_kit::Theme::get(ui.ctx());
+        ui.spacing_mut().item_spacing = vec2(0.0, t.space.sm);
+        for tool in Tool::ALL {
+            let stroke = t.size.icon_stroke;
+            if guilab_kit::tool_button(ui, self.tool == tool, tool.name(), |p, r, c| tool_icon(p, r, tool, c, stroke)).clicked() {
+                self.tool = tool;
             }
         }
         ui.separator();
         for (c, name) in COLORS {
-            let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 22.0), Sense::click());
-            let sel = self.color == c;
-            ui.painter().circle_filled(rect.center(), 8.0, c);
-            ui.painter().circle_stroke(rect.center(), 8.0, Stroke::new(1.0, Color32::from_gray(90)));
-            if sel {
-                ui.painter().circle_stroke(rect.center(), 11.0, Stroke::new(2.0, ui.visuals().strong_text_color()));
-            }
-            if resp.on_hover_text(name).clicked() {
+            if guilab_kit::swatch(ui, c, self.color == c, name).clicked() {
                 self.color = c;
                 if matches!(self.tool, Tool::Interact | Tool::Move) {
                     self.tool = Tool::Pen;
@@ -488,7 +475,7 @@ impl Sketch {
         let k = d.scale * xf.zoom;
         let font = FontId::proportional(FONT * k);
         let pad = PAD * k;
-        let (enter, esc) = ui.input_mut(|i| (crate::consume_plain_enter(i), i.consume_key(Modifiers::NONE, Key::Escape)));
+        let (enter, esc) = ui.input_mut(|i| (guilab_kit::consume_plain_enter(i), i.consume_key(Modifiers::NONE, Key::Escape)));
         let color = e.color;
         let wrap = e.width * xf.zoom;
         // The box hugs the text (wrapped like the mark it becomes), at least a few ems wide.
@@ -538,7 +525,7 @@ impl Sketch {
     fn bar(&mut self, ui: &mut Ui, clip: Rect) {
         let mut queue = false;
         let mut discard = false;
-        crate::toast(ui, self.id.with("bar"), clip, 0, |ui| {
+        guilab_kit::toast(ui, self.id.with("bar"), clip, 0, |ui| {
             ui.label("Drawing on a frozen screenshot");
             queue = ui.button("Queue").on_hover_text("Keep it for the next message").clicked();
             discard = ui.button("Discard").clicked();
@@ -553,28 +540,23 @@ impl Sketch {
     /// Queued thumbnails in a row, each with a delete button.
     pub fn queue_strip(&mut self, ui: &mut Ui) {
         let mut remove = None;
+        let t = guilab_kit::Theme::get(ui.ctx());
         for (i, q) in self.queue.iter_mut().enumerate() {
             let tex = q.tex.get_or_insert_with(|| ui.ctx().load_texture("queued", q.thumb.clone(), TextureOptions::LINEAR));
-            let size = vec2(q.thumb.size[0] as f32, q.thumb.size[1] as f32) * (56.0 / q.thumb.size[1] as f32);
-            let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-            ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-            ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, Color32::from_gray(110)), egui::StrokeKind::Outside);
-            let x = Rect::from_center_size(rect.right_top() + vec2(-9.0, 9.0), vec2(16.0, 16.0));
-            let xr = ui.interact(x, self.id.with(("unqueue", i)), Sense::click());
-            ui.painter().circle_filled(x.center(), 8.0, if xr.hovered() { Color32::from_rgb(200, 40, 40) } else { Color32::from_black_alpha(180) });
-            let s = Stroke::new(1.5, Color32::WHITE);
-            ui.painter().line_segment([x.center() + vec2(-3.5, -3.5), x.center() + vec2(3.5, 3.5)], s);
-            ui.painter().line_segment([x.center() + vec2(3.5, -3.5), x.center() + vec2(-3.5, 3.5)], s);
-            if xr.on_hover_text("Remove").clicked() {
+            let size = vec2(q.thumb.size[0] as f32, q.thumb.size[1] as f32) * (t.size.thumb_h / q.thumb.size[1] as f32);
+            let resp = guilab_kit::thumb_frame(ui, tex.id(), size, Sense::hover());
+            let r = t.size.close_badge / 2.0 + 1.0;
+            let badge = guilab_kit::close_badge(ui, self.id.with(("unqueue", i)), resp.rect.right_top() + vec2(-r, r), "Remove");
+            if badge.clicked() {
                 remove = Some(i);
             }
-            resp.on_hover_ui(|ui| {
-                let p = &q.out.preview;
-                let full = q.full.get_or_insert_with(|| ui.ctx().load_texture("queued-full", (**p).clone(), TextureOptions::LINEAR));
-                let size = vec2(p.size[0] as f32, p.size[1] as f32);
-                let f = (720.0 / size.x).min(480.0 / size.y).min(1.0);
-                ui.image((full.id(), size * f));
-            });
+            if !badge.hovered() {
+                resp.on_hover_ui(|ui| {
+                    let p = &q.out.preview;
+                    let full = q.full.get_or_insert_with(|| ui.ctx().load_texture("queued-full", (**p).clone(), TextureOptions::LINEAR));
+                    guilab_kit::preview(ui, full.id(), vec2(p.size[0] as f32, p.size[1] as f32));
+                });
+            }
         }
         if let Some(i) = remove {
             self.queue.remove(i);
@@ -590,8 +572,8 @@ fn push_text(d: &mut Drawing, e: Editing) {
     }
 }
 
-fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32) {
-    let s = Stroke::new(1.6, c);
+fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32, width: f32) {
+    let s = Stroke::new(width, c);
     match t {
         Tool::Interact => {
             // An arrow cursor.

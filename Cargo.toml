@@ -15,6 +15,7 @@ guilab-server = { path = "crates/server" }
 guilab-viewer = { path = "crates/viewer" }
 guilab-markup = { path = "crates/markup" }
 guilab-image = { path = "crates/image" }
+guilab-kit = { path = "crates/kit" }
 # Pinned master: crates.io 0.7 is too old (see notes/code-map.md). Bump deliberately.
 smithay = { git = "https://github.com/Smithay/smithay", rev = "9ff2c5a410e91c592e19d6fb126c299308dce119", default-features = false, features = [
     "wayland_frontend", "desktop", "backend_egl", "backend_gbm", "renderer_gl", "renderer_pixman", "xwayland",
