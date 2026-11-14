@@ -466,6 +466,27 @@ fn size_to_window() {
     v.wait_output(5, |w, hh| (w, hh) == (1590, 729));
 }
 
+/// A message without images refers to the screen as the human started typing it, not as it
+/// was sent (the app may have changed meanwhile, e.g. the agent restarted it).
+#[test]
+fn screen_from_typing_start() {
+    let Some((h, sock, t)) = host() else { return };
+    let (v, _) = viewed(&[]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    h.input(&t, &["move", "600", "768", "click", "type", "this"]); // message box
+    wait_until("the typing screen", 10, || if v.info().viewer.is_some_and(|i| i.typing) { Ok(()) } else { Err("not yet".into()) });
+    v.run(&["kill"]);
+    h.input(&t, &["key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    let id = out.split("their screen as they sent it, with their pointer: image ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("{out}{err}")).to_string();
+    let png = format!("{}/screen.png", v.rt.display());
+    v.run(&["image", &id, "-o", &png]);
+    // The app was still there (an empty session is black).
+    assert!(lit_fraction(&png) > 0.5, "the screen is empty: captured at send, after the kill");
+    assert!(!v.info().viewer.unwrap().typing, "taken by the message");
+}
+
 /// Dragging the bottom-right resize handle resizes the output by the dragged distance.
 #[test]
 fn resize_handle() {

@@ -237,6 +237,7 @@ impl Server {
                 window: s.viewer.host.size.map_or([0, 0], |(w, h)| [w, h]),
                 dropped: s.dropped + self.viewer_ui.blocked_tries,
                 drafts: self.viewer_ui.drafts(),
+                typing: self.viewer_ui.current().and_then(|c| self.sessions.get(c)).is_some_and(|s| s.typing_screen.is_some()),
             }),
             _ => None,
         }

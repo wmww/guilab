@@ -80,7 +80,7 @@ impl Run {
 
     fn feed_slot(&self) -> Pos2 {
         let ws = self.d.ui.workspace().unwrap();
-        ws.slots.iter().filter(|(s, _, _)| matches!(s, SlotId::Feed { .. })).next_back().map(|(_, _, r)| r.center()).expect("a feed slot")
+        ws.slots.iter().rfind(|(s, _, _)| matches!(s, SlotId::Feed { .. })).map(|(_, _, r)| r.center()).expect("a feed slot")
     }
 
     fn draft_slot(&self) -> Pos2 {

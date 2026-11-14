@@ -29,6 +29,16 @@ pub fn flat_fill(t: &Theme, resp: &Response, selected: bool) -> Color32 {
     }
 }
 
+/// A tooltip beside the widget (right of it, else left), for widgets in a vertical strip,
+/// where egui's (below) would cover the next one.
+pub fn side_tooltip(resp: Response, text: &str) -> Response {
+    let t = Theme::get(&resp.ctx);
+    let mut tip = egui::Tooltip::for_enabled(&resp);
+    tip.popup = tip.popup.align(egui::RectAlign::RIGHT).align_alternatives(&[egui::RectAlign::LEFT]).gap(t.space.sm);
+    tip.show(|ui| ui.label(text));
+    resp
+}
+
 /// The focus ring around `rect` while `resp` has keyboard focus.
 pub fn focus_ring(painter: &Painter, t: &Theme, resp: &Response, rect: Rect, radius: impl Into<CornerRadius>) {
     if resp.has_focus() {
@@ -95,7 +105,7 @@ pub fn toast(ui: &Ui, id: Id, stack: Id, clip: Rect, add: impl FnOnce(&mut Ui)) 
 }
 
 /// A square toolbar button: flat, filled on hover, press and selection; `icon` paints into
-/// the inner rect with the given color.
+/// the inner rect with the given color. The tooltip shows beside it ([`side_tooltip`]).
 pub fn tool_button(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl FnOnce(&Painter, Rect, Color32)) -> Response {
     let t = Theme::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(t.size.tool_button), Sense::click());
@@ -104,7 +114,7 @@ pub fn tool_button(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl FnOnce
     focus_ring(p, &t, &resp, rect, t.radius.button);
     let fg = if selected || resp.hovered() { t.colors.strong } else { t.colors.text };
     icon(p, rect.shrink(t.size.tool_icon_pad), fg);
-    resp.on_hover_text(tooltip)
+    side_tooltip(resp, tooltip)
 }
 
 /// Relative luminance difference, 0..1.
@@ -131,7 +141,7 @@ pub fn swatch(ui: &mut Ui, color: Color32, selected: bool, name: &str) -> Respon
     } else if resp.has_focus() {
         p.circle_stroke(rect.center(), s.swatch_r + s.swatch_ring_gap, Stroke::new(s.focus_w, t.colors.focus));
     }
-    resp.on_hover_text(name)
+    side_tooltip(resp, name)
 }
 
 /// What a [`round_button`] shows.

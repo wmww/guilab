@@ -273,6 +273,8 @@ pub struct Overlay {
     pub stroke: f32,
     pub chevron: [f32; 3],
     pub margin: f32,
+    /// Content under the pointer brighter than this (luma 0..255) is light.
+    pub light_above: f32,
     /// Seconds: palette cross-fade, hover trail and dropped drags, press ripples, key
     /// labels and their fade-out, the glow after the pointer leaves, scroll marks.
     pub palette_fade: f64,
@@ -300,6 +302,7 @@ fn overlay() -> Overlay {
         stroke: 2.0,
         chevron: [16.0, 14.0, 5.0],
         margin: 14.0,
+        light_above: 185.0,
         palette_fade: 0.3,
         trail: 0.5,
         ripple: 0.45,

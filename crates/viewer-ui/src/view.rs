@@ -359,7 +359,7 @@ impl ViewerUi {
         }
 
         // Clamp the pan so some of the image stays in view.
-        let keep = 48.0;
+        let keep = PAN_KEEP;
         let max = (img.size() + view.size()) / 2.0 - Vec2::splat(keep);
         let clamped = z.pan.clamp(-max.max(Vec2::ZERO), max.max(Vec2::ZERO));
         if clamped != z.pan {
@@ -493,6 +493,9 @@ impl ViewerUi {
         }
     }
 }
+
+/// Points of the image kept in the view however far it's panned.
+const PAN_KEEP: f32 = 48.0;
 
 /// Where the live app shows in `view` at zoom `z` (while an open image has the view).
 fn live_rect(view: Rect, z: &Zoom, s: &SessionView, ppp: f32) -> Rect {

@@ -159,7 +159,7 @@ impl Overlay {
         let mut run_agent = false;
         let flush = |run: &mut Vec<(Pos2, f32)>, _agent: bool| {
             if run.len() > 1 {
-                strip(&painter, run, 2.0, pal.pointer, 0.35);
+                strip(&painter, run, o.trail_w, pal.pointer, 0.35);
             }
             run.clear();
         };
@@ -177,7 +177,7 @@ impl Overlay {
         let drags = self.drag.iter().map(|(path, a)| (path, 1.0, *a)).chain(self.dropped.iter().map(|(path, t, a)| (path, (1.0 - (now - t) / o.trail) as f32, *a)));
         for (path, f, _) in drags {
             let pts: Vec<(Pos2, f32)> = path.iter().map(|p| (to_screen(*p), f)).collect();
-            strip(&painter, &pts, 2.75, pal.pointer, 0.85);
+            strip(&painter, &pts, o.drag_w, pal.pointer, 0.85);
             animating |= f < 1.0;
         }
         // Pointer glow: soft concentric discs, until the pointer leaves; a ring while a
@@ -200,11 +200,12 @@ impl Overlay {
             if f > 0.0 {
                 let c = pal.pointer;
                 let at = to_screen(p);
-                for r in [14.0, 10.5, 7.0, 4.5] {
-                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * pal.glow as f64));
+                let g = o.glow_r;
+                for r in [g, g * 0.75, g * 0.5, g * 0.32] {
+                    droplet(&painter, at, r, tail * (r / g), tint(c, f * pal.glow as f64));
                 }
                 if down {
-                    painter.circle_stroke(at, 8.0, Stroke::new(2.0, tint(c, 0.85)));
+                    painter.circle_stroke(at, g * 0.57, Stroke::new(o.stroke, tint(c, 0.85)));
                 }
                 animating |= self.left.is_some();
             }
@@ -217,10 +218,11 @@ impl Overlay {
                 }
                 let f = (age / o.scroll) as f32;
                 let c = tint(pal.pointer, (1.0 - f as f64) * 0.9);
-                let tip = to_screen(*at) + *dir * (16.0 + 14.0 * f);
-                let n = vec2(-dir.y, dir.x) * 5.0;
-                painter.line_segment([tip - *dir * 5.0 + n, tip], Stroke::new(2.0, c));
-                painter.line_segment([tip - *dir * 5.0 - n, tip], Stroke::new(2.0, c));
+                let [dist, grow, arm] = o.chevron;
+                let tip = to_screen(*at) + *dir * (dist + grow * f);
+                let n = vec2(-dir.y, dir.x) * arm;
+                painter.line_segment([tip - *dir * arm + n, tip], Stroke::new(o.stroke, c));
+                painter.line_segment([tip - *dir * arm - n, tip], Stroke::new(o.stroke, c));
                 animating = true;
             }
         }
@@ -229,23 +231,24 @@ impl Overlay {
             let c = if *touch { pal.touch } else { pal.pointer };
             // A quick bright flash, then the ring spreads.
             if f < 0.35 {
-                painter.circle_filled(to_screen(*p), 9.0, tint(c, (1.0 - f as f64 / 0.35) * 0.55));
+                painter.circle_filled(to_screen(*p), o.press_r, tint(c, (1.0 - f as f64 / 0.35) * 0.55));
             }
-            painter.circle_stroke(to_screen(*p), 6.0 + 18.0 * f, Stroke::new(2.0, tint(c, (1.0 - f as f64) * 0.8)));
+            let [r0, grow] = o.ripple_r;
+            painter.circle_stroke(to_screen(*p), r0 + grow * f, Stroke::new(o.stroke, tint(c, (1.0 - f as f64) * 0.8)));
             animating = true;
         }
         for (p, t, up) in self.touches.values() {
             let f = if *up { 1.0 - (now - t) / o.ripple } else { 1.0 };
             let at = to_screen(*p);
-            painter.circle_filled(at, 18.0, tint(pal.touch, f * 0.15));
-            painter.circle_stroke(at, 18.0, Stroke::new(2.0, tint(pal.touch, f * 0.8)));
+            painter.circle_filled(at, o.touch_r, tint(pal.touch, f * 0.15));
+            painter.circle_stroke(at, o.touch_r, Stroke::new(o.stroke, tint(pal.touch, f * 0.8)));
             animating |= *up;
         }
         // Key stream, newest at the bottom: big bold labels in equal-width boxes (wider
         // for symbol keys), growing for chords.
         let font = o.key_font;
         let key_color = o.keys;
-        let mut y = view.max.y - 14.0;
+        let mut y = view.max.y - o.margin;
         for (label, t, _) in self.keys.iter().rev() {
             let age = now - t;
             let f = if age > o.keys_secs - o.key_fade { (o.keys_secs - age) / o.key_fade } else { 1.0 };
@@ -265,7 +268,7 @@ impl Overlay {
             let content = g.size().x + icon_w;
             let min_w = if icon && !arrow { font * 1.9 } else { font * 1.5 };
             let size = vec2((content + font * 0.6).max(min_w), h + font * 0.3);
-            let r = Rect::from_min_size(pos2(view.max.x - 14.0 - size.x, y - size.y), size);
+            let r = Rect::from_min_size(pos2(view.max.x - o.margin - size.x, y - size.y), size);
             painter.rect_filled(r, font * 0.25, o.key_chip.gamma_multiply(f as f32));
             let x0 = r.center().x - content / 2.0;
             let ty = r.center().y - g.size().y / 2.0;
@@ -277,7 +280,7 @@ impl Overlay {
                 let b = Rect::from_min_size(pos2(x0 + g.size().x, r.center().y - font * 0.4), vec2(icon_w, font * 0.8)).shrink(font * 0.1);
                 key_icon(&painter, b, key, color, font / 18.0);
             }
-            y = r.min.y - 6.0;
+            y = r.min.y - font * 0.14;
             animating = true;
         }
         if animating {

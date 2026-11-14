@@ -152,17 +152,19 @@ fn removing_or_sending_the_open_image_fades_it_out() {
     let z = crate::Zoom::default();
     let w = d.ui.workspace_mut().unwrap();
     w.remove(key);
-    // Nothing flies; the image fades out where it was, the live app fading back in.
+    // Nothing flies; the image fades out where it was, over the live app (back at once).
     assert!(w.flights.flights().is_empty());
     assert_eq!(w.flights.fades().count(), 1);
-    assert_eq!(w.flights.live.value(w.flights.now()), 0.0);
+    assert_eq!(w.flights.live.value(w.flights.now()), 1.0);
     d.idle(30);
     let w = d.ui.workspace_mut().unwrap();
     assert_eq!(w.flights.fades().count(), 0);
     assert_eq!(w.flights.live.value(w.flights.now()), 1.0);
     w.undo(&d.store, z);
-    d.idle(5);
+    d.ui.workspace_mut().unwrap().open_slot(SlotId::Composer, Att::Draft(key), &d.store, z);
+    d.idle(30);
     let w = d.ui.workspace_mut().unwrap();
+    assert!(matches!(w.open, Open::Draft(_)));
     let _ = w.send(z);
     assert!(w.flights.flights().is_empty());
     assert_eq!(w.flights.fades().count(), 1);

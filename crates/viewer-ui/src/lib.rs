@@ -584,7 +584,7 @@ impl ViewerUi {
                 && !p.ws.image_open()
             {
                 p.viz.update(log, now, &t.overlay);
-                let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 185.0);
+                let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > t.overlay.light_above);
                 p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now, light);
             }
             // Toasts stack above the editor's own.

@@ -190,17 +190,13 @@ impl Flights {
     }
 
     /// The open image (`doc`, shown at `place` last frame) leaves the view with no slot to
-    /// go to: it fades out there while the live app fades back in. Without a place, the live
-    /// app is just back.
+    /// go to: it fades out there over the live app, which is back at once (it was under the
+    /// image all along; crossfading both would dim the view mid-way).
     pub fn fade_out(&mut self, place: Option<Place>, doc: Doc) {
         self.glow = Fader::at(0.0);
-        match place {
-            Some(place) => {
-                self.fades.push(Fade { place, doc, t0: self.now });
-                self.live = Fader::at(0.0);
-                self.live.set(1.0, self.now, self.fade);
-            }
-            None => self.quiet(true),
+        self.quiet(true);
+        if let Some(place) = place {
+            self.fades.push(Fade { place, doc, t0: self.now });
         }
     }
 

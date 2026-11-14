@@ -178,12 +178,36 @@ fn scenario(name: &str, dark: bool) -> Option<Run> {
             r.tool(Tool::Interact);
             r.record(vec![]);
         }
+        // × on the open image's slot: it fades out of the view, the live app fades back in.
+        "remove" => {
+            r.tool(Tool::Box);
+            r.drag(pos2(400.0, 150.0), pos2(600.0, 260.0), false);
+            r.d.idle(30);
+            let slot = r.d.ui.workspace().unwrap().slot_rect(SlotId::Composer, r.draft(0)).unwrap();
+            let x = slot.right_top() + vec2(-12.0, 12.0);
+            r.ev(vec![Event::PointerMoved(x)]);
+            r.snap();
+            r.record(vec![press(x, true), press(x, false)]);
+        }
+        // Sending with the image open: the same fade.
+        "send" => {
+            r.tool(Tool::Box);
+            r.drag(pos2(400.0, 150.0), pos2(600.0, 260.0), false);
+            r.d.idle(30);
+            r.snap();
+            let w = r.d.ui.workspace_mut().unwrap();
+            let text = w.chat.text_id();
+            w.chat.draft_mut().push_str("this");
+            r.d.h.ctx.memory_mut(|m| m.request_focus(text));
+            r.d.idle(2);
+            r.record(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+        }
         _ => return None,
     }
     Some(r)
 }
 
-const ALL: [&str; 8] = ["draw", "close", "open", "switch", "past", "glow", "side", "scrolled"];
+const ALL: [&str; 10] = ["draw", "close", "open", "switch", "past", "glow", "side", "scrolled", "remove", "send"];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -465,6 +465,10 @@ pub struct ViewerInfo {
     /// The shown session's unsent drafts: each one's element count, in composer order.
     #[serde(default)]
     pub drafts: Vec<usize>,
+    /// The shown session has a screen captured as the human started typing (for the
+    /// message they're writing).
+    #[serde(default)]
+    pub typing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
