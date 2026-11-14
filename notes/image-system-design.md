@@ -2,6 +2,8 @@
 
 The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
 
+**Status:** phase 1 (`crates/image`) is built and tested; the core sections below describe the code as it is. Phases 2–7 not started.
+
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
 - **Data in, events out.** Widgets never own app data. The host passes in what to show and gets events back, and the host applies them. That way undo, copy-on-edit and animations are glue decisions, not widget hacks.
@@ -12,7 +14,7 @@ The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` an
 
 | crate | deps | role |
 |---|---|---|
-| `guilab-image` (`crates/image`) | tiny-skia, resvg/usvg, png, zune-jpeg, epaint_default_fonts (font bytes only) | model, ids, store, text format, geometry, display list, CPU render, edit ops. **No egui.** |
+| `guilab-image` (`crates/image`) | tiny-skia, resvg/usvg, skrifa, png, zune-jpeg, epaint_default_fonts (font bytes only) | model, ids, store, text format, geometry, display list, CPU render, edit ops. **No egui.** |
 | `guilab-kit` (`crates/kit`) | egui | theme tokens (light/dark, motion), animation helpers, `History<Op>`, shared widgets (menu bar, toast, icon button, close badge, send button, tab, thumb frame) |
 | `guilab-editor` (`crates/editor`) | egui, kit, image | the image editor widget: toolbar, canvas, tools, move tool, key points, text editing, crop tool. Emits `Edit`s. |
 | `guilab-chat` (`crates/chat`) | egui, kit | feed and composer, generic over attachment keys. Knows nothing about images. |
@@ -32,7 +34,7 @@ server → image, viewer, proto, compositor        guilab (CLI) → proto, serve
 
 ### Ids
 - `ImageId`, `AssetId`: 4 chars from `23456789abcdefghjkmnpqrstuvwxyz`. Raster ids start with `r` and SVG ids with `s`. Image ids never start with `r` or `s`, so you can tell the kind from the id, and errors can say "r7qa is a raster, not an image".
-- They're random (`IdGen`, seeded from `/dev/urandom`). The store keeps every id it has issued, so an expired id is **never reused**: a stale id is an error, never a different image.
+- They're random (`IdGen`, seeded from `/dev/urandom`). The store keeps every id it has issued, so an expired id is **never reused**: a stale id is an error, never a different image. Since ids are never reused, a kind gets 5-char ids once half its 4-char space is issued (rasters: after ~15k).
 
 ### Model
 ```rust
@@ -65,7 +67,7 @@ pub enum Kind {
 
 ### Assets and the store
 ```rust
-pub enum Asset { Raster(Raster), Svg(SvgDoc) }
+pub enum Asset { Raster(Raster), Svg(Box<SvgDoc>) }
 pub struct Raster { size: [u32; 2], px: Arc<[u8]>, origin: Origin }   // premultiplied RGBA8; private fields
 pub struct SvgDoc { text: Arc<str>, size: Size, tree: usvg::Tree, origin: Origin }
 pub enum Origin { Capture { at_ms: u64 }, File { name: String } }
@@ -78,7 +80,10 @@ impl Store {
     pub fn add_asset(&mut self, a: Asset, group: Group) -> AssetId;
     pub fn add_image(&mut self, parent: Option<ImageId>, body: Body, made: Made, group: Group,
                      carried: &[(AssetId, Arc<Asset>)]) -> Result<ImageId, StoreError>; // checks every asset ref; re-adds carried assets that were evicted
-    pub fn image(&self, id: ImageId) -> Result<Arc<Image>, Lookup>;  // Lookup::{Unknown, Expired, WrongKind}; marks it used
+    pub fn image(&self, id: ImageId) -> Result<Arc<Image>, Lookup>;  // Lookup::{Unknown, Expired}; marks it used
+    pub fn lookup(&self, s: &str) -> Result<Arc<Image>, Lookup>;     // + Lookup::Id(IdError) for malformed/other-kind ids
+    pub fn get_asset(&self, id: AssetId) -> Result<Arc<Asset>, Lookup>; pub fn status(&self, id: ImageId) -> Result<(), Lookup>;
+    pub fn parent_note(&self, img: &Image) -> Option<&'static str>;  // "your screenshot" | "screenshot" | "expired"
     pub fn hold(&mut self, id: ImageId); pub fn release(&mut self, id: ImageId);
     pub fn sweep(&mut self, now: Instant) -> usize;                  // expiry + budget, returns bytes freed
     pub fn drop_group(&mut self, g: Group);                          // session end
@@ -86,26 +91,28 @@ impl Store {
 impl Assets for Store {}
 ```
 - `Group` is an opaque u64. The server uses one per session, so one server-wide store has one id space and one memory budget, and session end drops a group.
-- Assets are refcounted by the live images that use them. A raster is shared by every image built on it, and that sharing is the link between related images.
+- Assets are refcounted by the live images that use them. An asset no image uses (added, then the image failed) goes at the next `sweep`. A raster is shared by every image built on it, and that sharing is the link between related images.
 - **Expiry** (`Limits`, all tunable): an image that isn't held expires after `idle` (30 min) without use. When decoded asset bytes exceed `budget` (1 GiB server-wide), unheld images go first, least recently used first. Held images go only when held images alone exceed the budget, oldest first. A `parent` link doesn't keep the parent alive: listings say `parent q81c (expired)`.
 - **Holds**: the server holds every image referenced by a message event (human or agent) until its session ends. Drafts aren't in the store. A draft carries `Arc<Asset>`s for what it uses, so eviction can't break it, and `add_image(.., carried)` re-adds them on send.
+- Limits on pixels: rasters from files at most 16384 px per side and `MAX_PIXELS` (64 Mpx); renders over 64 Mpx are shrunk automatically.
 - Rasters are kept decoded. If memory becomes a problem, cold rasters can be QOI-compressed behind the same `Assets` trait without changing any API.
 
 ### Invariant: renderings never become editable
 - `render()` returns `Rendered`, which can be read as pixels, encoded as PNG or uploaded as a texture. There's no `Rendered → Raster`.
 - Only two functions create a `Raster`. `Raster::from_capture(w, h, rgba, at_ms)` is called from exactly one place: the server's capture of a live session frame (keep it that way in review). `asset::load_file(path)` is the other.
-- Every PNG that guilab writes from a rendering (the `image`/`screenshot`/`make` outputs, the viewer's File → Save) gets a `tEXt` chunk `guilab-render=<image id>`. `load_file` refuses such files with `LoadError::Rendering(id)`, and the CLI says "that file is a rendering of image k3f9; use --from k3f9". Tools outside guilab that strip the chunk (GIMP, ImageMagick) are the allowed way around it, as the spec says.
+- Every PNG that guilab writes from a rendering (the `image`/`screenshot`/`make` outputs, the viewer's File → Save) gets a `tEXt` chunk `guilab-render=<image id>`. `Rendered::png(Option<ImageId>)` is the only PNG encoder and always marks (`draft` without an id), so there's no unmarked path. `load_file` refuses such files (chunk found by a raw chunk scan) with `LoadError::Rendering(id)`, and the CLI says "that file is a rendering of image k3f9; use --from k3f9". Tools outside guilab that strip the chunk (GIMP, ImageMagick) are the allowed way around it, as the spec says.
 - The editor only opens `Body`s built from store images or drafts. Thumbnails and the main view are always `Rendered`/textures, never inputs.
 
 ### Geometry, text, display list
-- `text::Fonts` holds egui's default proportional fonts (Ubuntu-Light, then NotoEmoji and emoji-icon-font as fallbacks), from `epaint_default_fonts`. That's the same bytes the editor's egui uses. `Fonts::layout(text, size, width) -> TextLayout { lines: Vec<Line { text, y, w }>, size }` measures with skrifa (already in usvg's tree). **Core decides line breaks**, and each backend draws the given lines unwrapped, so wrapping is identical everywhere.
-- `geom` on `Element`, all in canvas px:
-  - `bounds(&Fonts)` (text includes its backing)
-  - `hit(p, tol, &Fonts)`: near the stroke; inside the backing for text; inside the rect for pictures
-  - `key_points() -> Vec<KeyPoint>`: bbox corners for box, ellipse, text, pen and pictures; ends for line and arrow
-  - `drag_key(k, to, Mods) -> Element`
+- `text::Fonts` holds egui's default proportional fonts (Ubuntu-Light, then NotoEmoji and emoji-icon-font as fallbacks; `text::FONT_DATA`), from `epaint_default_fonts`. That's the same bytes the editor's egui uses. `Fonts::layout(text, size, width) -> TextLayout { lines: Vec<Line { text, y, w, glyphs }>, font_size, ascent, line_height, size }` measures with skrifa advances (no kerning). **Core decides line breaks** (greedy at spaces, inside over-long words), and each backend draws the given lines unwrapped, so wrapping is identical everywhere. The CPU renderer fills the glyph outlines (`Fonts::outline`) at exactly the measured positions; egui may differ by kerning within a line.
+- `geom` on `Element`, all in canvas px. Most take the body's `scale` (stroke width and text padding depend on it) and `&Fonts`:
+  - `bounds(scale, fonts)`: strokes include half their width (arrows their head), text its backing
+  - `frame(scale, fonts)`: the rect key points sit on and `fit_to` maps (no stroke width; text = its backing)
+  - `hit(p, tol, scale, fonts)`: within `tol` + half the stroke of a stroke (boxes on their outline only); inside the backing for text; inside the rect for pictures
+  - `key_points(scale, fonts) -> Vec<KeyPoint { key: Key::{Corner(0..4 from top-left, clockwise), End(0|1)}, at }>`: frame corners for box, ellipse, text, pen and pictures; ends for line and arrow
+  - `drag_key(k, to, Mods { shift }, scale, fonts) -> Element`: the move tool's reshape rules (below)
   - `translated(d)`
-  - `fit_to(rect)`: pen points scaled into the rect; text scales `size` and `width`
+  - `fit_to(rect, scale, fonts)`: pen points scaled into the rect (each axis); text scales `size` and `width` by the height ratio, at the rect's top-left
 - `draw::display_list(&Body, &Fonts, marks: bool) -> Vec<(usize, Prim)>`, where the usize is the element index:
   ```rust
   pub enum Prim {
@@ -115,12 +122,13 @@ impl Assets for Store {}
       Fill { poly: Vec<Pt>, color: Color },                    // arrowheads
       Ellipse { rect: Rect, width: f32, color: Color },
       RoundRect { rect: Rect, radius: f32, fill: Color },      // text backing
-      Text { layout: Arc<TextLayout>, at: Pt, size: f32, color: Color },
+      Text { layout: Arc<TextLayout>, at: Pt, color: Color },   // size is layout.font_size
   }
   ```
+  Open strokes have round caps and joins, closed ones (boxes) mitred corners, and a one-point pen is a dot. Arrowhead: `draw::arrow_head` (16×scale, at most 0.6 of the length; the shaft stops halfway into the head).
   The text backing is translucent black, or translucent white behind very dark text (as today). The constants live in core because they're part of how the image looks, not UI theme.
-- `render::render(&Body, &dyn Assets, &Fonts, &RenderOpts) -> Result<Rendered, MissingAsset>`, where `RenderOpts { region: Region::{ImageCrop, Canvas, Rect(IRect)}, max: Option<[u32; 2]>, marks: bool }`. It uses tiny-skia: rasters via `draw_pixmap` (bicubic, with a box prefilter when shrinking more than 2x), SVG via resvg, text via usvg text nodes with a fontdb holding only the bundled fonts (deterministic), and marks via paths. `Rendered { px, size, shows: IRect, zoom: f32 }`. `shows`/`zoom` give the canvas mapping the CLI prints. `Rendered::png(Option<ImageId>)` adds the render mark.
-- `svg_pixmap(&SvgDoc, [w, h]) -> Rendered`: for editor textures. The SVG's own `<text>` uses the system fonts loaded once into a separate fontdb (mockups need real fonts).
+- `render::render(&Body, &dyn Assets, &Fonts, &RenderOpts) -> Result<Rendered, MissingAsset>`, where `RenderOpts { region: Region::{ImageCrop, Canvas, Rect(IRect)}, max: Option<[u32; 2]>, marks: bool }`. `RenderError::{MissingAsset, Outside}`; `Region::Rect` is clipped to the canvas (error if it misses it). It uses tiny-skia: rasters via `draw_pixmap` (bicubic, nearest for whole-pixel 1:1 placement so screenshots are exact, with a box prefilter when shrinking more than 2x), SVG via resvg, text as glyph outlines from the bundled fonts (deterministic), and marks via paths. `Rendered { pixmap (private), shows: IRect, zoom: f32 }` with `size()`, `premultiplied()`, `rgba()`, `pixel()`. `shows`/`zoom` give the canvas mapping the CLI prints. `Rendered::png(Option<ImageId>)` adds the render mark.
+- `svg_pixmap(&SvgDoc, [w, h]) -> Rendered`: for editor textures. The SVG's own `<text>` uses the system fonts (mockups need real fonts): usvg converts text when parsing, so `SvgDoc::parse` loads them once (process-wide `OnceLock`) for SVGs that contain `<text`.
 
 ### Edits (`guilab_image::edit`)
 ```rust
@@ -136,6 +144,7 @@ impl Doc {
     pub fn from_body(b: Body) -> Doc; pub fn body(&self) -> &Body;
     pub fn apply(&mut self, e: &Edit); pub fn revert(&mut self, e: &Edit);
     pub fn set_base(&mut self, el: Element);   // inserts the capture raster at index 0; not an edit (see the viewer flow)
+    // builders: add_edit(el) (on top), remove_edit(key), replace_edit(key, new), crop_edit(new); keys(), index_of(key), element(key), new_key()
 }
 ```
 Drags produce one `Replace` per drag, at release. The editor shows the in-progress state from its own interaction state, so history doesn't fill up with per-frame edits.
@@ -178,7 +187,9 @@ PATH     = token containing "/" or a ".ext"
 INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns added if missing)
 ```
 - Tokens are split on whitespace. Strings and INLINE are single tokens. Keywords and colors are case-insensitive. Also accepted as input: `->` or `→` for `to`, and `X,Y,W,H` for a rect (common slips, unambiguous).
-- Errors name the token and show the expected form, e.g. `element 2: "600,380,100" isn't a size; expected WxH like 100x60 (box X,Y WxH)`.
+- Errors quote the line (shortened to 60 chars), name the token and show the expected form, e.g. `in 'red box 600,380 100,60': "100,60" isn't a size; expected WxH like 100x60 (box X,Y WxH)`. Quoting beats `element N` because numbered lines (`5 red box …`) made "element N" ambiguous.
+- A pen is printed in rect form only in listings without `--points`; that line copied back as a numbered replacement leaves the pen unchanged. `print → parse → print` is identical with `--points` (tested over every kind).
+- In code (`format`): `listing`/`store_listing`/`header`/`element_line` print; `parse_lines(text) -> Vec<Line { num, spec: Spec, src }>` parses (one string may hold several lines; strings and inline SVG may span lines); `parse_crop`, `parse_color`. `Spec` keeps sources (`Source::{Id, Path, Inline}`) and defaults unresolved; `make` resolves them.
 
 ### `image make` semantics
 1. Start from a copy of `--from` (canvas, scale, background, crop, elements; parent = from). Otherwise start empty with scale 1.
@@ -186,7 +197,9 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 3. `--drop N,N` removes elements. Numbers always refer to the `--from` listing.
 4. Unnumbered lines are appended in order. `-` inserts lines read from stdin at that position, skipping blank lines. There are no comment lines, since a line may start with a `#rrggbb` color. The trailing `(...)` is stripped only outside quotes and inline SVG.
 5. `--crop 'X,Y WxH'|none` and `--color C|none` replace those fields. `--canvas WxH` sets the canvas (default without `--from`: the bounding box of the elements from 0,0).
-6. Files are read once, here. They become assets, and the listing shows ids with `(from NAME)`. A file that is a guilab rendering is refused.
+6. Files are read once, here. They become assets, and the listing shows ids with `(from NAME)`. A file that is a guilab rendering is refused. Inline SVG becomes an asset with no note.
+
+In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
 - `Theme` (`Arc`, stored in egui ctx data: `Theme::get(ctx)`, `Theme::install(ctx, Mode)` also sets egui `Visuals`/`Style` from the tokens):
@@ -386,7 +399,7 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 
 | # | phase | needs | touches |
 |---|---|---|---|
-| 1 | **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
+| 1 | **(done)** **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
 | 2 | **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
 | 3 | **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in agent/screenshot/made events, viewer feed shows agent images (rendered via core into today's `Chat`), skill doc "Images", integration tests `tests/it/images.rs`. Human messages stay on the old path until phase 6 (the old viewer bakes marks, so they must not enter the store). | 1, agent-status landed | proto, server, guilab, viewer (feed only), skill |
 | 4 | **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
@@ -395,8 +408,7 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 | 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
 
 **Parallelism** (at most 3 worktrees; agent-side and viewer-polish hold 2 right now):
-- Now: **P1** (new crate, no conflicts).
-- Once viewer-polish lands: **P2** alongside P1.
+- Once viewer-polish lands: **P2**.
 - Once P1, P2 and agent-status have landed: **P3 ∥ P4 ∥ P5** (3 worktrees). They don't overlap: P3 is server/proto/CLI plus the viewer feed loader, and P4/P5 are new crates.
 - **P6** alone (it touches everything). **P7** alone (viewer UI). `ui-toolkit-pass` comes after P7 or alongside P4/P5 if it stays out of `viewer/src/ui*`.
 

@@ -1,0 +1,17 @@
+[package]
+name = "guilab-image"
+description = "Images for guilab: model, store, text format, geometry, display list and CPU renderer. No egui."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+tiny-skia = "0.12"
+resvg = "0.48"
+skrifa = "0.44"
+png.workspace = true
+zune-jpeg = "0.5"
+epaint_default_fonts = "0.35"

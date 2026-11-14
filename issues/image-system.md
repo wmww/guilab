@@ -1,6 +1,6 @@
 # Image system
 
-Queued; not started. The UI side is in `chat-image-flow.md`. This file is the user's spec. **The design, phases and parallel plan are in `notes/image-system-design.md`**, and the tested agent doc text is in `notes/image-format-doc.md`. When built, move the parts that end up true into notes.
+Phase 1 (core crate `crates/image`) done; phases 2–7 queued. The UI side is in `chat-image-flow.md`. This file is the user's spec. **The design, phases and parallel plan are in `notes/image-system-design.md`**, and the tested agent doc text is in `notes/image-format-doc.md`. When built, move the parts that end up true into notes.
 
 ## Model
 - **Raster**: immutable pixels with a random id. Made by screenshots (human or agent) and by inserted files. Shared by every image that uses it; that sharing is the link between related images.
