@@ -2,7 +2,7 @@
 //! attached to command replies, `poll --follow` lines and `log`. Human input runs are
 //! summarized ("clicked at 640,410; typed "hello"; pressed Return").
 
-use crate::events::{Annotation, Delivery, Event, EventData, Tier, Unread};
+use crate::events::{Delivery, Event, EventData, ImageRef, Tier, Unread};
 
 /// Formats times in a fixed UTC offset (the CLI passes the local one).
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,18 +81,10 @@ fn at(x: i32, y: i32, window: Option<u32>) -> String {
     }
 }
 
-fn annotation(a: &Annotation) -> String {
-    let mut s = match &a.color {
-        Some(c) => format!("{c} text annotation"),
-        None => "annotation".to_string(),
-    };
-    if let Some(i) = a.image {
-        s += &format!(" on image {}", i + 1);
-    }
-    if let (Some(x), Some(y)) = (a.x, a.y) {
-        s += &format!(" at pixel {x},{y}");
-    }
-    format!("{s}: {}", quote(&a.text))
+/// `[image w8dn: 6 elements]`, for one-line forms.
+fn image_tag(i: &ImageRef) -> String {
+    let n = i.elements();
+    format!("[image {}: {n} element{}]", i.id, if n == 1 { "" } else { "s" })
 }
 
 /// A phrase of a human input run, before formatting. Moves and scrolls stay structured so
@@ -336,18 +328,18 @@ impl Fmt {
             EventData::Done => "agent is done, waiting for the human".into(),
             EventData::AgentMessage { text, images } => {
                 let mut s = format!("agent said: {}", quote(text));
-                for (i, p) in images.iter().enumerate() {
-                    s += &format!(" [image {}: {}]", i + 1, p.display());
+                for i in images {
+                    s += &format!(" [image {}]", i.id);
                 }
                 s
             }
-            EventData::Message { text, images, annotations } => {
+            EventData::Message { text, images, screen } => {
                 let mut s = format!("human message: {}", quote(text));
-                for (i, p) in images.iter().enumerate() {
-                    s += &format!(" [image {}: {}]", i + 1, p.display());
+                for i in images {
+                    s += &format!(" {}", image_tag(i));
                 }
-                for a in annotations {
-                    s += &format!(" [{}]", annotation(a));
+                if let Some(id) = screen {
+                    s += &format!(" [their screen: image {id}]");
                 }
                 s
             }
@@ -431,7 +423,8 @@ impl Fmt {
             }
             EventData::Share { on: true } => "the human shared the session: they can use it while you hold the lock".into(),
             EventData::Share { on: false } => "the human stopped sharing the session".into(),
-            EventData::Screenshot { path } => format!("screenshot {}", path.display()),
+            EventData::Screenshot { image, path } => format!("screenshot: image {image}, {}", path.display()),
+            EventData::ImageMade { image } => format!("agent made image {image}"),
             EventData::Expiring { secs } => {
                 format!("the session (and its apps) ends in {secs}s from inactivity (a waiting poll doesn't count); run any guilab command (e.g. guilab ps) to keep it")
             }
@@ -470,14 +463,17 @@ impl Fmt {
     /// A wake event in full, on several lines if it has attachments.
     fn wake_lines(&self, e: &Event) -> Vec<String> {
         match &e.data {
-            EventData::Message { text, images, annotations } => {
+            EventData::Message { text, images, screen } => {
                 let mut v = vec![format!("{} human message: {}", self.clock(e.t), quote(text))];
-                for (i, p) in images.iter().enumerate() {
-                    v.push(format!("  image {}: {}", i + 1, p.display()));
+                for i in images {
+                    v.extend(i.listing.lines().map(|l| format!("  {l}")));
+                    v.push(match i.marks {
+                        Some(_) => format!("  (see what the marks point at: {})", i.fetch()),
+                        None => format!("  (see it: {})", i.fetch()),
+                    });
                 }
-                v.extend(annotations.iter().map(|a| format!("  {}", annotation(a))));
-                if annotations.iter().any(|a| a.color.is_some()) {
-                    v.push("  (text annotations aren't drawn in the image; the pixel is the text's top-left, where the human typed it, usually next to the mark it's about)".into());
+                if let Some(id) = screen {
+                    v.push(format!("  (their screen as they sent it: image {id}; see it: guilab image {id})"));
                 }
                 v.push("  (you're marked working on it; reply when finished with: guilab done \"...\")".into());
                 v
@@ -617,14 +613,13 @@ mod tests {
     #[test]
     fn delivery_text() {
         let f = Fmt { tz: 3600 };
-        let mut msg = ev(
-            7_200_000,
-            EventData::Message {
-                text: "fix this".into(),
-                images: vec!["/s/msg-1.png".into()],
-                annotations: vec![Annotation { text: "here".into(), image: Some(0), x: Some(5), y: Some(6), color: None }],
-            },
-        );
+        let img = ImageRef {
+            id: "w8dn".into(),
+            size: [800, 600],
+            listing: "image w8dn 800x600, parent h2kc (screenshot)\n  1 raster r7qa 0,0 800x600 (screenshot 14:04:50)\n  2 red box 10,10 50x40".into(),
+            marks: Some([0, 0, 82, 72]),
+        };
+        let mut msg = ev(7_200_000, EventData::Message { text: "fix this".into(), images: vec![img], screen: None });
         msg.tier = Some(Tier::Wake);
         let d = Delivery {
             since: Some(3_600_000),
@@ -636,14 +631,16 @@ mod tests {
             [
                 "02:01:40 window 4 title is now \"Hi\"",
                 "03:00:00 human message: \"fix this\"",
-                "  image 1: /s/msg-1.png",
-                "  annotation on image 1 at pixel 5,6: \"here\"",
+                "  image w8dn 800x600, parent h2kc (screenshot)",
+                "    1 raster r7qa 0,0 800x600 (screenshot 14:04:50)",
+                "    2 red box 10,10 50x40",
+                "  (see what the marks point at: guilab image w8dn --crop '0,0 82x72')",
                 "  (you're marked working on it; reply when finished with: guilab done \"...\")",
             ]
         );
         assert_eq!(
             f.follow_lines(&d),
-            ["03:00:00 human message: \"fix this\" [image 1: /s/msg-1.png] [annotation on image 1 at pixel 5,6: \"here\"] (meanwhile: 02:01:40 window 4 title is now \"Hi\")"]
+            ["03:00:00 human message: \"fix this\" [image w8dn: 2 elements] (meanwhile: 02:01:40 window 4 title is now \"Hi\")"]
         );
     }
 }

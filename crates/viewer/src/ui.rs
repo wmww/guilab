@@ -126,7 +126,8 @@ pub enum Action {
     Input { session: String, input: Input },
     Revoke { session: String },
     Share { session: String, on: bool },
-    /// A drawing started: answer with [`ViewerUi::set_screenshot`] (whole output, no cursor).
+    /// A drawing started: answer with [`ViewerUi::set_screenshot`] (whole output, no cursor;
+    /// the tag names the screenshot, e.g. its image id, and comes back in `Annotated::tag`).
     Freeze { session: String },
     /// The human sent a message (text, composited drawings with their text annotations).
     Message { session: String, text: String, images: Vec<Annotated> },
@@ -351,9 +352,9 @@ impl ViewerUi {
     }
 
     /// The frozen screenshot for a drawing that asked for one ([`Action::Freeze`]).
-    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage) {
+    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage, tag: String) {
         if let Some(p) = self.sessions.get_mut(name) {
-            p.sketch.set_screenshot(image);
+            p.sketch.set_screenshot(image, tag);
         }
     }
 

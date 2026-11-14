@@ -149,15 +149,15 @@ impl Session {
         if animating && since_input >= ANIM_REACT && drawn { Settle::Animating } else { Settle::Busy }
     }
 
-    /// Writes the last rendered frame as an RGB PNG, with the cursor drawn in if `cursor`.
-    /// Returns its pixel size.
-    pub fn write_png(&mut self, path: &Path, cursor: bool) -> anyhow::Result<(u32, u32)> {
+    /// The last rendered frame as opaque RGBA8 (clients may leave alpha 0, e.g. GL areas),
+    /// with the cursor drawn in if `cursor`: what screenshots show.
+    pub fn capture(&mut self, cursor: bool) -> anyhow::Result<(u32, u32, Vec<u8>)> {
         let (w, h, mut rgba) = self.read_rgba()?;
+        rgba.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
         if cursor {
             self.draw_cursor(w, h, &mut rgba);
         }
-        write_rgba_png(path, w, h, &rgba)?;
-        Ok((w, h))
+        Ok((w, h, rgba))
     }
 
     /// The last rendered frame (whole output, no cursor) as tightly packed RGBA8.

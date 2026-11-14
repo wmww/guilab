@@ -39,23 +39,34 @@ pub struct Event {
     pub by: Option<String>,
 }
 
-/// A text annotation on a human message: text, optionally placed on one of its images.
-/// The viewer sends text the human typed onto a drawing this way, and doesn't draw it into
-/// the image: agents read it more reliably as text, and baked-in text hides the UI under it.
+/// An image in a message or event: its id plus what the agent reads without fetching it.
+/// The listing is a snapshot (images never change, but a parent may expire later).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Annotation {
-    pub text: String,
-    /// Index into the message's `images` (0-based).
+pub struct ImageRef {
+    pub id: String,
+    /// Canvas size.
+    pub size: [u32; 2],
+    /// The element listing (`guilab image ID --list`).
+    pub listing: String,
+    /// Canvas rect `[x, y, w, h]` around every element but the base screenshot, plus a
+    /// margin, clamped to the canvas: where to look. None if there are no such elements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<usize>,
-    /// Position in that image's pixels (= output pixels).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub y: Option<i32>,
-    /// Color name of the text as drawn (e.g. "red"), to match it with same-colored marks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
+    pub marks: Option<[i32; 4]>,
+}
+
+impl ImageRef {
+    /// The command that shows the image, cropped to its marks if it has any.
+    pub fn fetch(&self) -> String {
+        match self.marks {
+            Some([x, y, w, h]) => format!("guilab image {} --crop '{x},{y} {w}x{h}'", self.id),
+            None => format!("guilab image {}", self.id),
+        }
+    }
+
+    /// Number of elements in the listing.
+    pub fn elements(&self) -> usize {
+        self.listing.lines().count().saturating_sub(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,19 +78,20 @@ pub enum EventData {
     AgentMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        images: Vec<PathBuf>,
+        images: Vec<ImageRef>,
     },
     /// The agent is working (`guilab work`, or a poll handed it a human message).
     Work { status: String },
     /// The agent finished and waits for the human (`guilab done`).
     Done,
-    /// Human -> agent message. Images are files in the session dir.
+    /// Human -> agent message. `screen`: what the session showed when it was sent, for
+    /// messages without images (they refer to what the human looks at).
     Message {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        images: Vec<PathBuf>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        annotations: Vec<Annotation>,
+        images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen: Option<String>,
     },
     /// Human pointer motion, coalesced: points `[x, y, ms after t]` in output pixels.
     Motion { path: Vec<[i32; 3]> },
@@ -166,7 +178,10 @@ pub enum EventData {
     Revoke,
     /// The human may use the session while it's locked (viewer's Share button).
     Share { on: bool },
-    Screenshot { path: PathBuf },
+    /// An agent screenshot: the image and the PNG written for it.
+    Screenshot { image: String, path: PathBuf },
+    /// `guilab image make` made an image.
+    ImageMade { image: String },
     /// The session ends from inactivity in `secs` unless a command arrives.
     Expiring { secs: u64 },
 }
@@ -174,7 +189,8 @@ pub enum EventData {
 /// Every kind name, as used by `--wake`, `--passive` and `log --kind`.
 pub const KINDS: &[&str] = &[
     "command", "agent_message", "work", "done", "message", "motion", "button", "key", "scroll", "touch", "gesture", "app_start", "app_exit",
-    "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "share", "screenshot", "expiring",
+    "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "share", "screenshot", "image_made",
+    "expiring",
 ];
 
 /// Group names, each standing for several kinds.
@@ -182,7 +198,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ("input", &["motion", "button", "key", "scroll", "touch", "gesture"]),
     ("window", &["window_map", "window_unmap", "title"]),
     ("app", &["app_start", "app_exit"]),
-    ("agent", &["command", "agent_message", "work", "done", "screenshot"]),
+    ("agent", &["command", "agent_message", "work", "done", "screenshot", "image_made"]),
     ("all", KINDS),
 ];
 
@@ -211,6 +227,7 @@ impl EventData {
             EventData::Revoke => "revoke",
             EventData::Share { .. } => "share",
             EventData::Screenshot { .. } => "screenshot",
+            EventData::ImageMade { .. } => "image_made",
             EventData::Expiring { .. } => "expiring",
         }
     }
@@ -244,7 +261,8 @@ pub fn default_tier(d: &EventData) -> Tier {
         | EventData::AgentMessage { .. }
         | EventData::Work { .. }
         | EventData::Done
-        | EventData::Screenshot { .. } => Tier::Log,
+        | EventData::Screenshot { .. }
+        | EventData::ImageMade { .. } => Tier::Log,
         _ => Tier::Passive,
     }
 }
@@ -350,7 +368,7 @@ mod tests {
 
     #[test]
     fn tiers() {
-        let msg = EventData::Message { text: "hi".into(), images: vec![], annotations: vec![] };
+        let msg = EventData::Message { text: "hi".into(), images: vec![], screen: None };
         let key = EventData::Key { key: "a".into(), pressed: true, text: Some("a".into()) };
         assert_eq!(default_tier(&msg), Tier::Wake);
         assert_eq!(default_tier(&key), Tier::Passive);

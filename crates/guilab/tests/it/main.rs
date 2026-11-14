@@ -5,6 +5,7 @@
 mod apps;
 mod cleanup;
 mod events;
+mod images;
 mod input;
 mod sessions;
 mod viewer;

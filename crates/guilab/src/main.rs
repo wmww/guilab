@@ -14,7 +14,7 @@ const AFTER_HELP: &str = "\
 Quick start:
   guilab new                       start a session (named after the git worktree; -s 1280x720)
   guilab run -- gtk4-demo          start an app in it (its log: guilab ps)
-  guilab screenshot                save a PNG (waits for apps to finish drawing), prints its path
+  guilab screenshot                capture an image (waits for apps to finish drawing), prints its PNG path
   guilab tree                      windows and popups: ids, pixel geometry, app ids, titles
   guilab work \"testing the menu\"   tell the human what you're doing (needed for lock/input)
   guilab lock                      take the session's lock; prints a TOKEN
@@ -110,7 +110,8 @@ enum Cmd {
     Ps,
     /// Show windows, popups and subsurfaces (ids, app_id, title, pixel geometry).
     Tree,
-    /// Save a PNG of the output. Waits for apps to finish drawing unless --no-settle.
+    /// Capture the output as a new image and save it as PNG; prints the path and the image
+    /// id. Waits for apps to finish drawing unless --no-settle.
     Screenshot {
         /// Where to save the PNG (default: the session dir, deleted when the session ends).
         #[arg(short, long)]
@@ -121,6 +122,39 @@ enum Cmd {
         /// Draw the mouse cursor in (the app's own cursor, at the pointer).
         #[arg(long)]
         cursor: bool,
+        /// Crop the image to this part of the screen ('X,Y WxH'; the image keeps the rest).
+        #[arg(long, value_name = "X,Y WxH")]
+        crop: Option<String>,
+        /// Shrink the PNG to fit WxH.
+        #[arg(long, value_name = "WxH", value_parser = parse_size)]
+        max: Option<[u32; 2]>,
+    },
+    /// Render an image to PNG (prints the path), or list its elements; `image make` makes one.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true, after_help = IMAGE_HELP)]
+    Image {
+        #[command(subcommand)]
+        make: Option<ImageCmd>,
+        /// Image id, e.g. k3f9.
+        #[arg(required = true)]
+        id: Option<String>,
+        /// Where to save the PNG (default: the session dir).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Render this part of the canvas ('X,Y WxH') instead of the image's crop; `none` = all.
+        #[arg(long, value_name = "X,Y WxH|none")]
+        crop: Option<String>,
+        /// Shrink the PNG to fit WxH.
+        #[arg(long, value_name = "WxH", value_parser = parse_size)]
+        max: Option<[u32; 2]>,
+        /// Pictures only, without marks.
+        #[arg(long)]
+        no_marks: bool,
+        /// Print the element list instead of rendering.
+        #[arg(long)]
+        list: bool,
+        /// With --list: print pen points instead of their bounding rectangles.
+        #[arg(long)]
+        points: bool,
     },
     /// Show or change the output size (pixels) and scale.
     Output {
@@ -182,18 +216,18 @@ enum Cmd {
         /// Also post this message to the human's chat.
         #[arg(short, long, value_name = "MSG")]
         message: Option<String>,
-        /// Attach an image to the message (repeatable).
-        #[arg(long, value_name = "PATH")]
-        image: Vec<PathBuf>,
+        /// Attach an image (an image id or a PNG/JPEG/SVG file; repeatable).
+        #[arg(long, value_name = "ID|PATH")]
+        image: Vec<String>,
     },
     /// You're finished: post MSG (what you did, or what you need) to the human's chat,
     /// release the lock, and show them you're waiting. Then wait with `guilab poll`.
     Done {
         /// Message for the human.
         message: Option<String>,
-        /// Attach an image (repeatable).
-        #[arg(long, value_name = "PATH")]
-        image: Vec<PathBuf>,
+        /// Attach an image (an image id or a PNG/JPEG/SVG file; repeatable).
+        #[arg(long, value_name = "ID|PATH")]
+        image: Vec<String>,
     },
     /// Replaced by `work -m` and `done`.
     #[command(hide = true)]
@@ -240,14 +274,11 @@ your previous command. Each git worktree has its own \"last seen\" position per 
 
 #[derive(Subcommand)]
 enum DebugOp {
-    /// Send a message as the human.
+    /// Send a message as the human (draw with `guilab image make`, attach by id).
     Message {
         text: String,
-        #[arg(long, value_name = "PATH")]
-        image: Vec<PathBuf>,
-        /// A text annotation: "TEXT", "X,Y:TEXT" or "IMAGE@X,Y:TEXT" (IMAGE counts from 1).
-        #[arg(long, value_name = "NOTE")]
-        note: Vec<String>,
+        #[arg(long, value_name = "ID|PATH")]
+        image: Vec<String>,
     },
     /// Send input as the human (same actions as `guilab input`).
     Input {
@@ -260,6 +291,37 @@ enum DebugOp {
     Share { on: String },
 }
 
+const IMAGE_HELP: &str = "\
+Coordinates are canvas pixels (= screenshot pixels), even in cropped or shrunk renders.
+Element syntax, also for `image make`: see the guilab skill doc (Images).";
+
+#[derive(Subcommand)]
+enum ImageCmd {
+    /// Make a new image: from a copy of --from, or from scratch. Prints its listing and a
+    /// preview PNG. Send it with: guilab done "..." --image ID
+    Make {
+        /// Start from a copy of this image (canvas, scale, crop, elements).
+        #[arg(long, value_name = "ID")]
+        from: Option<String>,
+        /// Canvas size (default with --from: its canvas; else just big enough).
+        #[arg(long, value_name = "WxH", value_parser = parse_size)]
+        canvas: Option<[u32; 2]>,
+        /// Background color (default: transparent), or none.
+        #[arg(long, value_name = "COLOR")]
+        color: Option<String>,
+        /// The new image's crop ('X,Y WxH'), or none.
+        #[arg(long, value_name = "X,Y WxH|none")]
+        crop: Option<String>,
+        /// Remove these elements of --from (numbers from its listing).
+        #[arg(long, value_name = "N,N", value_delimiter = ',')]
+        drop: Vec<u32>,
+        /// Element lines, one per argument; a number first replaces that element of --from;
+        /// `-` reads more lines from stdin.
+        #[arg(value_name = "ELEMENT")]
+        elements: Vec<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum ClipOp {
     /// Print the clipboard's text.
@@ -268,21 +330,11 @@ enum ClipOp {
     Set { text: Option<String> },
 }
 
-fn parse_note(s: &str) -> Result<guilab_proto::Annotation, String> {
-    let mut a = guilab_proto::Annotation { text: s.to_string(), image: None, x: None, y: None, color: None };
-    let Some((place, text)) = s.split_once(':') else { return Ok(a) };
-    let (img, xy) = match place.split_once('@') {
-        Some((i, xy)) => (Some(i), xy),
-        None => (None, place),
-    };
-    let Some((x, y)) = xy.split_once(',') else { return Ok(a) };
-    let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse()) else { return Ok(a) };
-    if let Some(i) = img {
-        let i: usize = i.parse().map_err(|_| format!("bad image number in note {s:?}"))?;
-        a.image = Some(i.checked_sub(1).ok_or("images count from 1")?);
-    }
-    (a.text, a.x, a.y) = (text.to_string(), Some(x), Some(y));
-    Ok(a)
+/// `--image ID|PATH`: a file path (anything with a `/` or `.`, or an existing file) is sent
+/// absolute; anything else is an image id.
+fn image_arg(s: &str) -> String {
+    let p = std::path::Path::new(s);
+    if s.contains(['/', '.']) || p.exists() { abs(p.to_path_buf()).display().to_string() } else { s.to_string() }
 }
 
 /// `--since`: "90s"/"5m"/"2h" ago, or a local clock time today ("14:05", "14:05:30"). Unix ms.
@@ -355,11 +407,27 @@ fn real_main(cli: Cli) -> Result<(), String> {
         Cmd::Kill { id } => Command::Kill { id },
         Cmd::Ps => Command::Ps,
         Cmd::Tree => Command::Tree,
-        Cmd::Screenshot { output, no_settle, cursor } => Command::Screenshot {
-            path: output.map(|p| std::path::absolute(&p).unwrap_or(p)),
-            settle: !no_settle,
-            cursor,
-        },
+        Cmd::Screenshot { output, no_settle, cursor, crop, max } => {
+            Command::Screenshot { path: output.map(abs), settle: !no_settle, cursor, crop, max }
+        }
+        Cmd::Image { make: Some(ImageCmd::Make { from, canvas, color, crop, drop, elements }), .. } => {
+            let mut stdin = None;
+            let mut lines = Vec::new();
+            for e in elements {
+                if e == "-" {
+                    if stdin.is_none() {
+                        stdin = Some(std::io::read_to_string(std::io::stdin()).map_err(|e| format!("reading stdin: {e}"))?);
+                    }
+                    lines.push(stdin.clone().unwrap_or_default());
+                } else {
+                    lines.push(e);
+                }
+            }
+            Command::ImageMake { from, canvas, color, crop, drop, elements: lines, cwd: std::env::current_dir().map_err(|e| e.to_string())? }
+        }
+        Cmd::Image { make: None, id, output, crop, max, no_marks, list, points } => {
+            Command::Image { id: id.unwrap_or_default(), path: output.map(abs), crop, max, marks: !no_marks, list, points }
+        }
         Cmd::Output { size, scale } => Command::Output { size, scale },
         Cmd::Lock { force } => Command::Lock { force },
         Cmd::Unlock { force } => Command::Unlock { force },
@@ -369,8 +437,8 @@ fn real_main(cli: Cli) -> Result<(), String> {
             tiers.check()?;
             Command::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }
         }
-        Cmd::Work { status, message, image } => Command::Work { status, message, images: image.into_iter().map(abs).collect() },
-        Cmd::Done { message, image } => Command::Done { message, images: image.into_iter().map(abs).collect() },
+        Cmd::Work { status, message, image } => Command::Work { status, message, images: image.iter().map(|i| image_arg(i)).collect() },
+        Cmd::Done { message, image } => Command::Done { message, images: image.iter().map(|i| image_arg(i)).collect() },
         Cmd::Say { .. } => {
             return Err("`guilab say` is gone. While you keep working: guilab work \"what you're doing\" -m \"MESSAGE\". \
                         When you're finished: guilab done \"MESSAGE\" (then wait with guilab poll)"
@@ -382,11 +450,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
         }
         Cmd::Debug { op } => Command::Human {
             op: match op {
-                DebugOp::Message { text, image, note } => guilab_proto::HumanOp::Message {
-                    text,
-                    images: image.into_iter().map(abs).collect(),
-                    annotations: note.iter().map(|n| parse_note(n)).collect::<Result<_, _>>()?,
-                },
+                DebugOp::Message { text, image } => guilab_proto::HumanOp::Message { text, images: image.iter().map(|i| image_arg(i)).collect() },
                 DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
                 DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
                 DebugOp::Share { on } => guilab_proto::HumanOp::Share { on: matches!(on.as_str(), "on" | "1" | "true" | "yes") },

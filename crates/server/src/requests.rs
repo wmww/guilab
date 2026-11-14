@@ -7,11 +7,13 @@ use std::{
 };
 
 use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle, XState};
+use guilab_image::{Made, MakeReq, Region, RenderOpts};
 use guilab_proto::{
-    Command, Delivery, DoneInfo, EventData, HumanOp, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo, log::ANON,
+    Command, Delivery, DoneInfo, EventData, HumanOp, ImageInfo, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo,
+    log::ANON,
 };
 
-use crate::{ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait, Slot, Working, send};
+use crate::{ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait, Slot, Working, images::Images, send};
 
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -263,21 +265,51 @@ impl Server {
                 }
                 Response::ok(s.output_info())
             }
-            Command::Screenshot { path, settle, cursor } => {
-                let path = match path {
-                    Some(p) => p,
-                    None => {
-                        let n = (1..).find(|i| !s.dir.join(format!("shot-{i}.png")).exists()).unwrap();
-                        s.dir.join(format!("shot-{n}.png"))
-                    }
+            Command::Screenshot { path, settle, cursor, crop, max } => {
+                let crop = match crop.as_deref().map(guilab_image::format::parse_crop).transpose() {
+                    Ok(c) => c.flatten(),
+                    Err(e) => return Some(Response::err(format!("--crop: {e}"))),
                 };
                 let stream = match clone() {
                     Ok(s) => s,
                     Err(e) => return Some(*e),
                 };
                 // Answered after the next frame (see check_waiters).
-                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, cursor, start: Instant::now() });
+                let start = Instant::now();
+                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, cursor, crop, max, start });
                 return None;
+            }
+            Command::Image { id, path, crop, max, marks, list, points } => {
+                let img = match self.images.get(&id) {
+                    Ok(i) => i,
+                    Err(e) => return Some(Response::err(e)),
+                };
+                if list {
+                    return Some(Response::ok(ImageInfo { id, listing: Some(self.images.listing(&img, points)), render: None }));
+                }
+                let region = match crop.as_deref().map(guilab_image::format::parse_crop).transpose() {
+                    Ok(None) => Region::ImageCrop,
+                    Ok(Some(None)) => Region::Canvas,
+                    Ok(Some(Some(r))) => Region::Rect(r),
+                    Err(e) => return Some(Response::err(format!("--crop: {e}"))),
+                };
+                match self.images.render_file(&img, &RenderOpts { region, max, marks }, &s.dir, path.as_deref()) {
+                    Ok(r) => Response::ok(ImageInfo { id, listing: None, render: Some(r) }),
+                    Err(e) => Response::err(e),
+                }
+            }
+            Command::ImageMake { from, canvas, color, crop, drop, elements, cwd } => {
+                let req = MakeReq { from, canvas, color, crop, drop, elements, cwd };
+                let made = self.images.make(&req, slot.group).and_then(|id| self.images.get(id.as_str()));
+                let img = match made {
+                    Ok(i) => i,
+                    Err(e) => return Some(Response::err(e)),
+                };
+                s.log.push(EventData::ImageMade { image: img.id.to_string() }, Some(key));
+                match self.images.render_file(&img, &RenderOpts::default(), &s.dir, None) {
+                    Ok(r) => Response::ok(ImageInfo { id: img.id.to_string(), listing: Some(self.images.listing(&img, false)), render: Some(r) }),
+                    Err(e) => Response::err(e),
+                }
             }
             Command::Poll { timeout_ms, follow, tiers } => {
                 if let Err(e) = tiers.check() {
@@ -325,9 +357,10 @@ impl Server {
                 if status.is_empty() {
                     return Some(Response::err("say what you're doing: guilab work \"running the tests\""));
                 }
-                if let Err(e) = agent_message(s, key, message, &images) {
+                if let Err(e) = agent_message(&mut self.images, slot, key, message, &images) {
                     return Some(Response::err(e));
                 }
+                let s = &mut slot.session;
                 s.log.push(EventData::Work { status: status.clone() }, Some(key));
                 match &mut slot.working {
                     Some(w) => w.status = status,
@@ -354,9 +387,10 @@ impl Server {
                 } else {
                     false
                 };
-                if let Err(e) = agent_message(s, key, message, &images) {
+                if let Err(e) = agent_message(&mut self.images, slot, key, message, &images) {
                     return Some(Response::err(e));
                 }
+                let s = &mut slot.session;
                 if unlocked {
                     s.log.push(EventData::Unlock, Some(key));
                     s.release_all(InputSource::Agent);
@@ -369,8 +403,8 @@ impl Server {
                 Response::ok(DoneInfo { unlocked })
             }
             Command::Human { op } => match op {
-                HumanOp::Message { text, images, annotations } => {
-                    match human_message(s, text, images.into_iter().map(MsgImage::File).collect(), annotations) {
+                HumanOp::Message { text, images } => {
+                    match human_message(&mut self.images, slot, text, images.into_iter().map(MsgImage::Spec).collect()) {
                         Ok(()) => Response::ok(()),
                         Err(e) => Response::err(e),
                     }
@@ -567,14 +601,22 @@ impl Server {
                 continue;
             };
             let w = self.waiters.remove(i);
-            let resp = match s.write_png(&w.path, w.cursor) {
-                Ok((width, height)) => {
-                    s.log.push(EventData::Screenshot { path: w.path.clone() }, Some(&w.key));
+            let shot = self.images.capture(s, slot.group, w.cursor, true, w.crop).and_then(|id| {
+                let img = self.images.get(id.as_str())?;
+                let r = self.images.render_file(&img, &RenderOpts { max: w.max, ..Default::default() }, &s.dir, w.path.as_deref())?;
+                Ok((img, r))
+            });
+            let resp = match shot {
+                Ok((img, r)) => {
+                    s.log.push(EventData::Screenshot { image: img.id.to_string(), path: r.path.clone() }, Some(&w.key));
                     let animating = state == Settle::Animating;
-                    let cropped = cropped_windows(&s.tree(), width as i32, height as i32);
-                    Response::ok(ShotInfo { path: w.path, width, height, settled, animating, cropped })
+                    let [cw, ch] = img.body.canvas;
+                    let cropped = cropped_windows(&s.tree(), cw as i32, ch as i32);
+                    let header = self.images.header(&img);
+                    let (path, width, height, shows, zoom) = (r.path, r.width, r.height, r.shows, r.zoom);
+                    Response::ok(ShotInfo { image: img.id.to_string(), header, path, width, height, shows, zoom, settled, animating, cropped })
                 }
-                Err(e) => Response::err(format!("screenshot: {e:#}")),
+                Err(e) => Response::err(e),
             };
             let resp = self.attach(&w.session, Some(&w.key), resp);
             send(&w.stream, &resp);
@@ -687,35 +729,34 @@ fn peer_gone(stream: &mut UnixStream) -> bool {
 
 /// An image attached to a human message.
 pub(crate) enum MsgImage {
-    File(std::path::PathBuf),
-    /// Opaque RGBA8 pixels (from the viewer).
-    Rgba(u32, u32, Vec<u8>),
+    /// An image id, or an absolute path of a file that becomes an image.
+    Spec(String),
+    /// A drawing from the current viewer: the frozen screenshot's image id and the marks.
+    Drawing { base: String, marks: Vec<guilab_image::Element> },
 }
 
-/// Logs a human message (wakes polls). Images are stored in the session dir as
-/// `msg-SEQ-N.EXT` (files copied, pixels written as PNG).
-pub(crate) fn human_message(s: &mut Session, text: String, images: Vec<MsgImage>, annotations: Vec<guilab_proto::Annotation>) -> Result<(), String> {
-    if let Some(a) = annotations.iter().find(|a| a.image.is_some_and(|i| i >= images.len())) {
-        return Err(format!("annotation {:?} is on a missing image", a.text));
-    }
-    let seq = s.log.end();
-    let mut paths = Vec::new();
-    for (i, img) in images.into_iter().enumerate() {
-        match img {
-            MsgImage::File(src) => {
-                let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
-                let dst = s.dir.join(format!("msg-{seq}-{}.{ext}", i + 1));
-                std::fs::copy(&src, &dst).map_err(|e| format!("image {}: {e}", src.display()))?;
-                paths.push(dst);
-            }
-            MsgImage::Rgba(w, h, px) => {
-                let dst = s.dir.join(format!("msg-{seq}-{}.png", i + 1));
-                guilab_compositor::write_rgba_png(&dst, w, h, &px).map_err(|e| format!("writing {}: {e:#}", dst.display()))?;
-                paths.push(dst);
-            }
+/// Logs a human message (wakes polls). Its images are held while the session lives. A
+/// message without images gets the current screen, since it refers to what they look at.
+pub(crate) fn human_message(images: &mut Images, slot: &mut Slot, text: String, imgs: Vec<MsgImage>) -> Result<(), String> {
+    let mut refs = Vec::new();
+    for (i, m) in imgs.into_iter().enumerate() {
+        let img = match m {
+            MsgImage::Spec(spec) => images.attach(&spec, Made::Human, slot.group),
+            MsgImage::Drawing { base, marks } => images.drawing(&base, marks, slot.group),
         }
+        .map_err(|e| format!("image {}: {e}", i + 1))?;
+        images.hold(&img);
+        refs.push(images.image_ref(&img));
     }
-    s.log.push(EventData::Message { text, images: paths, annotations }, None);
+    let screen = if refs.is_empty() {
+        let id = images.capture(&mut slot.session, slot.group, false, false, None)?;
+        let img = images.get(id.as_str())?;
+        images.hold(&img);
+        Some(id.to_string())
+    } else {
+        None
+    };
+    slot.session.log.push(EventData::Message { text, images: refs, screen }, None);
     Ok(())
 }
 
@@ -742,27 +783,20 @@ fn read_messages(slot: &mut Slot, key: &str, d: &Delivery) {
     }
 }
 
-/// Logs an agent message (`work -m`, `done MSG`), images copied as `agent-SEQ-N.EXT`.
-fn agent_message(s: &mut Session, key: &str, text: Option<String>, images: &[std::path::PathBuf]) -> Result<(), String> {
+/// Logs an agent message (`work -m`, `done MSG`); images are ids or file paths.
+fn agent_message(images: &mut Images, slot: &mut Slot, key: &str, text: Option<String>, specs: &[String]) -> Result<(), String> {
     let text = text.map(|t| t.trim().to_string()).unwrap_or_default();
-    if text.is_empty() && images.is_empty() {
+    if text.is_empty() && specs.is_empty() {
         return Ok(());
     }
-    let images = copy_images(&s.dir, "agent", s.log.end(), images)?;
-    s.log.push(EventData::AgentMessage { text, images }, Some(key));
-    Ok(())
-}
-
-/// Copies message attachments into the session dir as `PREFIX-SEQ-N.EXT`.
-fn copy_images(dir: &Path, prefix: &str, seq: u64, images: &[std::path::PathBuf]) -> Result<Vec<std::path::PathBuf>, String> {
-    let mut out = Vec::new();
-    for (i, src) in images.iter().enumerate() {
-        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
-        let dst = dir.join(format!("{prefix}-{seq}-{}.{ext}", i + 1));
-        std::fs::copy(src, &dst).map_err(|e| format!("image {}: {e}", src.display()))?;
-        out.push(dst);
+    let mut refs = Vec::new();
+    for spec in specs {
+        let img = images.attach(spec, Made::Agent, slot.group).map_err(|e| format!("--image {spec}: {e}"))?;
+        images.hold(&img);
+        refs.push(images.image_ref(&img));
     }
-    Ok(out)
+    slot.session.log.push(EventData::AgentMessage { text, images: refs }, Some(key));
+    Ok(())
 }
 
 /// Changes a session's output and logs it. `key`: the agent's delivery key; None = the

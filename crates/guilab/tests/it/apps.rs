@@ -143,5 +143,5 @@ fn screenshot_settle_cases() {
     lab.run(&["-S", "c", "run", "--", "python3", &app("gtk_app.py"), "--big"]);
     lab.wait_tree("c", 10, |t| !crate::nodes(t).is_empty());
     let out = lab.run(&["-S", "c", "screenshot"]);
-    assert!(out.contains("doesn't fit the 640x480 output, so it's cut off"), "{out}");
+    assert!(out.contains("doesn't fit the output, so it's cut off"), "{out}");
 }

@@ -19,12 +19,12 @@ pub mod input;
 pub mod log;
 pub mod text;
 pub mod viz;
-pub use events::{Annotation, Delivery, Event, EventData, Tier, Tiers};
+pub use events::{Delivery, Event, EventData, ImageRef, Tier, Tiers};
 pub use input::{Action, Button};
 
 /// Protocol version. Bump it whenever a change to [`Request`] or the reply types would make
 /// an older server or CLI misread the other; mismatches then fail with "restart the server".
-pub const PROTO: u32 = 2;
+pub const PROTO: u32 = 3;
 
 /// Env var naming the server's directory (control socket, sessions), overriding
 /// `$XDG_RUNTIME_DIR/guilab`: to run a second server, e.g. guilab nested in a guilab session.
@@ -129,14 +129,57 @@ pub enum Command {
     Ps,
     /// Reply: `Vec<TreeNode>` (roots, children nested).
     Tree,
-    /// Reply: [`ShotInfo`].
+    /// Capture the output as a new image and render it. Reply: [`ShotInfo`].
     Screenshot {
-        /// Absolute path; None = a new file in the session dir.
+        /// Absolute path for the PNG; None = the session dir.
         path: Option<PathBuf>,
         settle: bool,
         /// Draw the pointer's cursor in.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cursor: bool,
+        /// The image's crop, `X,Y WxH` (unparsed: the image crate parses every crop).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crop: Option<String>,
+        /// Shrink the PNG to fit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<[u32; 2]>,
+    },
+    /// Render an image to PNG and/or list it. Reply: [`ImageInfo`].
+    Image {
+        id: String,
+        /// Absolute path; None = the session dir.
+        #[serde(default)]
+        path: Option<PathBuf>,
+        /// Canvas region `X,Y WxH`, or `none` for the whole canvas; None = the image's crop.
+        #[serde(default)]
+        crop: Option<String>,
+        #[serde(default)]
+        max: Option<[u32; 2]>,
+        /// false: pictures only.
+        marks: bool,
+        /// List the elements instead of rendering.
+        #[serde(default)]
+        list: bool,
+        /// Pen points in the listing.
+        #[serde(default)]
+        points: bool,
+    },
+    /// Make an image (see guilab_image::make; strings unparsed). Reply: [`ImageInfo`] with
+    /// the listing and a preview.
+    ImageMake {
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        canvas: Option<[u32; 2]>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        crop: Option<String>,
+        #[serde(default)]
+        drop: Vec<u32>,
+        #[serde(default)]
+        elements: Vec<String>,
+        cwd: PathBuf,
     },
     /// Change and/or show the output. Reply: [`OutputInfo`].
     Output { size: Option<[u32; 2]>, scale: Option<f64> },
@@ -174,14 +217,14 @@ pub enum Command {
         #[serde(default)]
         last: usize,
     },
-    /// The agent is working on `status`; `message` (with images, copied into the session
-    /// dir) is posted to the viewer's feed. Reply: null.
+    /// The agent is working on `status`; `message` (with images: ids, or absolute paths of
+    /// files that become images) is posted to the viewer's feed. Reply: null.
     Work {
         status: String,
         #[serde(default)]
         message: Option<String>,
         #[serde(default)]
-        images: Vec<PathBuf>,
+        images: Vec<String>,
     },
     /// The agent is done and waits for the human: posts `message`, releases the lock.
     /// Reply: [`DoneInfo`].
@@ -189,7 +232,7 @@ pub enum Command {
         #[serde(default)]
         message: Option<String>,
         #[serde(default)]
-        images: Vec<PathBuf>,
+        images: Vec<String>,
     },
     /// What the viewer does for the human (until it exists: `guilab debug`, for tests).
     Human { op: HumanOp },
@@ -199,13 +242,11 @@ pub enum Command {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HumanOp {
-    /// A message; images are copied into the session dir.
+    /// A message; images are ids or absolute paths of files (they become images).
     Message {
         text: String,
         #[serde(default)]
-        images: Vec<PathBuf>,
-        #[serde(default)]
-        annotations: Vec<Annotation>,
+        images: Vec<String>,
     },
     /// Input as the human (blocked while the session is locked and not shared).
     Input { actions: Vec<Action> },
@@ -241,17 +282,28 @@ impl Command {
         Some(match self {
             Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => return None,
             Command::Poll { .. } | Command::Log { .. } | Command::Human { .. } => return None,
-            Command::Work { .. } | Command::Done { .. } => return None,
+            Command::Work { .. } | Command::Done { .. } | Command::ImageMake { .. } => return None,
             Command::End => "end".into(),
             Command::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
             Command::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
             Command::Ps => "ps".into(),
             Command::Tree => "tree".into(),
-            Command::Screenshot { path, settle, cursor } => format!(
-                "screenshot{}{}{}",
+            Command::Screenshot { path, settle, cursor, crop, max } => format!(
+                "screenshot{}{}{}{}{}",
                 opt("-o", path.as_ref().map(|p| p.display().to_string())),
                 if *settle { "" } else { " --no-settle" },
-                if *cursor { " --cursor" } else { "" }
+                if *cursor { " --cursor" } else { "" },
+                opt("--crop", crop.as_ref().map(|c| format!("'{c}'"))),
+                opt("--max", max.map(|[w, h]| format!("{w}x{h}"))),
+            ),
+            Command::Image { id, path, crop, max, marks, list, points } => format!(
+                "image {id}{}{}{}{}{}{}",
+                opt("-o", path.as_ref().map(|p| p.display().to_string())),
+                opt("--crop", crop.as_ref().map(|c| format!("'{c}'"))),
+                opt("--max", max.map(|[w, h]| format!("{w}x{h}"))),
+                if *marks { "" } else { " --no-marks" },
+                if *list { " --list" } else { "" },
+                if *points { " --points" } else { "" },
             ),
             Command::Output { size, scale } => format!(
                 "output{}{}",
@@ -414,9 +466,17 @@ pub struct TreeNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShotInfo {
+    /// The new image's id.
+    pub image: String,
+    /// Its header line (`image k3f9 1280x720, crop ...`).
+    pub header: String,
     pub path: PathBuf,
+    /// PNG size.
     pub width: u32,
     pub height: u32,
+    /// Canvas rect `[x, y, w, h]` the PNG shows, at `zoom` PNG pixels per canvas pixel.
+    pub shows: [i32; 4],
+    pub zoom: f32,
     /// False if the settle wait timed out (app not drawing yet) or the app animates.
     pub settled: bool,
     /// Taken while something keeps redrawing (spinner, video), once input had time to land.
@@ -425,6 +485,43 @@ pub struct ShotInfo {
     /// Windows that don't fit the output, so the image cuts them off.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cropped: Vec<WindowSize>,
+}
+
+/// `image` / `image make` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub id: String,
+    /// The element listing (`--list`, and always for `image make`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<RenderInfo>,
+}
+
+/// A PNG rendering of an image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderInfo {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    /// Canvas rect `[x, y, w, h]` the PNG shows, at `zoom` PNG pixels per canvas pixel.
+    pub shows: [i32; 4],
+    pub zoom: f32,
+}
+
+impl RenderInfo {
+    /// "PNG shows canvas X,Y WxH at Zx", plus how PNG pixels map back unless it's 1:1.
+    pub fn mapping(shows: [i32; 4], zoom: f32) -> String {
+        let [x, y, w, h] = shows;
+        let z = (zoom * 100.0).round() / 100.0;
+        let mut s = format!("PNG shows canvas {x},{y} {w}x{h} at {z}x");
+        if z != 1.0 {
+            s += &format!(", so PNG pixel x,y is canvas {x} + x/{z}, {y} + y/{z}");
+        } else if (x, y) != (0, 0) {
+            s += &format!(", so PNG pixel x,y is canvas {x} + x, {y} + y");
+        }
+        s
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,7 +607,7 @@ mod tests {
         let req = Request {
             proto: PROTO,
             target: Target { name: Some("a".into()), ..Default::default() },
-            cmd: Command::Screenshot { path: None, settle: true, cursor: false },
+            cmd: Command::Screenshot { path: None, settle: true, cursor: false, crop: None, max: None },
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, format!(r#"{{"proto":{PROTO},"target":{{"name":"a"}},"cmd":"screenshot","path":null,"settle":true}}"#));

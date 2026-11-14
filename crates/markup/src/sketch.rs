@@ -30,6 +30,12 @@ pub struct Annotated {
     /// Text annotations, top-left position in image pixels. Whether they're also drawn into
     /// `image` depends on [`Sketch::bake_text`].
     pub notes: Vec<Note>,
+    /// The host's tag for the frozen screenshot ([`Sketch::set_screenshot`]), and the marks
+    /// unbaked (screenshot pixels) with the screenshot's scale, so a host can rebuild the
+    /// drawing from its own copy of the screenshot.
+    pub tag: String,
+    pub marks: Vec<Mark>,
+    pub scale: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +60,7 @@ pub struct View {
 
 struct Shot {
     image: Arc<ColorImage>,
+    tag: String,
     tex: Option<TextureHandle>,
 }
 
@@ -166,10 +173,11 @@ impl Sketch {
         std::mem::take(&mut self.want_shot)
     }
 
-    /// The frozen screenshot for the open drawing (premultiplied, opaque is fine).
-    pub fn set_screenshot(&mut self, image: ColorImage) {
+    /// The frozen screenshot for the open drawing (premultiplied, opaque is fine). `tag`
+    /// comes back in [`Annotated::tag`].
+    pub fn set_screenshot(&mut self, image: ColorImage, tag: impl Into<String>) {
         if let Some(d) = &mut self.drawing {
-            d.shot = Some(Shot { image: Arc::new(image), tex: None });
+            d.shot = Some(Shot { image: Arc::new(image), tag: tag.into(), tex: None });
         }
     }
 
@@ -259,10 +267,10 @@ impl Sketch {
         let image = if self.bake_text || !has_text {
             preview.clone()
         } else {
-            let marks: Vec<Mark> = d.marks.into_iter().filter(|m| !matches!(m.kind, Kind::Text(..))).collect();
+            let marks: Vec<Mark> = d.marks.iter().filter(|m| !matches!(m.kind, Kind::Text(..))).cloned().collect();
             Arc::new(r.composite(&shot.image, &marks, d.scale))
         };
-        Some(Annotated { image, preview, notes })
+        Some(Annotated { image, preview, notes, tag: shot.tag, marks: d.marks, scale: d.scale })
     }
 
     /// The vertical tool strip.

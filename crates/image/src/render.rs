@@ -110,6 +110,7 @@ impl Rendered {
         let mut enc = png::Encoder::new(&mut out, w, h);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
+        enc.set_compression(png::Compression::Fast);
         let mark = id.map(|i| i.to_string()).unwrap_or_else(|| "draft".into());
         enc.add_text_chunk(RENDER_MARK.into(), mark).expect("latin1 text chunk");
         let mut wr = enc.write_header().expect("png header");

@@ -163,8 +163,8 @@ impl Viewer {
     }
 
     /// Answers [`Action::Freeze`].
-    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage) {
-        self.ui.set_screenshot(name, image);
+    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage, tag: String) {
+        self.ui.set_screenshot(name, image, tag);
         self.host.dirty = true;
     }
 

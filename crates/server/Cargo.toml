@@ -13,6 +13,7 @@ doctest = false
 guilab-proto.workspace = true
 guilab-compositor.workspace = true
 guilab-viewer.workspace = true
+guilab-image.workspace = true
 smithay.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

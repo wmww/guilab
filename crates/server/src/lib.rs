@@ -1,6 +1,7 @@
 //! The guilab daemon: one calloop loop holding the control socket, the frame timer and
 //! every session's nested loop. Single-threaded.
 
+mod images;
 pub mod lock;
 mod requests;
 mod viewer;
@@ -55,6 +56,8 @@ pub(crate) struct Slot {
     pub working: Option<Working>,
     /// The agent's last command (the viewer shows how long it's been quiet).
     pub last_agent: Instant,
+    /// The session's images in the store (dropped with it).
+    pub group: guilab_image::Group,
     token: RegistrationToken,
 }
 
@@ -89,9 +92,11 @@ pub(crate) struct ShotWait {
     pub session: String,
     pub key: String,
     pub stream: UnixStream,
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     pub settle: bool,
     pub cursor: bool,
+    pub crop: Option<guilab_image::IRect>,
+    pub max: Option<[u32; 2]>,
     pub start: Instant,
 }
 
@@ -147,6 +152,7 @@ pub struct Server {
     pub(crate) stop: bool,
     idle_exit: Option<Duration>,
     idle_since: Instant,
+    pub(crate) images: images::Images,
     pub(crate) viewer: viewer::ViewerState,
     pub(crate) viewer_gen: u64,
     /// A tab for the viewer to switch to (`-S NAME show`).
@@ -242,6 +248,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         idle_exit: opts.idle_exit,
         idle_since: now,
         last_slow_tick: now,
+        images: images::Images::new(),
         viewer: Default::default(),
         viewer_gen: 0,
         viewer_tab: None,
@@ -353,6 +360,7 @@ impl Server {
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
             self.last_slow_tick = now;
+            self.images.sweep(now);
             self.warn_expiry(now);
             let expired: Vec<String> = self
                 .sessions
@@ -395,6 +403,7 @@ impl Server {
         self.handle.remove(slot.token);
         let (children, tag) = slot.session.shutdown();
         let dir = slot.session.dir.clone();
+        self.images.drop_session(&slot.session, slot.group);
         drop(slot);
         self.graveyard.push(Grave { children, tag, kill_at: Instant::now() + procs::KILL_GRACE, killed: false });
         let _ = fs::remove_dir_all(&dir);
@@ -503,7 +512,8 @@ impl Server {
             .map_err(|e| e.error)?;
         let _ = fs::set_permissions(&session.dir, fs::Permissions::from_mode(0o700));
         let now = Instant::now();
-        let slot = Slot { session, root, ttl, last_active: now, lock: Default::default(), warned: None, working: None, last_agent: now, token };
+        let group = self.images.new_group();
+        let slot = Slot { session, root, ttl, last_active: now, lock: Default::default(), warned: None, working: None, last_agent: now, group, token };
         self.sessions.insert(name, slot);
         Ok(())
     }

@@ -151,33 +151,43 @@ fn coalescing_and_log() {
 fn poll_blocks_and_follows() {
     let lab = Lab::new();
     lab.run(&["new"]);
-    let shot = lab.run(&["screenshot"]).split(' ').next().unwrap().to_string();
+    let shot = lab.json(&["screenshot"])["image"].as_str().unwrap().to_string();
+    let drawn = lab.json(&["image", "make", "--from", &shot, "blue box 40,50 100x60", "text 150,50 \"this\""]);
+    let drawn = drawn["id"].as_str().unwrap();
     // Two pollers on the same key both get the message.
     let polls: Vec<_> = (0..2).map(|_| lab.cmd(&["poll", "--timeout", "20"]).stdout(Stdio::piped()).spawn().unwrap()).collect();
     let mut follow = lab.cmd(&["poll", "--follow"]).stdout(Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let t = Instant::now();
-    lab.run(&["debug", "message", "look\nhere", "--image", &shot, "--note", "1@40,50:this", "--note", "general"]);
+    lab.run(&["debug", "message", "look\nhere", "--image", drawn]);
     for p in polls {
         let out = p.wait_with_output().unwrap();
         assert!(out.status.success());
         let out = String::from_utf8_lossy(&out.stdout);
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].ends_with("human message: \"look\\nhere\""), "{out}");
-        assert!(lines[1].starts_with("  image 1: ") && lines[1].contains("msg-"), "{out}");
-        assert_eq!(&lines[2..4], ["  annotation on image 1 at pixel 40,50: \"this\"", "  annotation: \"general\""]);
-        assert!(lines[4].contains("guilab done"), "{out}");
-        let img = lines[1].trim_start_matches("  image 1: ");
-        assert_eq!(std::fs::read(img).unwrap(), std::fs::read(&shot).unwrap(), "the image is copied");
+        assert_eq!(lines[1], format!("  image {drawn} 1280x720, parent {shot} (your screenshot)"), "{out}");
+        assert!(lines[2].starts_with("    1 raster r") && lines[2].contains("0,0 1280x720 (screenshot "), "{out}");
+        assert_eq!(lines[3], "    2 blue box 40,50 100x60", "{out}");
+        assert!(lines[4].starts_with("    3 red text 150,50 \"this\" (box "), "{out}");
+        let hint = format!("  (see what the marks point at: guilab image {drawn} --crop '");
+        assert!(lines[5].starts_with(&hint), "{out}");
+        assert!(lines[6].contains("guilab done"), "{out}");
     }
+    // The hint renders the marks' area.
+    let crop = lab.run(&["image", drawn, "--crop", "18,28 300x104"]);
+    let png = crop.lines().next().unwrap();
+    assert_eq!(crate::read_png(png).0, 300);
+    assert!(crop.contains("PNG shows canvas 18,28 300x104 at 1x"), "{crop}");
     assert!(t.elapsed() < Duration::from_secs(3));
     // --follow: one line per wake event, and it keeps going.
     let mut lines = BufReader::new(follow.stdout.take().unwrap()).lines();
-    assert!(lines.next().unwrap().unwrap().contains("human message: \"look\\nhere\" [image 1: "));
+    assert!(lines.next().unwrap().unwrap().contains(&format!("human message: \"look\\nhere\" [image {drawn}: 3 elements]")));
     lab.run(&["run", "--", "false"]);
     assert!(lines.next().unwrap().unwrap().contains("app 1 (false) exited with code 1"));
     lab.run(&["debug", "message", "again"]);
-    assert!(lines.next().unwrap().unwrap().contains("human message: \"again\""));
+    let line = lines.next().unwrap().unwrap();
+    assert!(line.contains("human message: \"again\" [their screen: image "), "{line}");
     follow.kill().unwrap();
     let _ = follow.wait();
     // Ending the session ends polls with an error.
@@ -229,14 +239,17 @@ fn messages_wait_for_poll() {
 fn work_done_lock_and_revoke() {
     let lab = Lab::new();
     lab.run(&["new"]);
-    let shot = lab.run(&["screenshot"]).split(' ').next().unwrap().to_string();
+    let shot = lab.json(&["screenshot"])["image"].as_str().unwrap().to_string();
     let (ok, _, err) = lab.try_run(&["say", "hi"]);
     assert!(!ok && err.contains("guilab work") && err.contains("guilab done"), "{err}");
     assert_eq!(lab.run(&["work", "checking", "-m", "Is this right?", "--image", &shot]), "working: checking; message posted\n");
     let ev = lab.log_json(&["--kind", "agent"]);
     assert_eq!(kinds(&ev), ["command", "screenshot", "agent_message", "work"], "{ev:?}");
-    let img = ev[2]["images"][0].as_str().unwrap();
-    assert!(img.contains("/agent-") && std::path::Path::new(img).exists(), "{ev:?}");
+    assert_eq!(ev[2]["images"][0]["id"], shot.as_str(), "{ev:?}");
+    // A guilab rendering isn't a picture to attach: the id is.
+    let png = lab.json(&["image", &shot])["render"]["path"].as_str().unwrap().to_string();
+    let (ok, _, err) = lab.try_run(&["work", "checking", "-m", "this", "--image", &png]);
+    assert!(!ok && err.contains(&format!("--image {shot}")), "{err}");
     // The agent's own messages and status are log-only: nothing delivered.
     let (code, out, _) = lab.status(&["poll", "--timeout", "0"]);
     assert_eq!((code, out.as_str()), (2, "Timed out: no wake event within 0s (exit code 2).\n"));

@@ -5,7 +5,7 @@ use guilab_proto::{
     events::{LogInfo, PollInfo},
     text::Fmt,
 };
-use guilab_proto::{Command, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, SessionInfo, ShotInfo, TreeNode};
+use guilab_proto::{Command, ImageInfo, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, RenderInfo, SessionInfo, ShotInfo, TreeNode};
 use serde::de::DeserializeOwned;
 
 fn get<T: DeserializeOwned>(v: serde_json::Value) -> Result<T, String> {
@@ -152,7 +152,10 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
         }
         Command::Screenshot { .. } => {
             let s: ShotInfo = get(v)?;
-            let mut line = format!("{} {}x{}", s.path.display(), s.width, s.height);
+            let mut line = format!("{}\n{}", s.path.display(), s.header);
+            if s.shows != [0, 0, s.width as i32, s.height as i32] || s.zoom != 1.0 {
+                line += &format!("\n{}", RenderInfo::mapping(s.shows, s.zoom));
+            }
             if s.animating {
                 line += " (the app keeps animating: this is one frame of it)";
             } else if !s.settled {
@@ -160,13 +163,31 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             for c in &s.cropped {
                 line += &format!(
-                    "\nwindow {} is {}x{} and doesn't fit the {}x{} output, so it's cut off (bigger output: guilab output -s WxH)",
-                    c.id, c.width, c.height, s.width, s.height
+                    "\nwindow {} is {}x{} and doesn't fit the output, so it's cut off (bigger output: guilab output -s WxH)",
+                    c.id, c.width, c.height
                 );
             }
             line
         }
         Command::Output { .. } => output(&get(v)?),
+        Command::Image { .. } => {
+            let i: ImageInfo = get(v)?;
+            let mut out = Vec::new();
+            if let Some(r) = &i.render {
+                out.push(format!("{}\n{}", r.path.display(), RenderInfo::mapping(r.shows, r.zoom)));
+            }
+            out.extend(i.listing);
+            out.join("\n")
+        }
+        Command::ImageMake { .. } => {
+            let i: ImageInfo = get(v)?;
+            let mut out: Vec<String> = i.listing.into_iter().collect();
+            if let Some(r) = &i.render {
+                out.push(format!("preview: {}\n{}", r.path.display(), RenderInfo::mapping(r.shows, r.zoom)));
+            }
+            out.push(format!("send it: guilab done \"...\" --image {}", i.id));
+            out.join("\n")
+        }
         Command::Lock { .. } => {
             let l: LockInfo = get(v)?;
             // Only the token on stdout, so `T=$(guilab lock)` works; the hint goes to stderr.

@@ -56,7 +56,7 @@ fn draw_queue_send() {
     run(vec![button(pos2(120.0, 120.0), true)], &mut sketch);
     assert!(sketch.wants_screenshot(), "starting to draw asks for a screenshot");
     assert!(!sketch.wants_screenshot(), "once");
-    sketch.set_screenshot(white(400, 300));
+    sketch.set_screenshot(white(400, 300), "");
     run(vec![Event::PointerMoved(pos2(160.0, 140.0)), Event::PointerMoved(pos2(200.0, 200.0))], &mut sketch);
     run(vec![button(pos2(200.0, 200.0), false)], &mut sketch);
     assert!(sketch.drawing_open());
@@ -68,7 +68,7 @@ fn draw_queue_send() {
     sketch.tool = Tool::Text;
     run(vec![Event::PointerMoved(pos2(250.0, 110.0)), button(pos2(250.0, 110.0), true), button(pos2(250.0, 110.0), false)], &mut sketch);
     assert!(sketch.wants_screenshot());
-    sketch.set_screenshot(white(400, 300));
+    sketch.set_screenshot(white(400, 300), "");
     run(vec![], &mut sketch); // the text box takes focus
     run(vec![Event::Text("ok here".into())], &mut sketch);
     run(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], &mut sketch);
@@ -124,7 +124,7 @@ fn move_tool_drags_marks() {
     sketch.tool = Tool::Line;
     run(vec![Event::PointerMoved(pos2(50.0, 50.0))], &mut sketch);
     run(vec![button(pos2(50.0, 50.0), true)], &mut sketch);
-    sketch.set_screenshot(white(400, 300));
+    sketch.set_screenshot(white(400, 300), "");
     run(vec![Event::PointerMoved(pos2(150.0, 50.0))], &mut sketch);
     run(vec![button(pos2(150.0, 50.0), false)], &mut sketch);
 
@@ -165,7 +165,7 @@ fn text_tool_single_click_wraps_and_stays_on_image() {
     // A plain click near the bottom right: the box opens, keeps focus, and is typed into.
     run(vec![Event::PointerMoved(pos2(390.0, 290.0))], &mut sketch);
     run(vec![button(pos2(390.0, 290.0), true)], &mut sketch);
-    sketch.set_screenshot(white(400, 300));
+    sketch.set_screenshot(white(400, 300), "");
     run(vec![button(pos2(390.0, 290.0), false)], &mut sketch);
     run(vec![], &mut sketch);
     run(vec![], &mut sketch);

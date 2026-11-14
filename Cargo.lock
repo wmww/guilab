@@ -823,6 +823,7 @@ dependencies = [
  "anyhow",
  "calloop",
  "guilab-compositor",
+ "guilab-image",
  "guilab-proto",
  "guilab-viewer",
  "libc",

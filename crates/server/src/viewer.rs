@@ -12,7 +12,7 @@ use std::{
 
 use calloop::{RegistrationToken, channel};
 use guilab_compositor::{AppCursor, InputEvent, InputSource, Session, render::Renderer};
-use guilab_proto::{Annotation, EventData, Response, ViewerInfo, text::Fmt};
+use guilab_proto::{EventData, Response, ViewerInfo, text::Fmt};
 use guilab_viewer::{
     Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Status, Viewer, Who,
     CursorImage, HostCursor,
@@ -27,6 +27,7 @@ use smithay::{
 
 use crate::{
     Server,
+    images::Images,
     requests::{MsgImage, human_message},
     send,
 };
@@ -409,7 +410,7 @@ impl Server {
                     if next == log.end() {
                         continue;
                     }
-                    let items = feed_items(log, next);
+                    let items = feed_items(log, next, &self.images);
                     s.viewer.push_feed(name, &slot.session.tag, items, log.end());
                 }
                 // What's under the pointer decides the overlay's light/dark colors.
@@ -543,39 +544,34 @@ impl Server {
                 }
                 Action::Freeze { session } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    let shot = match slot.session.read_rgba() {
-                        Ok((w, h, mut px)) => {
-                            // Like screenshots: opaque (clients may leave alpha 0, e.g. GL areas).
-                            px.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
-                            ColorImage::from_rgba_premultiplied([w as usize, h as usize], &px)
-                        }
+                    // The drawing's base goes into the store now; it's held, since the drawing
+                    // may be sent much later.
+                    let shot = self.images.capture(&mut slot.session, slot.group, false, false, None).and_then(|id| {
+                        let img = self.images.get(id.as_str())?;
+                        self.images.hold(&img);
+                        let r = guilab_image::render(&img.body, &self.images.store, &self.images.fonts, &Default::default()).map_err(|e| e.to_string())?;
+                        let [w, h] = r.size();
+                        Ok((ColorImage::from_rgba_premultiplied([w as usize, h as usize], r.premultiplied()), id.to_string()))
+                    });
+                    let (shot, id) = match shot {
+                        Ok(s) => s,
                         Err(e) => {
-                            tracing::warn!("viewer: screenshot for drawing: {e:#}");
+                            tracing::warn!("viewer: screenshot for drawing: {e}");
                             continue;
                         }
                     };
                     if let ViewerState::Shown(s) = &mut self.viewer {
-                        s.viewer.set_screenshot(&session, shot);
+                        s.viewer.set_screenshot(&session, shot, id);
                     }
                 }
                 Action::Message { session, text, images } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
                     slot.last_active = Instant::now();
-                    let mut annotations = Vec::new();
-                    let mut files = Vec::new();
-                    for (i, a) in images.into_iter().enumerate() {
-                        let [w, h] = a.image.size;
-                        let px: Vec<u8> = a.image.pixels.iter().flat_map(|c| c.to_array()).collect();
-                        files.push(MsgImage::Rgba(w as u32, h as u32, px));
-                        annotations.extend(a.notes.into_iter().map(|n| Annotation {
-                            text: n.text,
-                            image: Some(i),
-                            x: Some(n.pos.x.round() as i32),
-                            y: Some(n.pos.y.round() as i32),
-                            color: markup::mark::color_name(n.color).map(|c| c.to_lowercase()),
-                        }));
-                    }
-                    if let Err(e) = human_message(&mut slot.session, text, files, annotations) {
+                    let drawings = images
+                        .into_iter()
+                        .map(|a| MsgImage::Drawing { marks: a.marks.iter().map(|m| element(&self.images, m, a.scale)).collect(), base: a.tag })
+                        .collect();
+                    if let Err(e) = human_message(&mut self.images, slot, text, drawings) {
                         tracing::warn!("viewer: sending message: {e}");
                     }
                 }
@@ -612,10 +608,13 @@ pub(crate) fn insert_channel(handle: &calloop::LoopHandle<'static, Server>) -> a
 
 /// Feed items for the log's messages (both ways), agent commands and status changes from
 /// seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
-fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
+fn feed_items(log: &guilab_proto::log::EventLog, next: u64, images: &Images) -> Vec<FeedItem> {
     let fmt = Fmt { tz: crate::tz_offset() };
     let wanted = |e: &&guilab_proto::Event| {
-        matches!(e.data, EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::Command { .. } | EventData::Work { .. } | EventData::Done)
+        matches!(
+            e.data,
+            EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::Command { .. } | EventData::ImageMade { .. } | EventData::Work { .. } | EventData::Done
+        )
     };
     let mut events: Vec<&guilab_proto::Event> = if next == 0 {
         log.from_seq(0).rev().filter(wanted).take(FEED_BACKLOG).collect()
@@ -630,8 +629,9 @@ fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
         .map(|e| {
             let time = fmt.clock(e.t);
             match &e.data {
-                EventData::Message { text, images, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images) },
-                EventData::AgentMessage { text, images } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images) },
+                EventData::Message { text, images: refs, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images, refs) },
+                EventData::AgentMessage { text, images: refs } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images, refs) },
+                EventData::ImageMade { image } => FeedItem { who: Who::Log, time, text: format!("image make → {image}"), images: Vec::new() },
                 EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: cmd.clone(), images: Vec::new() },
                 EventData::Work { status } => FeedItem { who: Who::Log, time, text: format!("working: {status}"), images: Vec::new() },
                 EventData::Done => FeedItem { who: Who::Log, time, text: "done".into(), images: Vec::new() },
@@ -641,36 +641,40 @@ fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
         .collect()
 }
 
-fn load_images(paths: &[PathBuf]) -> Vec<std::sync::Arc<ColorImage>> {
-    paths
-        .iter()
-        .filter_map(|p| match decode_png(p) {
-            Ok(i) => Some(std::sync::Arc::new(i)),
-            Err(e) => {
-                tracing::warn!("viewer: image {}: {e:#}", p.display());
-                None
-            }
+/// Feed size cap: thumbnails and the hover preview.
+const FEED_MAX: [u32; 2] = [1600, 1600];
+
+fn load_images(images: &Images, refs: &[guilab_proto::ImageRef]) -> Vec<std::sync::Arc<ColorImage>> {
+    refs.iter()
+        .filter_map(|r| {
+            let img = images.get(&r.id).map_err(|e| tracing::warn!("viewer: image {}: {e}", r.id)).ok()?;
+            let opts = guilab_image::RenderOpts { max: Some(FEED_MAX), ..Default::default() };
+            let out = guilab_image::render(&img.body, &images.store, &images.fonts, &opts).map_err(|e| tracing::warn!("viewer: image {}: {e}", r.id)).ok()?;
+            let [w, h] = out.size();
+            Some(std::sync::Arc::new(ColorImage::from_rgba_premultiplied([w as usize, h as usize], out.premultiplied())))
         })
         .collect()
 }
 
-fn decode_png(path: &std::path::Path) -> anyhow::Result<ColorImage> {
-    let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
-    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut r = dec.read_info()?;
-    let mut buf = vec![0; r.output_buffer_size().ok_or_else(|| anyhow::anyhow!("image too large"))?];
-    let info = r.next_frame(&mut buf)?;
-    let buf = &buf[..info.buffer_size()];
-    let size = [info.width as usize, info.height as usize];
-    Ok(match info.color_type {
-        png::ColorType::Rgb => ColorImage::from_rgb(size, buf),
-        png::ColorType::Rgba => ColorImage::from_rgba_unmultiplied(size, buf),
-        png::ColorType::Grayscale => ColorImage::from_rgb(size, &buf.iter().flat_map(|g| [*g; 3]).collect::<Vec<_>>()),
-        png::ColorType::GrayscaleAlpha => {
-            ColorImage::from_rgba_unmultiplied(size, &buf.chunks(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect::<Vec<_>>())
+/// A mark drawn in the current viewer as an image element (same sizes and palette).
+fn element(images: &Images, m: &markup::mark::Mark, scale: f32) -> guilab_image::Element {
+    use guilab_image::{Kind, Pt, Rect};
+    use markup::mark::Kind as M;
+    // Whole pixels: listings read better, and sub-pixel precision means nothing here.
+    let p = |q: &markup::egui::Pos2| Pt { x: q.x.round(), y: q.y.round() };
+    let kind = match &m.kind {
+        M::Pen(pts) => Kind::Pen(pts.iter().map(p).collect()),
+        M::Box(a, b) => Kind::Box(Rect::from_corners(p(a), p(b))),
+        M::Ellipse(a, b) => Kind::Ellipse(Rect::from_corners(p(a), p(b))),
+        M::Line(a, b) => Kind::Line(p(a), p(b)),
+        M::Arrow(a, b) => Kind::Arrow(p(a), p(b)),
+        M::Text(at, text, width) => {
+            let size = markup::mark::FONT * scale;
+            Kind::Text { at: p(at), size, width: images.text_width(text, size, *width), text: text.clone() }
         }
-        t => anyhow::bail!("unsupported PNG color type {t:?}"),
-    })
+    };
+    // Same palette values; opaque, so premultiplied = straight.
+    guilab_image::Element::new(guilab_image::Color(m.color.to_array()), kind)
 }
 
 /// Asks where to save (system file dialog, on its own thread so the server keeps running)

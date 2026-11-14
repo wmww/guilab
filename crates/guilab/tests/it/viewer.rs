@@ -216,8 +216,9 @@ fn show_refuses_own_session() {
     assert!(!ok && err.contains("WAYLAND_DISPLAY"), "{err}");
 }
 
-/// Drawing and chat, end to end: the agent's `say` reaches the feed; the human draws a box
-/// and a text note, types a message and sends it; `poll` gets the image and the note.
+/// Drawing and chat, end to end: the agent's message reaches the feed; the human draws a box
+/// and a text note, types a message and sends it; `poll` lists the drawing (the frozen
+/// screenshot plus both marks) and the image renders with the box in it.
 /// Positions are the viewer's layout in a 1200x800 window (toolbar at the left, message
 /// box at the bottom, the 800x600 session fitted in between).
 #[test]
@@ -227,8 +228,7 @@ fn draw_and_send() {
     v.run(&["new", "app", "-s", "800x600"]);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
-    let shot = v.path("shot.png");
-    v.run(&["screenshot", "--no-settle", "-o", &shot]);
+    let shot = v.json(&["screenshot", "--no-settle"])["image"].as_str().unwrap().to_string();
     v.run(&["done", "here's the app", "--image", &shot]);
 
     let step = |actions: &[&str]| {
@@ -244,9 +244,14 @@ fn draw_and_send() {
     step(&["type", "fix it", "key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     assert!(out.contains("human message: \"fix it\""), "{out}{err}");
-    assert!(out.contains("red text annotation on image 1 at pixel") && out.contains("\"label\""), "{out}");
-    let img = out.lines().find_map(|l| l.trim().strip_prefix("image 1: ")).expect("an image");
-    let (w, hh, px, ch) = crate::read_png(img);
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let id = lines.iter().find_map(|l| l.strip_prefix("image ")).and_then(|l| l.split(' ').next()).expect("an image");
+    assert!(lines.iter().any(|l| l.starts_with("1 raster r") && l.contains("0,0 800x600 (screenshot")), "{out}");
+    assert!(lines.iter().any(|l| l.starts_with("2 red box ")), "{out}");
+    assert!(lines.iter().any(|l| l.starts_with("3 red text ") && l.contains("\"label\"")), "{out}");
+    assert!(out.contains(&format!("(see what the marks point at: guilab image {id} --crop '")), "{out}");
+    let img = v.json(&["image", id])["render"]["path"].as_str().unwrap().to_string();
+    let (w, hh, px, ch) = crate::read_png(&img);
     assert_eq!((w, hh), (800, 600));
     let red = px.chunks(ch).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count();
     assert!(red > 300, "the box isn't in the image ({red} red pixels)");
