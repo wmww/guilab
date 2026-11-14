@@ -261,8 +261,8 @@ enum Cmd {
 
 const POLL_HELP: &str = "\
 Event kinds: message revoke app_exit expiring (wake by default); motion button key scroll
-touch gesture window_map window_unmap title output app_start lock unlock share (reported
-with the next wake or command); command agent_message work done screenshot (your own
+touch gesture window_map window_unmap title output app_start lock unlock (reported with
+the next wake or command); command agent_message work done screenshot (your own
 actions, only in `log`).
 Groups: input (motion button key scroll touch gesture), window, app, agent, all.
 An app ended by `guilab kill` doesn't wake you.
@@ -290,8 +290,6 @@ enum DebugOp {
     },
     /// Revoke the agent's lock.
     Revoke,
-    /// Share the locked session with the human (on) or stop (off).
-    Share { on: String },
 }
 
 const IMAGE_HELP: &str = "\
@@ -458,7 +456,6 @@ fn real_main(cli: Cli) -> Result<(), String> {
                 }
                 DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
                 DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
-                DebugOp::Share { on } => guilab_proto::HumanOp::Share { on: matches!(on.as_str(), "on" | "1" | "true" | "yes") },
             },
         },
         Cmd::Clip { op: ClipOp::Get } => Command::ClipGet,

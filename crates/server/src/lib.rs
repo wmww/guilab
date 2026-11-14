@@ -458,16 +458,6 @@ impl Server {
         self.abort_inputs(name, &Response::err("the human revoked your lock; input stopped"));
     }
 
-    /// Viewer's Share button: the human may use the locked session too.
-    pub fn share(&mut self, name: &str, on: bool) {
-        let Some(slot) = self.sessions.get_mut(name) else { return };
-        if slot.lock.current.as_ref().is_none_or(|l| l.shared == on) {
-            return;
-        }
-        slot.lock.set_shared(on);
-        slot.session.log.push(guilab_proto::EventData::Share { on }, None);
-    }
-
     /// Logs a warning shortly before a session expires (a wake event, so pollers can keep
     /// it alive).
     fn warn_expiry(&mut self, now: Instant) {

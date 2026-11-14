@@ -53,7 +53,7 @@ Key repeat is off. `scrollpx` distances get scaled by toolkits (GTK scrolls abou
 
 ## Working with a human
 
-The human runs `guilab show` to open the viewer. There they can watch, use the app when you don't hold the lock (or when they press Share), revoke your lock, and send messages with screenshots they drew on. The viewer always shows whether you're working (and on what) or waiting for them.
+The human runs `guilab show` to open the viewer. There they can watch, use the app when you don't hold the lock, revoke your lock, and send messages with screenshots they drew on. The viewer always shows whether you're working (and on what) or waiting for them.
 
 - `guilab work "STATUS"` marks you working, with STATUS shown live (e.g. "rebuilding after the toolbar fix"). Run it again to update it. Add `-m "MSG"` (and `--image ID`) to also post a message while you keep working. `lock` and `input` need it.
 - `guilab done "MSG"` posts MSG (what you did, or what you need from them), releases your lock and shows the human you're waiting for them. Then `guilab poll`. It refuses while a human message is unread. Not needed before `end`.

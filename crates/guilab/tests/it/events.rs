@@ -270,17 +270,15 @@ fn work_done_lock_and_revoke() {
     let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "1", "1"]);
     assert!(!ok && err.contains("guilab work"), "{err}");
     let t = lab.lock();
-    // Locked and not shared: human input is blocked.
+    // Locked: human input is blocked.
     let (ok, _, err) = lab.try_run(&["debug", "input", "move", "1", "1"]);
     assert!(!ok && err.contains("blocked"), "{err}");
-    lab.run(&["debug", "share", "on"]);
-    lab.run(&["debug", "input", "move", "1", "1"]);
     let mut p = lab.cmd(&["-t", &t, "poll", "--follow"]).stdout(Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(300));
     lab.run(&["debug", "revoke"]);
     let mut lines = BufReader::new(p.stdout.take().unwrap()).lines();
     let line = lines.next().unwrap().unwrap();
-    assert!(line.contains("the human revoked the agent's lock") && line.contains("shared the session"), "{line}");
+    assert!(line.contains("the human revoked the agent's lock"), "{line}");
     let (ok, _, err) = lab.try_run(&["-t", &t, "input", "move", "1", "1"]);
     assert!(!ok && err.contains("revoked"), "{err}");
     let (ok, _, err) = lab.try_run(&["-t", &t, "done"]);

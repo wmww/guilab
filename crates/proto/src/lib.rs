@@ -24,7 +24,7 @@ pub use input::{Action, Button};
 
 /// Protocol version. Bump it whenever a change to [`Request`] or the reply types would make
 /// an older server or CLI misread the other; mismatches then fail with "restart the server".
-pub const PROTO: u32 = 3;
+pub const PROTO: u32 = 4;
 
 /// Env var naming the server's directory (control socket, sessions), overriding
 /// `$XDG_RUNTIME_DIR/guilab`: to run a second server, e.g. guilab nested in a guilab session.
@@ -252,10 +252,9 @@ pub enum HumanOp {
         #[serde(default)]
         draw: Vec<String>,
     },
-    /// Input as the human (blocked while the session is locked and not shared).
+    /// Input as the human (blocked while the session is locked).
     Input { actions: Vec<Action> },
     Revoke,
-    Share { on: bool },
 }
 
 /// What a command may do to a session, for the lock check.

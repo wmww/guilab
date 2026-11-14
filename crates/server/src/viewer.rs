@@ -449,7 +449,6 @@ impl Server {
                             size: (o.width, o.height),
                             scale: o.scale,
                             locked: slot.lock.current.is_some(),
-                            shared: slot.lock.current.as_ref().is_some_and(|l| l.shared),
                             cursor: HostCursor::Icon(EguiCursor::Default),
                             viz: &slot.session.viz,
                             under_pointer: None,
@@ -491,8 +490,8 @@ impl Server {
         }
     }
 
-    /// Applies the human's viewer actions. Input is dropped while the session is locked
-    /// and not shared, except releases (so nothing stays stuck).
+    /// Applies the human's viewer actions. Input is dropped while the session is locked,
+    /// except releases (so nothing stays stuck).
     pub(crate) fn apply_viewer_actions(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
@@ -523,7 +522,6 @@ impl Server {
                         tracing::warn!("viewer: resizing {session}: {e:#}");
                     }
                 }
-                Action::Share { session, on } => self.share(&session, on),
                 Action::SaveScreenshot { session, image } => {
                     let (w, h, mut rgba) = match image {
                         Some(i) => (i.size[0] as u32, i.size[1] as u32, i.pixels.iter().flat_map(|c| c.to_array()).collect::<Vec<u8>>()),

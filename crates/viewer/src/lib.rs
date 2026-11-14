@@ -50,7 +50,6 @@ pub struct SessionFrame<'a> {
     pub size: (u32, u32),
     pub scale: f64,
     pub locked: bool,
-    pub shared: bool,
     pub cursor: HostCursor,
     /// Input that reached the apps (the overlay shows it).
     pub viz: &'a guilab_proto::viz::VizLog,
@@ -114,7 +113,7 @@ impl Viewer {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let cur = self.ui.current();
         for s in sessions {
-            (s.name, s.locked, s.shared, s.size, s.scale.to_bits()).hash(&mut h);
+            (s.name, s.locked, s.size, s.scale.to_bits()).hash(&mut h);
             match &s.cursor {
                 HostCursor::Icon(i) => (*i as u8 as u64).hash(&mut h),
                 HostCursor::Image(img) => (img.id | 1 << 63).hash(&mut h),
@@ -281,7 +280,6 @@ impl Viewer {
                 size: s.size,
                 scale: s.scale,
                 locked: s.locked,
-                shared: s.shared,
                 cursor: s.cursor.clone(),
                 viz: (Some(s.name) == cur.as_deref()).then_some(s.viz),
                 under_pointer: s.under_pointer,

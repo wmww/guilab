@@ -119,15 +119,14 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     h.input(&t, &["move", &x.to_string(), &y.to_string(), "sleep", "100", "pinch", "2"]);
     wait_log(&log, "zoom end", 5);
 
-    // Locked by an agent: the human's clicks are dropped, until shared.
+    // Locked by an agent: the human's clicks are dropped, until it unlocks.
     let vt = v.lock();
     click_button(&h, &t, &m, &log);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(clicks(&log), 1, "a click got through the lock");
-    v.run(&["debug", "share", "on"]);
+    v.run(&["-t", &vt, "unlock"]);
     click_button(&h, &t, &m, &log);
     wait_log(&log, "clicked 2", 5);
-    v.run(&["-t", &vt, "unlock"]);
 }
 
 #[test]

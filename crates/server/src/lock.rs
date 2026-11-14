@@ -5,8 +5,8 @@
 //!   while the session is locked, so an unlocked session stays easy to script.
 //! - Read-only commands never need it.
 //!
-//! The viewer's Revoke/Share buttons go through `Server::revoke_lock` / `Server::share`
-//! (which log the events); its input is gated by [`LockState::human_input_allowed`].
+//! The viewer's Stop button goes through `Server::revoke_lock` (which logs the event); its
+//! input is gated by [`LockState::human_input_allowed`].
 
 use std::time::Instant;
 
@@ -16,8 +16,6 @@ pub struct Lock {
     pub token: String,
     pub since: Instant,
     pub last_used: Instant,
-    /// The human may use the session too (viewer's Share button).
-    pub shared: bool,
 }
 
 #[derive(Default)]
@@ -63,7 +61,7 @@ impl LockState {
         }
         let now = Instant::now();
         let token = new_token();
-        self.current = Some(Lock { token: token.clone(), since: now, last_used: now, shared: false });
+        self.current = Some(Lock { token: token.clone(), since: now, last_used: now });
         Ok(token)
     }
 
@@ -126,14 +124,7 @@ impl LockState {
         }
     }
 
-    /// Viewer's Share button: let the human use the session while the agent keeps the lock.
-    pub fn set_shared(&mut self, shared: bool) {
-        if let Some(l) = &mut self.current {
-            l.shared = shared;
-        }
-    }
-
     pub fn human_input_allowed(&self) -> bool {
-        self.current.as_ref().is_none_or(|l| l.shared)
+        self.current.is_none()
     }
 }

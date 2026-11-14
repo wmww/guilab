@@ -176,8 +176,6 @@ pub enum EventData {
     Unlock,
     /// The human revoked the agent's lock (viewer).
     Revoke,
-    /// The human may use the session while it's locked (viewer's Share button).
-    Share { on: bool },
     /// An agent screenshot: the image and the PNG written for it.
     Screenshot { image: String, path: PathBuf },
     /// `guilab image make` made an image.
@@ -189,7 +187,7 @@ pub enum EventData {
 /// Every kind name, as used by `--wake`, `--passive` and `log --kind`.
 pub const KINDS: &[&str] = &[
     "command", "agent_message", "work", "done", "message", "motion", "button", "key", "scroll", "touch", "gesture", "app_start", "app_exit",
-    "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "share", "screenshot", "image_made",
+    "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "screenshot", "image_made",
     "expiring",
 ];
 
@@ -225,7 +223,6 @@ impl EventData {
             EventData::Lock { .. } => "lock",
             EventData::Unlock => "unlock",
             EventData::Revoke => "revoke",
-            EventData::Share { .. } => "share",
             EventData::Screenshot { .. } => "screenshot",
             EventData::ImageMade { .. } => "image_made",
             EventData::Expiring { .. } => "expiring",

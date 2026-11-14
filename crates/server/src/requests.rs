@@ -421,7 +421,7 @@ impl Server {
                 }
                 HumanOp::Input { actions } => {
                     if !slot.lock.human_input_allowed() {
-                        return Some(Response::err("the session is locked: human input is blocked (unless shared)"));
+                        return Some(Response::err("the session is locked: human input is blocked"));
                     }
                     if let Err(e) = s.check_chain(&actions) {
                         return Some(Response::err(e));
@@ -438,13 +438,6 @@ impl Server {
                         return Some(Response::err("not locked"));
                     }
                     self.revoke_lock(name);
-                    Response::ok(())
-                }
-                HumanOp::Share { on } => {
-                    if slot.lock.current.is_none() {
-                        return Some(Response::err("not locked"));
-                    }
-                    self.share(name, on);
                     Response::ok(())
                 }
             },

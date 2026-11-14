@@ -38,7 +38,6 @@ pub struct SessionView<'a> {
     pub size: (u32, u32),
     pub scale: f64,
     pub locked: bool,
-    pub shared: bool,
     /// The cursor the session's apps want.
     pub cursor: HostCursor,
     /// Input that reached the apps (current session only).
@@ -50,7 +49,7 @@ pub struct SessionView<'a> {
 
 impl SessionView<'_> {
     fn blocked(&self) -> bool {
-        self.locked && !self.shared
+        self.locked
     }
 }
 
@@ -126,7 +125,6 @@ impl Input {
 pub enum Action {
     Input { session: String, input: Input },
     Revoke { session: String },
-    Share { session: String, on: bool },
     /// A drawing started: answer with [`ViewerUi::set_screenshot`] (whole output, no cursor;
     /// the tag names the screenshot, e.g. its image id, and comes back in `Annotated::tag`).
     Freeze { session: String },
@@ -458,15 +456,14 @@ impl ViewerUi {
             }
             let secs = t.motion.toast_secs;
             if let Some(at) = self.blocked_at {
-                let (mut share, mut stop) = (false, false);
+                let mut stop = false;
                 let r = guilab_kit::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
                     ui.label("Agent using app");
-                    share = ui.button("Share").on_hover_text("Use the app alongside the agent").clicked();
                     stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
                 });
                 slot += 1;
-                if share || stop {
-                    out.push(if stop { Action::Revoke { session: s.name.to_string() } } else { Action::Share { session: s.name.to_string(), on: true } });
+                if stop {
+                    out.push(Action::Revoke { session: s.name.to_string() });
                     self.blocked_at = None;
                 } else if r.hovered() {
                     self.blocked_at = Some(now);
@@ -474,21 +471,6 @@ impl ViewerUi {
                     self.blocked_at = None;
                 } else {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs - (now - at) + 0.05));
-                }
-            }
-            // Shared: both drive the app, which is unusual and worth keeping in view.
-            if s.locked && s.shared {
-                let (mut unshare, mut stop) = (false, false);
-                guilab_kit::toast(ui, egui::Id::new("shared-toast"), view, slot, |ui| {
-                    ui.label("Sharing the app with the agent");
-                    unshare = ui.button("Stop sharing").on_hover_text("Leave the app to the agent").clicked();
-                    stop = ui.button("Take over").on_hover_text("Take the app back from the agent").clicked();
-                });
-                slot += 1;
-                if unshare {
-                    out.push(Action::Share { session: s.name.to_string(), on: false });
-                } else if stop {
-                    out.push(Action::Revoke { session: s.name.to_string() });
                 }
             }
             if let Ok(mut n) = self.notices.lock()

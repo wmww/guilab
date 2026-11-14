@@ -421,8 +421,6 @@ impl Fmt {
             EventData::Revoke => {
                 "the human revoked the agent's lock: stop sending input; `guilab lock` again only once they hand control back".into()
             }
-            EventData::Share { on: true } => "the human shared the session: they can use it while you hold the lock".into(),
-            EventData::Share { on: false } => "the human stopped sharing the session".into(),
             EventData::Screenshot { image, path } => format!("screenshot: image {image}, {}", path.display()),
             EventData::ImageMade { image } => format!("agent made image {image}"),
             EventData::Expiring { secs } => {
