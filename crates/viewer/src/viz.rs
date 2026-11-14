@@ -309,19 +309,21 @@ impl Overlay {
 
 /// Symbols the UI font lacks, drawn in `r`; `k` scales strokes (1 = 18 px text).
 fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32, k: f32) {
-    let s = Stroke::new(2.2 * k, c);
+    let s = Stroke::new(1.6 * k, c);
+    // Filled arrowheads; the shaft should end at the head's base.
     let head = |tip: Pos2, dir: egui::Vec2| {
         let n = vec2(-dir.y, dir.x);
-        p.line_segment([tip, tip - dir * 4.5 * k + n * 4.0 * k], s);
-        p.line_segment([tip, tip - dir * 4.5 * k - n * 4.0 * k], s);
+        let (len, w) = (5.0 * k, 3.6 * k);
+        p.add(egui::Shape::convex_polygon(vec![tip, tip - dir * len + n * w, tip - dir * len - n * w], c, Stroke::NONE));
     };
+    let base = 4.5 * k;
     let (l, rr, t, b, cx, cy) = (r.left(), r.right(), r.top(), r.bottom(), r.center().x, r.center().y);
     match key {
         "Enter" => {
-            // ↵: down the right side, then left, with a head.
+            // ↵: down the right side, then left.
             let y = cy + 2.0 * k;
             p.line_segment([pos2(rr, t + k), pos2(rr, y)], s);
-            p.line_segment([pos2(rr, y), pos2(l, y)], s);
+            p.line_segment([pos2(rr, y), pos2(l + base, y)], s);
             head(pos2(l, y), vec2(-1.0, 0.0));
         }
         "Space" => {
@@ -336,23 +338,25 @@ fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32, k: f32) {
             let (h, nose) = (r.height() * 0.42, r.height() * 0.4);
             let pts = vec![pos2(l, cy), pos2(l + nose, cy - h), pos2(rr, cy - h), pos2(rr, cy + h), pos2(l + nose, cy + h)];
             p.add(egui::Shape::closed_line(pts, s));
-            let (xc, d) = (pos2((l + nose + rr) / 2.0, cy), h * 0.5);
+            let (xc, d) = (pos2((l + nose + rr) / 2.0, cy), h * 0.42);
             p.line_segment([xc + vec2(-d, -d), xc + vec2(d, d)], s);
             p.line_segment([xc + vec2(d, -d), xc + vec2(-d, d)], s);
         }
         "Tab" => {
-            // ⭾: right to a bar above, left to a bar below.
-            let (y1, y2) = (cy - r.height() * 0.22, cy + r.height() * 0.22);
-            let bar = r.height() * 0.2;
-            p.line_segment([pos2(l, y1), pos2(rr - 2.0 * k, y1)], s);
-            head(pos2(rr - 2.0 * k, y1), vec2(1.0, 0.0));
-            p.line_segment([pos2(rr, y1 - bar), pos2(rr, y1 + bar)], s);
-            p.line_segment([pos2(rr, y2), pos2(l + 2.0 * k, y2)], s);
-            head(pos2(l + 2.0 * k, y2), vec2(-1.0, 0.0));
-            p.line_segment([pos2(l, y2 - bar), pos2(l, y2 + bar)], s);
+            // ⭾: right to a bar above, left to a bar below; compact, centered.
+            let w = (r.width() * 0.8).min(r.height() * 1.3);
+            let (x0, x1) = (cx - w / 2.0, cx + w / 2.0);
+            let (y1, y2) = (cy - 3.8 * k, cy + 3.8 * k);
+            let bar = 3.6 * k;
+            p.line_segment([pos2(x0, y1), pos2(x1 - 1.5 * k - base, y1)], s);
+            head(pos2(x1 - 1.5 * k, y1), vec2(1.0, 0.0));
+            p.line_segment([pos2(x1, y1 - bar), pos2(x1, y1 + bar)], s);
+            p.line_segment([pos2(x1, y2), pos2(x0 + 1.5 * k + base, y2)], s);
+            head(pos2(x0 + 1.5 * k, y2), vec2(-1.0, 0.0));
+            p.line_segment([pos2(x0, y2 - bar), pos2(x0, y2 + bar)], s);
         }
         _ => {
-            // Arrows: an outlined triangle pointing that way.
+            // Arrows: a small filled triangle pointing that way.
             let d = match key {
                 "Left" => vec2(-1.0, 0.0),
                 "Right" => vec2(1.0, 0.0),
@@ -360,9 +364,9 @@ fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32, k: f32) {
                 _ => vec2(0.0, 1.0),
             };
             let n = vec2(-d.y, d.x);
-            let rad = r.height() * 0.6;
+            let rad = r.height() * 0.55;
             let c0 = pos2(cx, cy);
-            p.add(egui::Shape::closed_line(vec![c0 + d * rad, c0 - d * rad * 0.6 + n * rad * 0.85, c0 - d * rad * 0.6 - n * rad * 0.85], s));
+            p.add(egui::Shape::convex_polygon(vec![c0 + d * rad, c0 - d * rad * 0.6 + n * rad * 0.8, c0 - d * rad * 0.6 - n * rad * 0.8], c, Stroke::NONE));
         }
     }
 }
