@@ -280,9 +280,11 @@ impl Overlay {
             let text = if icon { prefix.to_string() } else { label.clone() };
             let g = painter.layout_no_wrap(text, FontId::proportional(font), color);
             let h = font * 1.2;
-            let icon_w = if icon { font * 1.3 } else { 0.0 };
+            let arrow = matches!(key, "Left" | "Right" | "Up" | "Down");
+            // Arrows are letter-sized; the other symbols a bit wider than letters.
+            let icon_w = if arrow { font * 0.75 } else if icon { font * 1.3 } else { 0.0 };
             let content = g.size().x + icon_w;
-            let min_w = if icon { font * 1.9 } else { font * 1.5 };
+            let min_w = if icon && !arrow { font * 1.9 } else { font * 1.5 };
             let size = vec2((content + font * 0.6).max(min_w), h + font * 0.3);
             let r = Rect::from_min_size(pos2(view.max.x - 14.0 - size.x, y - size.y), size);
             painter.rect_filled(r, font * 0.25, Color32::from_black_alpha((f * 180.0) as u8));
@@ -314,7 +316,6 @@ fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32, k: f32) {
         p.line_segment([tip, tip - dir * 4.5 * k - n * 4.0 * k], s);
     };
     let (l, rr, t, b, cx, cy) = (r.left(), r.right(), r.top(), r.bottom(), r.center().x, r.center().y);
-    let half = r.width().min(r.height() * 1.4) / 2.0;
     match key {
         "Enter" => {
             // ↵: down the right side, then left, with a head.
@@ -331,26 +332,37 @@ fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32, k: f32) {
             p.line_segment([pos2(rr, y), pos2(rr, y - 4.0 * k)], s);
         }
         "Backspace" => {
-            p.line_segment([pos2(rr, cy), pos2(l, cy)], s);
-            head(pos2(l, cy), vec2(-1.0, 0.0));
-            p.line_segment([pos2(rr, t + 3.0 * k), pos2(rr, b - 3.0 * k)], s);
+            // ⌫: a tag pointing left with an x in it.
+            let (h, nose) = (r.height() * 0.42, r.height() * 0.4);
+            let pts = vec![pos2(l, cy), pos2(l + nose, cy - h), pos2(rr, cy - h), pos2(rr, cy + h), pos2(l + nose, cy + h)];
+            p.add(egui::Shape::closed_line(pts, s));
+            let (xc, d) = (pos2((l + nose + rr) / 2.0, cy), h * 0.5);
+            p.line_segment([xc + vec2(-d, -d), xc + vec2(d, d)], s);
+            p.line_segment([xc + vec2(d, -d), xc + vec2(-d, d)], s);
         }
         "Tab" => {
-            // ⇥: an arrow to a bar.
-            p.line_segment([pos2(l, cy), pos2(rr - 2.0 * k, cy)], s);
-            head(pos2(rr - 2.0 * k, cy), vec2(1.0, 0.0));
-            p.line_segment([pos2(rr, t + 3.0 * k), pos2(rr, b - 3.0 * k)], s);
-        }
-        "Left" | "Right" => {
-            let d = if key == "Left" { -1.0 } else { 1.0 };
-            p.line_segment([pos2(cx - d * half, cy), pos2(cx + d * half, cy)], s);
-            head(pos2(cx + d * half, cy), vec2(d, 0.0));
+            // ⭾: right to a bar above, left to a bar below.
+            let (y1, y2) = (cy - r.height() * 0.22, cy + r.height() * 0.22);
+            let bar = r.height() * 0.2;
+            p.line_segment([pos2(l, y1), pos2(rr - 2.0 * k, y1)], s);
+            head(pos2(rr - 2.0 * k, y1), vec2(1.0, 0.0));
+            p.line_segment([pos2(rr, y1 - bar), pos2(rr, y1 + bar)], s);
+            p.line_segment([pos2(rr, y2), pos2(l + 2.0 * k, y2)], s);
+            head(pos2(l + 2.0 * k, y2), vec2(-1.0, 0.0));
+            p.line_segment([pos2(l, y2 - bar), pos2(l, y2 + bar)], s);
         }
         _ => {
-            let d = if key == "Up" { -1.0 } else { 1.0 };
-            let half = r.height() / 2.0;
-            p.line_segment([pos2(cx, cy - d * half), pos2(cx, cy + d * half)], s);
-            head(pos2(cx, cy + d * half), vec2(0.0, d));
+            // Arrows: an outlined triangle pointing that way.
+            let d = match key {
+                "Left" => vec2(-1.0, 0.0),
+                "Right" => vec2(1.0, 0.0),
+                "Up" => vec2(0.0, -1.0),
+                _ => vec2(0.0, 1.0),
+            };
+            let n = vec2(-d.y, d.x);
+            let rad = r.height() * 0.6;
+            let c0 = pos2(cx, cy);
+            p.add(egui::Shape::closed_line(vec![c0 + d * rad, c0 - d * rad * 0.6 + n * rad * 0.85, c0 - d * rad * 0.6 - n * rad * 0.85], s));
         }
     }
 }
