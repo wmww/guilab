@@ -17,7 +17,7 @@ use egui::{
 };
 
 use crate::{
-    mark::{COLORS, FONT, Kind, Mark, PAD, Tool, Xf, text_backing},
+    mark::{COLORS, FONT, Kind, Mark, PAD, STROKE, Tool, Xf, text_backing},
     raster::{Renderer, downscale},
 };
 
@@ -71,6 +71,10 @@ struct Drawing {
     /// The mark being dragged out.
     active: Option<Mark>,
     editing: Option<Editing>,
+    /// Move tool: the mark being dragged, and the image point it was last dragged to.
+    moving: Option<(usize, Pos2)>,
+    /// On-screen backing of each text mark as last painted (hit testing), by mark index.
+    text_rects: Vec<Option<Rect>>,
 }
 
 struct Queued {
@@ -93,6 +97,8 @@ pub struct Sketch {
     queue: Vec<Queued>,
     want_shot: bool,
     renderer: Option<Renderer>,
+    /// The image transform as of the last [`Self::canvas`].
+    last_xf: Option<Xf>,
 }
 
 /// Marks smaller than this (screen points) are accidental clicks.
@@ -111,6 +117,7 @@ impl Sketch {
             queue: Vec::new(),
             want_shot: false,
             renderer: None,
+            last_xf: None,
         }
     }
 
@@ -124,6 +131,13 @@ impl Sketch {
     /// keep keyboard input in egui (undo, typing).
     pub fn drawing_open(&self) -> bool {
         self.drawing.is_some()
+    }
+
+    /// The topmost mark under screen point `p` (as painted last frame), with the Move tool.
+    pub fn mark_at(&self, p: Pos2) -> Option<usize> {
+        let (d, xf) = (self.drawing.as_ref()?, self.last_xf?);
+        let tol = 6.0 + STROKE * d.scale * xf.zoom / 2.0;
+        (0..d.marks.len()).rev().find(|&i| d.marks[i].hit(p, xf, tol, d.text_rects.get(i).copied().flatten()))
     }
 
     /// True once after a drawing started: the host should call [`Self::set_screenshot`].
@@ -225,7 +239,7 @@ impl Sketch {
             }
             if resp.on_hover_text(name).clicked() {
                 self.color = c;
-                if self.tool == Tool::Interact {
+                if matches!(self.tool, Tool::Interact | Tool::Move) {
                     self.tool = Tool::Pen;
                 }
             }
@@ -267,16 +281,48 @@ impl Sketch {
             self.undo();
         }
 
+        // Move tool: drag the mark under the press (elsewhere the host pans the view).
+        if self.tool == Tool::Move {
+            if pressed
+                && resp.hovered()
+                && let Some(p) = pos
+            {
+                if let Some(d) = &mut self.drawing
+                    && let Some(e) = d.editing.take()
+                {
+                    push_text(&mut d.marks, e);
+                }
+                let hit = self.mark_at(p);
+                if let (Some(d), Some(i)) = (&mut self.drawing, hit) {
+                    d.moving = Some((i, xf.invert(p)));
+                }
+            }
+            if let Some(d) = &mut self.drawing
+                && let Some((i, last)) = &mut d.moving
+            {
+                for p in moves.iter().copied().chain(pos) {
+                    let q = xf.invert(p);
+                    if let Some(m) = d.marks.get_mut(*i) {
+                        m.translate(q - *last);
+                    }
+                    *last = q;
+                }
+                if released {
+                    d.moving = None;
+                }
+            }
+        }
+
         // Press: start a mark (and a drawing, freezing the screenshot) or place text.
         if pressed
             && resp.hovered()
             && let Some(p) = pos.filter(|p| on_image(*p))
-            && self.tool != Tool::Interact
+            && !matches!(self.tool, Tool::Interact | Tool::Move)
         {
             let q = to_img(p);
             let d = self.drawing.get_or_insert_with(|| {
                 self.want_shot = true;
-                Drawing { shot: None, scale: view.scale, marks: Vec::new(), active: None, editing: None }
+                Drawing { shot: None, scale: view.scale, marks: Vec::new(), active: None, editing: None, moving: None, text_rects: Vec::new() }
             });
             // A press elsewhere ends text editing (a press on the box itself isn't ours).
             let near_edit = d.editing.as_ref().is_some_and(|e| (e.pos - q).length() * zoom < 6.0);
@@ -295,7 +341,7 @@ impl Sketch {
                     }
                     None
                 }
-                Tool::Interact => None,
+                Tool::Interact | Tool::Move => None,
             };
             d.active = kind.map(|kind| Mark { kind, color: self.color });
         }
@@ -324,7 +370,7 @@ impl Sketch {
         // Double-click with any tool: text.
         if double
             && resp.hovered()
-            && self.tool != Tool::Text
+            && !matches!(self.tool, Tool::Text | Tool::Move)
             && let Some(d) = &mut self.drawing
             && let Some(p) = pos.filter(|p| on_image(*p))
         {
@@ -340,8 +386,13 @@ impl Sketch {
                 shapes.push(Shape::image(tex.id(), view.rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE));
             }
             let mut layout = |t: String, size: f32, c: Color32| painter.layout_no_wrap(t, FontId::proportional(size), c);
+            d.text_rects.clear();
             for m in d.marks.iter().chain(&d.active) {
+                let first = shapes.len();
                 m.shapes(d.scale, xf, &mut layout, &mut shapes);
+                // A text mark's first shape is its backing.
+                let r = matches!(m.kind, Kind::Text(..)).then(|| shapes.get(first).map(Shape::visual_bounding_rect)).flatten();
+                d.text_rects.push(r);
             }
         }
         painter.extend(shapes);
@@ -354,7 +405,15 @@ impl Sketch {
         if self.drawing.is_some() {
             self.bar(ui, view.clip);
         }
-        if self.tool != Tool::Interact && resp.hovered() && pos.is_some_and(on_image) {
+        self.last_xf = Some(xf);
+        if self.tool == Tool::Move {
+            // Over empty space the host shows its pan cursor.
+            if self.drawing.as_ref().is_some_and(|d| d.moving.is_some()) {
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if resp.hovered() && pos.is_some_and(|p| self.mark_at(p).is_some()) {
+                ui.ctx().set_cursor_icon(CursorIcon::Move);
+            }
+        } else if self.tool != Tool::Interact && resp.hovered() && pos.is_some_and(on_image) {
             ui.ctx().set_cursor_icon(if self.tool == Tool::Text { CursorIcon::Text } else { CursorIcon::Crosshair });
         }
     }
@@ -473,6 +532,17 @@ fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32) {
             let o = r.left_top() + vec2(2.0, 0.0);
             let pts = [o, o + vec2(0.0, 14.0), o + vec2(4.0, 10.5), o + vec2(7.0, 16.0), o + vec2(9.0, 15.0), o + vec2(6.5, 9.5), o + vec2(11.0, 9.5)];
             p.add(Shape::closed_line(pts.to_vec(), s));
+        }
+        Tool::Move => {
+            // Four-way arrows.
+            let c0 = r.center();
+            let h = r.width() / 2.0;
+            for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+                let tip = c0 + d * h;
+                let n = vec2(-d.y, d.x);
+                p.line_segment([c0, tip - d * 2.0], s);
+                p.add(Shape::convex_polygon(vec![tip, tip - d * 4.5 + n * 3.5, tip - d * 4.5 - n * 3.5], c, Stroke::NONE));
+            }
         }
         Tool::Pen => {
             let pts: Vec<Pos2> = (0..=12)

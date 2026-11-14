@@ -108,6 +108,12 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     // Moving off the image gives the app a pointer leave (host 600,780: the chat box).
     h.input(&t, &["move", "600", "780"]);
     wait_log(&log, "pointer left", 5);
+    // A pinch over the app goes to the app (with "Use the app" selected), not the view.
+    let (zx, zy) = center(&std::fs::read_to_string(&log).unwrap(), "zoom", 1.0);
+    let x = (m.origin.0 + zx.parse::<f64>().unwrap() * m.scale).round() as i64;
+    let y = (m.origin.1 + zy.parse::<f64>().unwrap() * m.scale).round() as i64;
+    h.input(&t, &["move", &x.to_string(), &y.to_string(), "sleep", "100", "pinch", "2"]);
+    wait_log(&log, "zoom end", 5);
 
     // Locked by an agent: the human's clicks are dropped, until shared.
     let vt = v.lock();
@@ -219,9 +225,9 @@ fn draw_and_send() {
         h.input(&t, actions);
         std::thread::sleep(Duration::from_millis(150));
     };
-    step(&["move", "19", "115", "click"]); // box tool
+    step(&["move", "19", "147", "click"]); // box tool
     step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
-    step(&["move", "19", "244", "click"]); // text tool
+    step(&["move", "19", "276", "click"]); // text tool
     step(&["move", "520", "330", "click"]);
     step(&["type", "label", "key", "Return"]);
     step(&["move", "600", "777", "click"]); // message box

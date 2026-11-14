@@ -3,8 +3,12 @@
 //! egui: sessions come in as [`SessionView`]s, the human's actions go out as [`Action`]s,
 //! which the server applies.
 //!
-//! Mouse scheme (the app gets plain clicks, drags and scrolling over its image):
-//! - Ctrl+scroll anywhere, or scroll outside the image: zoom at the pointer. Pinch: zoom.
+//! Pointer scheme:
+//! - "Use the app" tool: clicks, drags, scrolling and touchpad gestures over the image go
+//!   to the app.
+//! - Move tool: drag a mark to move it; drag anywhere else to pan.
+//! - Scrolling that doesn't go to the app (drawing and Move tools, outside the image) moves
+//!   the view, per [`NavMode`]. Ctrl+scroll always zooms at the pointer.
 //! - Middle-drag anywhere, or any drag outside the image: pan. A middle click without
 //!   movement still reaches the app (sent on release).
 //! - Toolbar: zoom out/in, Fit (the default; follows the window size, up to the larger of
@@ -15,9 +19,9 @@
 use std::collections::HashMap;
 
 use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
-use guilab_markup::{Annotated, Chat, FeedItem, Sketch};
+use guilab_markup::{Annotated, Chat, FeedItem, Sketch, Tool};
 
-use crate::host::HostInput;
+use crate::host::{Gesture, HostInput};
 
 /// A session as the UI sees it.
 pub struct SessionView<'a> {
@@ -53,12 +57,57 @@ pub enum Input {
     Scroll { dx: f64, dy: f64, steps: Option<(f64, f64)>, stop: bool },
     /// evdev key code.
     Key { code: u32, pressed: bool },
+    PinchBegin { fingers: u32 },
+    /// Delta in output pixels; `scale` absolute (vs. begin), `rotation` relative degrees.
+    PinchUpdate { dx: f64, dy: f64, scale: f64, rotation: f64 },
+    PinchEnd { cancelled: bool },
+    SwipeBegin { fingers: u32 },
+    SwipeUpdate { dx: f64, dy: f64 },
+    SwipeEnd { cancelled: bool },
+}
+
+/// How scrolling moves the view when it doesn't go to the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavMode {
+    /// Scrolling zooms at the pointer (mouse wheels; touchpads without gestures).
+    ScrollZooms,
+    /// Two-axis scrolling pans and pinching zooms at the pointer (touchpads).
+    ScrollPans,
+}
+
+/// The [`NavMode`] to use: fixed, or picked per scroll event from the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NavSetting {
+    /// [`NavMode::ScrollPans`] for smooth (touchpad) scrolling when the host sends pinch
+    /// gestures, else [`NavMode::ScrollZooms`].
+    #[default]
+    Auto,
+    Fixed(NavMode),
+}
+
+impl NavSetting {
+    fn resolve(self, smooth: bool, gestures: bool) -> NavMode {
+        match self {
+            NavSetting::Fixed(m) => m,
+            NavSetting::Auto if smooth && gestures => NavMode::ScrollPans,
+            NavSetting::Auto => NavMode::ScrollZooms,
+        }
+    }
+}
+
+/// Where the current touchpad gesture goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GestureTo {
+    /// The app; a pinch, else a swipe.
+    App { pinch: bool },
+    /// The view: pinch zooms; the last absolute pinch scale.
+    View { scale: f64 },
 }
 
 impl Input {
     /// Releases are always delivered, even while human input is blocked.
     pub fn is_release(&self) -> bool {
-        matches!(self, Input::Button { pressed: false, .. } | Input::Key { pressed: false, .. })
+        matches!(self, Input::Button { pressed: false, .. } | Input::Key { pressed: false, .. } | Input::PinchEnd { .. } | Input::SwipeEnd { .. })
     }
 }
 
@@ -133,6 +182,11 @@ pub struct ViewerUi {
     pointer: Option<Pos2>,
     /// The session our pointer motion last went to and that hasn't had a leave since.
     pointer_in: Option<String>,
+    /// The host sends touchpad gestures (set by the viewer each frame).
+    pub gestures: bool,
+    pub nav: NavSetting,
+    /// The touchpad gesture in progress: where it goes, and for the app, which session.
+    gesture: Option<(GestureTo, String)>,
 }
 
 fn linux_button(b: PointerButton) -> u32 {
@@ -158,8 +212,12 @@ impl ViewerUi {
 
     /// Releases everything the human holds in a session (on hide, tab switch, lock).
     pub fn release_all(&mut self) -> Vec<Action> {
-        let Some(session) = self.held_in.take() else { return Vec::new() };
         let mut out = Vec::new();
+        if let Some((GestureTo::App { pinch }, session)) = self.gesture.take() {
+            let input = if pinch { Input::PinchEnd { cancelled: true } } else { Input::SwipeEnd { cancelled: true } };
+            out.push(Action::Input { session, input });
+        }
+        let Some(session) = self.held_in.take() else { return out };
         for button in self.held_buttons.drain(..) {
             out.push(Action::Input { session: session.clone(), input: Input::Button { button, pressed: false } });
         }
@@ -278,7 +336,7 @@ impl ViewerUi {
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
             let drawing = p.sketch.active();
-            self.view(ui, s, &mut p.zoom, view, resp.hovered(), drawing, inputs, &mut out);
+            self.view(ui, s, &mut p.zoom, view, resp.hovered(), &p.sketch, inputs, &mut out);
             if drawing && let Some(rect) = self.image_rect {
                 let size = [s.size.0 as usize, s.size.1 as usize];
                 p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32 });
@@ -312,7 +370,9 @@ impl ViewerUi {
 
     #[allow(clippy::too_many_arguments)]
     /// `drawing`: the sketch owns the pointer over the image; nothing goes to the app.
-    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, drawing: bool, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, sketch: &Sketch, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+        let drawing = sketch.active();
+        let move_tool = sketch.tool == Tool::Move;
         let ppp = ui.ctx().pixels_per_point();
         // Session pixels in points at zoom 1.
         let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
@@ -364,6 +424,48 @@ impl ViewerUi {
                         }
                         self.held_keys.push(k.code);
                         send(out, Input::Key { code: k.code, pressed: true });
+                    }
+                    continue;
+                }
+                HostInput::Gesture(g) => {
+                    // Over the app with "Use the app": the whole gesture goes to it. Else
+                    // a pinch zooms the view (swipes do nothing).
+                    let k = s.size.0 as f64 / img.width() as f64; // session px per point
+                    match g {
+                        Gesture::PinchBegin { fingers } | Gesture::SwipeBegin { fingers } => {
+                            let pinch = matches!(g, Gesture::PinchBegin { .. });
+                            let over_app = to_app && self.pointer.is_some_and(|p| ours(p) && img.contains(p));
+                            if over_app {
+                                self.gesture = Some((GestureTo::App { pinch }, s.name.to_string()));
+                                send(out, if pinch { Input::PinchBegin { fingers } } else { Input::SwipeBegin { fingers } });
+                            } else {
+                                self.gesture = pinch.then(|| (GestureTo::View { scale: 1.0 }, s.name.to_string()));
+                            }
+                        }
+                        Gesture::PinchUpdate { dx, dy, scale, rotation } => match &mut self.gesture {
+                            Some((GestureTo::App { pinch: true }, _)) => send(out, Input::PinchUpdate { dx: dx * k, dy: dy * k, scale, rotation }),
+                            Some((GestureTo::View { scale: last }, _)) => {
+                                if scale > 0.0
+                                    && *last > 0.0
+                                    && let Some(p) = self.pointer
+                                {
+                                    zoom_at(z, &mut img, p, (scale / *last) as f32);
+                                }
+                                *last = scale;
+                            }
+                            _ => {}
+                        },
+                        Gesture::SwipeUpdate { dx, dy } => {
+                            if matches!(self.gesture, Some((GestureTo::App { pinch: false }, _))) {
+                                send(out, Input::SwipeUpdate { dx: dx * k, dy: dy * k });
+                            }
+                        }
+                        Gesture::PinchEnd { cancelled } | Gesture::SwipeEnd { cancelled } => {
+                            if let Some((GestureTo::App { pinch }, session)) = self.gesture.take() {
+                                let input = if pinch { Input::PinchEnd { cancelled } } else { Input::SwipeEnd { cancelled } };
+                                out.push(Action::Input { session, input });
+                            }
+                        }
                     }
                     continue;
                 }
@@ -438,7 +540,8 @@ impl ViewerUi {
                         self.middle = Some((pos, to_session(img, pos)));
                         continue;
                     }
-                    if !on_image {
+                    // Off the image, or with the Move tool anywhere but on a mark: pan.
+                    if !on_image || (move_tool && button == PointerButton::Primary && sketch.mark_at(pos).is_none()) {
                         if self.held_buttons.is_empty() {
                             self.panning = Some(pos);
                         }
@@ -459,6 +562,20 @@ impl ViewerUi {
                         continue;
                     }
                     if modifiers.ctrl || drawing || !img.contains(p) {
+                        let smooth = unit == egui::MouseWheelUnit::Point;
+                        if !modifiers.ctrl && self.nav.resolve(smooth, self.gestures) == NavMode::ScrollPans {
+                            let k = match unit {
+                                egui::MouseWheelUnit::Point => 1.0,
+                                egui::MouseWheelUnit::Line => 40.0,
+                                egui::MouseWheelUnit::Page => view.height(),
+                            };
+                            if delta != Vec2::ZERO {
+                                z.pan += delta * k;
+                                z.fit = false;
+                                img = image(z);
+                            }
+                            continue;
+                        }
                         let notches = match unit {
                             egui::MouseWheelUnit::Point => delta.y / 50.0,
                             egui::MouseWheelUnit::Line => delta.y,
@@ -487,11 +604,6 @@ impl ViewerUi {
                         }
                     };
                     send(out, input);
-                }
-                Event::Zoom(f) => {
-                    if let Some(p) = self.pointer.filter(|p| ours(*p)) {
-                        zoom_at(z, &mut img, p, f);
-                    }
                 }
                 _ => {}
             }
@@ -533,6 +645,8 @@ impl ViewerUi {
         // Cursor: the app's over its image, a hand while panning.
         if self.panning.is_some() {
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        } else if move_tool && hovered {
+            ui.ctx().set_cursor_icon(CursorIcon::Grab); // the canvas shows Move over marks
         } else if hovered && !drawing && let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
             if img.contains(p) && !blocked {
                 ui.ctx().set_cursor_icon(s.cursor);

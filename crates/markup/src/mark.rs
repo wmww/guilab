@@ -6,10 +6,12 @@ use std::sync::Arc;
 
 use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2, epaint::Galley, pos2, vec2};
 
-/// Drawing tools. `Interact` = not drawing (the host uses pointer input itself).
+/// Drawing tools. `Interact` = not drawing (the host uses pointer input itself). `Move`
+/// drags marks, and the host pans the view when the press isn't on a mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Interact,
+    Move,
     Pen,
     Box,
     Ellipse,
@@ -19,11 +21,12 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 7] = [Tool::Interact, Tool::Pen, Tool::Box, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Text];
+    pub const ALL: [Tool; 8] = [Tool::Interact, Tool::Move, Tool::Pen, Tool::Box, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Text];
 
     pub fn name(self) -> &'static str {
         match self {
             Tool::Interact => "Use the app (no drawing)",
+            Tool::Move => "Move marks, or drag to pan the view",
             Tool::Pen => "Pen",
             Tool::Box => "Box",
             Tool::Ellipse => "Ellipse",
@@ -118,6 +121,46 @@ impl Mark {
             Kind::Text(_, t) => return t.trim().is_empty(),
         };
         (b - a).length() < min
+    }
+
+    pub fn translate(&mut self, d: Vec2) {
+        match &mut self.kind {
+            Kind::Pen(pts) => pts.iter_mut().for_each(|p| *p += d),
+            Kind::Box(a, b) | Kind::Ellipse(a, b) | Kind::Line(a, b) | Kind::Arrow(a, b) => {
+                *a += d;
+                *b += d;
+            }
+            Kind::Text(p, _) => *p += d,
+        }
+    }
+
+    /// Whether screen point `p` is on the mark (within `tol` points of its stroke).
+    /// `text_rect`: the text's backing on screen, for text marks.
+    pub fn hit(&self, p: Pos2, xf: Xf, tol: f32, text_rect: Option<Rect>) -> bool {
+        let q = |a: Pos2| xf.apply(a);
+        let seg = |a: Pos2, b: Pos2| {
+            let (a, b) = (q(a), q(b));
+            let ab = b - a;
+            let t = if ab.length_sq() > 0.0 { ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+            (a + ab * t - p).length() <= tol
+        };
+        match &self.kind {
+            Kind::Pen(pts) => pts.len() == 1 && (q(pts[0]) - p).length() <= tol || pts.windows(2).any(|w| seg(w[0], w[1])),
+            Kind::Line(a, b) | Kind::Arrow(a, b) => seg(*a, *b),
+            Kind::Box(a, b) => {
+                let r = Rect::from_two_pos(q(*a), q(*b));
+                r.expand(tol).contains(p) && !r.shrink(tol).contains(p)
+            }
+            Kind::Ellipse(a, b) => {
+                let r = Rect::from_two_pos(q(*a), q(*b));
+                let (c, rad) = (r.center(), r.size() / 2.0);
+                // Distance from the outline, roughly: radial offset scaled to points.
+                let d = p - c;
+                let n = vec2(d.x / rad.x.max(1.0), d.y / rad.y.max(1.0)).length();
+                (n - 1.0).abs() * rad.min_elem().max(1.0) <= tol || r.width().min(r.height()) < tol * 2.0 && r.expand(tol).contains(p)
+            }
+            Kind::Text(..) => text_rect.is_some_and(|r| r.contains(p)),
+        }
     }
 
     /// Appends the mark's shapes. `scale`: screenshot pixels per logical pixel (sizes).

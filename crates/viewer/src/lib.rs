@@ -143,7 +143,7 @@ impl Viewer {
             .filter_map(|i| match i {
                 HostInput::Egui(egui::Event::Key { .. } | egui::Event::Text(_)) if to_session => None,
                 HostInput::Egui(e) => Some(e.clone()),
-                HostInput::Key(_) => None,
+                HostInput::Key(_) | HostInput::Gesture(_) => None,
             })
             .collect();
         // The UI gets everything in order (pointer and keys interleaved), keys only if
@@ -187,6 +187,7 @@ impl Viewer {
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
         let mut actions = Vec::new();
+        self.ui.gestures = self.host.has_gestures();
         let ui_state = &mut self.ui;
         let out = self.gfx.ctx.run_ui(raw, |ui| {
             // Input is consumed in the first pass only (egui may run several).

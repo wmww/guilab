@@ -113,6 +113,12 @@ fn to_event(s: &Session, input: Input) -> InputEvent {
             stop,
         },
         Input::Key { code, pressed } => InputEvent::Key { code: Keycode::new(code + 8), pressed },
+        Input::PinchBegin { fingers } => InputEvent::PinchBegin { fingers },
+        Input::PinchUpdate { dx, dy, scale: s, rotation } => InputEvent::PinchUpdate { delta: (dx / scale, dy / scale).into(), scale: s, rotation },
+        Input::PinchEnd { cancelled } => InputEvent::PinchEnd { cancelled },
+        Input::SwipeBegin { fingers } => InputEvent::SwipeBegin { fingers },
+        Input::SwipeUpdate { dx, dy } => InputEvent::SwipeUpdate { delta: (dx / scale, dy / scale).into() },
+        Input::SwipeEnd { cancelled } => InputEvent::SwipeEnd { cancelled },
     }
 }
 

@@ -108,3 +108,37 @@ fn draw_queue_send() {
     assert!(b.image.pixels.iter().all(|p| *p == Color32::WHITE), "text isn't baked by default");
     assert!(b.preview.pixels.iter().any(|p| *p != Color32::WHITE), "the preview has it");
 }
+
+#[test]
+fn move_tool_drags_marks() {
+    let ctx = egui::Context::default();
+    let mut sketch = Sketch::new("s");
+    // Image 400x300 at 1:1 at (0, 0).
+    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0 };
+    let run = |events: Vec<Event>, sketch: &mut Sketch| {
+        frame(&ctx, events, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| sketch.canvas(ui, view));
+        })
+    };
+    sketch.tool = Tool::Line;
+    run(vec![Event::PointerMoved(pos2(50.0, 50.0))], &mut sketch);
+    run(vec![button(pos2(50.0, 50.0), true)], &mut sketch);
+    sketch.set_screenshot(white(400, 300));
+    run(vec![Event::PointerMoved(pos2(150.0, 50.0))], &mut sketch);
+    run(vec![button(pos2(150.0, 50.0), false)], &mut sketch);
+
+    sketch.tool = Tool::Move;
+    run(vec![Event::PointerMoved(pos2(100.0, 200.0))], &mut sketch);
+    assert_eq!(sketch.mark_at(pos2(100.0, 200.0)), None, "empty space");
+    assert_eq!(sketch.mark_at(pos2(100.0, 52.0)), Some(0), "on the line");
+    // Drag the line down by 100.
+    run(vec![Event::PointerMoved(pos2(100.0, 52.0))], &mut sketch);
+    run(vec![button(pos2(100.0, 52.0), true)], &mut sketch);
+    run(vec![Event::PointerMoved(pos2(100.0, 100.0)), Event::PointerMoved(pos2(100.0, 152.0))], &mut sketch);
+    run(vec![button(pos2(100.0, 152.0), false)], &mut sketch);
+    assert!(sketch.drawing_open() && sketch.tool == Tool::Move);
+    let out = sketch.take_all();
+    let px = |x: usize, y: usize| out[0].image.pixels[y * 400 + x];
+    assert_eq!(px(100, 150), RED, "moved here");
+    assert_eq!(px(100, 50), Color32::WHITE, "gone from here");
+}

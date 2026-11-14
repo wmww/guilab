@@ -26,7 +26,9 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 - Host input is one ordered list (`HostInput`: egui events and raw evdev keys), so "click, type, click" stays in order when one frame has all of it. egui gets the egui events (minus Key/Text when keys go to the session); the UI walks the full list.
 - Keys are forwarded as raw evdev codes (+8 = xkb code), so the session keeps its own keymap. Modifiers reach egui via `update_modifiers`.
 - The UI tracks the buttons and keys it pressed in a session and releases them on tab switch, lock (blocked), keyboard leave and hide.
-- Pinch (`zwp_pointer_gesture_pinch_v1`, bound by hand) becomes egui `Zoom`; never forwarded. Cursor: the session's named cursor (`CursorImageStatus::Named`) maps to egui `CursorIcon` and then to `wp_cursor_shape_v1`.
+- Pinch and swipe (`zwp_pointer_gesture_*_v1`, bound by hand) arrive as `HostInput::Gesture`. A gesture that begins over the image with "Use the app" goes to the app whole; otherwise a pinch zooms the view at the pointer and a swipe does nothing.
+- Key repeat: the host compositor leaves repeat to clients, so `HostState::tick_repeat` (called each server tick via `wants_draw`) repeats the held key for egui only, at the host's `repeat_info`. Raw keys forwarded to sessions never repeat; the session's apps repeat themselves (see design.md).
+- Pointer leave: the UI tracks which session last got motion (`pointer_in`) and sends `Input::Leave` when the pointer leaves the image, a tool takes over, the lock blocks, the tab changes or the window loses the pointer. Cursor: the session's named cursor (`CursorImageStatus::Named`) maps to egui `CursorIcon` and then to `wp_cursor_shape_v1`.
 - Wheel vs touchpad: axis events with value120/discrete or source Wheel become egui `Line` units (notches), else `Point`. Forwarded wheel = 15 logical px per notch (like agent `scroll`); smooth scroll is scaled so content follows the fingers.
 
 ## Chat and drawing (ui.rs, markup)
@@ -39,6 +41,7 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 
 ## Testing
 - Host = a second guilab server's session (tests: `tests/it/viewer.rs`; it pins the coordinate mapping by moving the host pointer and reading the viewed session's human motion event). Lab commands drop `WAYLAND_DISPLAY`, so a test can never open on the real desktop.
-- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=101, text y=230; message box near the bottom). Layout changes move them.
+- `draw_and_send` clicks fixed viewer positions (toolbar at x=19: box y=147, text y=276; message box near the bottom). Layout changes move them. Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
+- egui gotchas: `consume_key` ignores Shift (use `consume_plain_enter` for Enter-sends); a TextEdit with a custom `.frame()` ignores `.margin()`.
 - Manually: `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/glv-h guilab new host -s 1400x900`, then `guilab show` with `WAYLAND_DISPLAY=<that session's socket>` against another runtime dir, drive the host session with `input`, screenshot it.
 - The real desktop's `WAYLAND_DISPLAY` is usually set in agent shells; never run `guilab show` without overriding it.

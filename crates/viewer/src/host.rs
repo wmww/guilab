@@ -56,7 +56,11 @@ use wayland_protocols::wp::{
     cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1, wp_fractional_scale_v1::{self, WpFractionalScaleV1}},
     linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1},
-    pointer_gestures::zv1::client::{zwp_pointer_gesture_pinch_v1::{self, ZwpPointerGesturePinchV1}, zwp_pointer_gestures_v1::ZwpPointerGesturesV1},
+    pointer_gestures::zv1::client::{
+        zwp_pointer_gesture_pinch_v1::{self, ZwpPointerGesturePinchV1},
+        zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
+        zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
+    },
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
@@ -80,6 +84,19 @@ pub fn connect(path: &Path) -> anyhow::Result<Connected> {
 pub enum HostInput {
     Egui(egui::Event),
     Key(RawKey),
+    Gesture(Gesture),
+}
+
+/// A touchpad gesture on the host (zwp_pointer_gestures). Deltas in surface points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    PinchBegin { fingers: u32 },
+    /// `scale` is absolute (vs. begin), `rotation` relative degrees.
+    PinchUpdate { dx: f64, dy: f64, scale: f64, rotation: f64 },
+    PinchEnd { cancelled: bool },
+    SwipeBegin { fingers: u32 },
+    SwipeUpdate { dx: f64, dy: f64 },
+    SwipeEnd { cancelled: bool },
 }
 
 /// A key on the host keyboard, as a raw evdev code.
@@ -131,6 +148,7 @@ pub struct HostState {
     fractional: Option<WpFractionalScaleV1>,
     gestures: Option<ZwpPointerGesturesV1>,
     pinch: Option<ZwpPointerGesturePinchV1>,
+    swipe: Option<ZwpPointerGestureSwipeV1>,
     cursor_shapes: Option<CursorShapeManager>,
     cursor_device: Option<WpCursorShapeDeviceV1>,
     keyboard: Option<WlKeyboard>,
@@ -161,7 +179,6 @@ pub struct HostState {
     /// The keyboard left since the last `take_input`.
     pub keyboard_left: bool,
     pointer_pos: egui::Pos2,
-    pinch_scale: f64,
     pub buffer_kind: Option<BufferKind>,
     /// Key repeat from the host compositor: (keys per second, delay ms); None = off.
     repeat_info: Option<(u32, u32)>,
@@ -233,6 +250,7 @@ impl HostState {
             viewport,
             fractional,
             pinch: None,
+            swipe: None,
             cursor_device: None,
             keyboard: None,
             pointer: None,
@@ -254,7 +272,6 @@ impl HostState {
             focused: false,
             keyboard_left: false,
             pointer_pos: egui::Pos2::ZERO,
-            pinch_scale: 1.0,
             buffer_kind: None,
             repeat_info: Some((25, 600)),
             repeating: None,
@@ -264,6 +281,11 @@ impl HostState {
     /// Configured and not waiting for a frame callback.
     pub fn can_draw(&self) -> bool {
         self.size.is_some() && !self.frame_pending
+    }
+
+    /// Whether the host sends touchpad gestures (pinch, swipe).
+    pub fn has_gestures(&self) -> bool {
+        self.pinch.is_some()
     }
 
     pub fn has_input(&self) -> bool {
@@ -586,6 +608,7 @@ impl SeatHandler for HostState {
             let Ok(ptr) = self.seat_state.get_pointer(qh, &seat) else { return };
             self.cursor_device = self.cursor_shapes.as_ref().map(|m| m.get_shape_device(&ptr, qh));
             self.pinch = self.gestures.as_ref().map(|g| g.get_pinch_gesture(&ptr, qh, ()));
+            self.swipe = self.gestures.as_ref().map(|g| g.get_swipe_gesture(&ptr, qh, ()));
             self.pointer = Some(ptr);
         }
     }
@@ -602,6 +625,7 @@ impl SeatHandler for HostState {
             p.release();
             self.cursor_device = None;
             self.pinch = None;
+            self.swipe = None;
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
@@ -786,17 +810,28 @@ impl Dispatch<WpFractionalScaleV1, ()> for HostState {
 impl Dispatch<ZwpPointerGesturePinchV1, ()> for HostState {
     fn event(st: &mut Self, _: &ZwpPointerGesturePinchV1, ev: zwp_pointer_gesture_pinch_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         use zwp_pointer_gesture_pinch_v1::Event as E;
-        match ev {
-            E::Begin { .. } => st.pinch_scale = 1.0,
-            E::Update { scale, .. } => {
-                if scale > 0.0 && st.pinch_scale > 0.0 {
-                    st.events.push(HostInput::Egui(egui::Event::Zoom((scale / st.pinch_scale) as f32)));
-                    st.dirty = true;
-                }
-                st.pinch_scale = scale;
-            }
-            _ => {}
-        }
+        let g = match ev {
+            E::Begin { fingers, .. } => Gesture::PinchBegin { fingers },
+            E::Update { dx, dy, scale, rotation, .. } => Gesture::PinchUpdate { dx, dy, scale, rotation },
+            E::End { cancelled, .. } => Gesture::PinchEnd { cancelled: cancelled != 0 },
+            _ => return,
+        };
+        st.events.push(HostInput::Gesture(g));
+        st.dirty = true;
+    }
+}
+
+impl Dispatch<ZwpPointerGestureSwipeV1, ()> for HostState {
+    fn event(st: &mut Self, _: &ZwpPointerGestureSwipeV1, ev: zwp_pointer_gesture_swipe_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        use zwp_pointer_gesture_swipe_v1::Event as E;
+        let g = match ev {
+            E::Begin { fingers, .. } => Gesture::SwipeBegin { fingers },
+            E::Update { dx, dy, .. } => Gesture::SwipeUpdate { dx, dy },
+            E::End { cancelled, .. } => Gesture::SwipeEnd { cancelled: cancelled != 0 },
+            _ => return,
+        };
+        st.events.push(HostInput::Gesture(g));
+        st.dirty = true;
     }
 }
 
