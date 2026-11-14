@@ -150,6 +150,8 @@ pub struct Session {
     pub held: Held,
     /// Clients have key repeat on (see `input::set_repeat`).
     pub key_repeat: bool,
+    /// Input that reached the apps, for the viewer to show.
+    pub viz: guilab_proto::viz::VizLog,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
     /// Mime types of a client-owned clipboard selection (None: empty or ours).
@@ -312,6 +314,7 @@ impl Session {
             extra_keys: Vec::new(),
             held: Held::default(),
             key_repeat: false,
+            viz: Default::default(),
             click_in_grab: false,
             clip_mimes: None,
             dnd_icon: None,

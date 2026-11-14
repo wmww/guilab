@@ -18,6 +18,7 @@ pub mod events;
 pub mod input;
 pub mod log;
 pub mod text;
+pub mod viz;
 pub use events::{Annotation, Delivery, Event, EventData, Tier, Tiers};
 pub use input::{Action, Button};
 

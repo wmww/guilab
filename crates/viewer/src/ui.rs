@@ -37,6 +37,8 @@ pub struct SessionView<'a> {
     pub shared: bool,
     /// The cursor the session's apps want.
     pub cursor: CursorIcon,
+    /// Input that reached the apps (current session only).
+    pub viz: Option<&'a guilab_proto::viz::VizLog>,
 }
 
 impl SessionView<'_> {
@@ -132,12 +134,13 @@ struct PerSession {
     chat: Chat,
     /// Next event seq the feed wants (see [`ViewerUi::feed_cursor`]).
     feed_next: u64,
+    viz: crate::viz::Overlay,
 }
 
 impl PerSession {
     fn new(key: &str) -> PerSession {
         let id = egui::Id::new(("session", key));
-        PerSession { key: key.into(), zoom: Zoom::default(), sketch: Sketch::new(id.with("sketch")), chat: Chat::new(id.with("chat")), feed_next: 0 }
+        PerSession { key: key.into(), zoom: Zoom::default(), sketch: Sketch::new(id.with("sketch")), chat: Chat::new(id.with("chat")), feed_next: 0, viz: Default::default() }
     }
 }
 
@@ -368,6 +371,10 @@ impl ViewerUi {
             let resp = ui.allocate_rect(view, Sense::hover());
             let drawing = p.sketch.active();
             self.view(ui, s, &mut p.zoom, view, resp.hovered(), &p.sketch, inputs, &mut out);
+            if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
+                p.viz.update(log, now);
+                p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now);
+            }
             if drawing && let Some(rect) = self.image_rect {
                 let size = [s.size.0 as usize, s.size.1 as usize];
                 p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32 });

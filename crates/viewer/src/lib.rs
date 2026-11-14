@@ -13,6 +13,7 @@ pub mod gfx;
 pub mod host;
 pub mod source;
 pub mod ui;
+pub mod viz;
 
 use std::{
     hash::{Hash, Hasher},
@@ -45,6 +46,8 @@ pub struct SessionFrame<'a> {
     pub locked: bool,
     pub shared: bool,
     pub cursor: egui::CursorIcon,
+    /// Input that reached the apps (the overlay shows it).
+    pub viz: &'a guilab_proto::viz::VizLog,
 }
 
 pub struct Viewer {
@@ -95,6 +98,7 @@ impl Viewer {
             (s.name, s.locked, s.shared, s.size, s.scale.to_bits(), s.cursor as u8).hash(&mut h);
             if Some(s.name) == cur || cur.is_none() {
                 s.seq.hash(&mut h);
+                s.viz.end().hash(&mut h);
             }
         }
         h.finish()
@@ -179,6 +183,7 @@ impl Viewer {
                 locked: s.locked,
                 shared: s.shared,
                 cursor: s.cursor,
+                viz: (Some(s.name) == cur.as_deref()).then_some(s.viz),
             })
             .collect();
 

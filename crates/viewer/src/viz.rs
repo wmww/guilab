@@ -1,0 +1,210 @@
+//! Overlay showing input that reaches a session's apps, from agents and humans: a soft
+//! glow at the pointer, ripples for clicks, a fading trail (agent motion, and any drag),
+//! rings for touch points, and a stream of pressed keys and other changes at the bottom
+//! right. Subtle on purpose; the chat has the exact record.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use egui::{Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
+use guilab_proto::viz::{TouchPhase, VizKind, VizLog};
+
+const AGENT: Color32 = Color32::from_rgb(255, 176, 64);
+const HUMAN: Color32 = Color32::from_rgb(110, 180, 255);
+const TOUCH: Color32 = Color32::from_rgb(120, 230, 150);
+/// Seconds things stay visible.
+const GLOW: f64 = 1.5;
+const TRAIL: f64 = 0.5;
+const RIPPLE: f64 = 0.45;
+const KEYS: f64 = 3.0;
+
+#[derive(Default)]
+pub struct Overlay {
+    next: u64,
+    /// Pointer: position (session px), last event time, by an agent, button held.
+    pointer: Option<(Pos2, f64, bool, bool)>,
+    trail: VecDeque<(Pos2, f64, bool)>,
+    ripples: Vec<(Pos2, f64, bool)>,
+    /// Touch points: position, last event time, lifted.
+    touches: BTreeMap<u32, (Pos2, f64, bool)>,
+    keys: VecDeque<(String, f64, bool)>,
+}
+
+fn tint(c: Color32, a: f64) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+impl Overlay {
+    /// Takes in new events; `now` is egui time.
+    pub fn update(&mut self, log: &VizLog, now: f64) {
+        let from = self.next;
+        self.next = log.end();
+        for ev in log.events.iter().filter(|e| e.seq >= from) {
+            let age = ev.at.elapsed().as_secs_f64();
+            if age > KEYS {
+                continue;
+            }
+            let t = now - age;
+            let (agent, held) = (ev.agent, self.pointer.is_some_and(|p| p.3));
+            match &ev.kind {
+                VizKind::Motion { x, y } => {
+                    let p = pos2(*x as f32, *y as f32);
+                    self.pointer = Some((p, t, agent, held));
+                    if agent || held {
+                        self.trail.push_back((p, t, agent));
+                    }
+                }
+                VizKind::Button { pressed } => {
+                    if let Some(ptr) = &mut self.pointer {
+                        ptr.1 = t;
+                        ptr.2 = agent;
+                        ptr.3 = *pressed;
+                        if *pressed {
+                            self.ripples.push((ptr.0, t, agent));
+                        }
+                    }
+                }
+                VizKind::Scroll => {
+                    if let Some(ptr) = &mut self.pointer {
+                        ptr.1 = t;
+                        ptr.2 = agent;
+                    }
+                }
+                VizKind::Touch { id, x, y, phase } => {
+                    let p = pos2(*x as f32, *y as f32);
+                    let up = *phase == TouchPhase::Up;
+                    let p = if up { self.touches.get(id).map_or(p, |t| t.0) } else { p };
+                    self.touches.insert(*id, (p, t, up));
+                    if *phase == TouchPhase::Down {
+                        self.ripples.push((p, t, agent));
+                    }
+                }
+                VizKind::Key(k) | VizKind::Note(k) => self.keys.push_back((k.clone(), t, agent)),
+            }
+        }
+        while self.trail.front().is_some_and(|e| now - e.1 > TRAIL) {
+            self.trail.pop_front();
+        }
+        self.ripples.retain(|r| now - r.1 < RIPPLE);
+        self.touches.retain(|_, t| !t.2 || now - t.1 < RIPPLE);
+        while self.keys.len() > 12 || self.keys.front().is_some_and(|k| now - k.1 > KEYS) {
+            self.keys.pop_front();
+        }
+    }
+
+    /// Paints over the session `view`, whose image (of `size` pixels) is at `img`.
+    pub fn paint(&self, ui: &Ui, view: Rect, img: Rect, size: (f32, f32), now: f64) {
+        let to_screen = |p: Pos2| img.min + vec2(p.x / size.0 * img.width(), p.y / size.1 * img.height());
+        let painter = ui.painter_at(view);
+        let mut animating = false;
+
+        // Trail: segments fading with age.
+        for w in self.trail.iter().collect::<Vec<_>>().windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b.1 - a.1 > 0.15 {
+                continue;
+            }
+            let f = 1.0 - (now - b.1) / TRAIL;
+            painter.line_segment([to_screen(a.0), to_screen(b.0)], Stroke::new(3.0, tint(if b.2 { AGENT } else { HUMAN }, f * 0.45)));
+            animating = true;
+        }
+        // Pointer glow: soft concentric discs; a ring while a button is held.
+        if let Some((p, t, agent, down)) = self.pointer {
+            let f = if down { 1.0 } else { 1.0 - (now - t) / GLOW };
+            if f > 0.0 {
+                let c = if agent { AGENT } else { HUMAN };
+                let at = to_screen(p);
+                for r in [16.0, 12.0, 8.0, 5.0] {
+                    painter.circle_filled(at, r, tint(c, f * 0.12));
+                }
+                if down {
+                    painter.circle_stroke(at, 9.0, Stroke::new(2.0, tint(c, 0.8)));
+                }
+                animating |= !down;
+            }
+        }
+        for (p, t, agent) in &self.ripples {
+            let f = ((now - t) / RIPPLE) as f32;
+            painter.circle_stroke(to_screen(*p), 6.0 + 18.0 * f, Stroke::new(2.0, tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64) * 0.8)));
+            animating = true;
+        }
+        for (p, t, up) in self.touches.values() {
+            let f = if *up { 1.0 - (now - t) / RIPPLE } else { 1.0 };
+            let at = to_screen(*p);
+            painter.circle_filled(at, 18.0, tint(TOUCH, f * 0.15));
+            painter.circle_stroke(at, 18.0, Stroke::new(2.0, tint(TOUCH, f * 0.8)));
+            animating |= *up;
+        }
+        // Key stream, newest at the bottom.
+        let mut y = view.max.y - 14.0;
+        for (label, t, agent) in self.keys.iter().rev() {
+            let age = now - t;
+            let f = if age > KEYS - 1.0 { KEYS - age } else { 1.0 };
+            let color = tint(if *agent { AGENT } else { Color32::WHITE }, f);
+            // "Ctrl+Enter" -> text "Ctrl+" and an Enter symbol.
+            let (prefix, key) = match label.rfind('+') {
+                Some(i) if i + 1 < label.len() => label.split_at(i + 1),
+                _ => ("", label.as_str()),
+            };
+            let icon = matches!(key, "Enter" | "Space" | "Backspace" | "Left" | "Right" | "Up" | "Down");
+            let text = if icon { prefix.to_string() } else { label.clone() };
+            let g = painter.layout_no_wrap(text, FontId::proportional(17.0), color);
+            let h = 17.0_f32.max(g.size().y);
+            let icon_w = if icon { 18.0 } else { 0.0 };
+            let size = vec2(g.size().x + icon_w, h) + vec2(20.0, 10.0);
+            let r = Rect::from_min_size(pos2(view.max.x - 14.0 - size.x, y - size.y), size);
+            painter.rect_filled(r, 6.0, Color32::from_black_alpha((f * 170.0) as u8));
+            painter.galley(r.min + vec2(10.0, 5.0), g.clone(), color);
+            if icon {
+                let b = Rect::from_min_size(r.min + vec2(10.0 + g.size().x, 5.0), vec2(icon_w, h)).shrink(2.0);
+                key_icon(&painter, b, key, color);
+            }
+            y = r.min.y - 6.0;
+            animating = true;
+        }
+        if animating {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+}
+
+/// Symbols the UI font lacks, drawn in `r`.
+fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32) {
+    let s = Stroke::new(1.8, c);
+    let head = |tip: Pos2, dir: egui::Vec2| {
+        let n = vec2(-dir.y, dir.x);
+        p.line_segment([tip, tip - dir * 4.5 + n * 4.0], s);
+        p.line_segment([tip, tip - dir * 4.5 - n * 4.0], s);
+    };
+    let (l, rr, t, b, cx, cy) = (r.left(), r.right(), r.top(), r.bottom(), r.center().x, r.center().y);
+    match key {
+        "Enter" => {
+            // ↵: down the right side, then left, with a head.
+            let y = cy + 2.0;
+            p.line_segment([pos2(rr, t + 1.0), pos2(rr, y)], s);
+            p.line_segment([pos2(rr, y), pos2(l, y)], s);
+            head(pos2(l, y), vec2(-1.0, 0.0));
+        }
+        "Space" => {
+            // ⎵: a wide bracket.
+            let y = b - 3.0;
+            p.line_segment([pos2(l, y - 4.0), pos2(l, y)], s);
+            p.line_segment([pos2(l, y), pos2(rr, y)], s);
+            p.line_segment([pos2(rr, y), pos2(rr, y - 4.0)], s);
+        }
+        "Backspace" => {
+            p.line_segment([pos2(rr, cy), pos2(l, cy)], s);
+            head(pos2(l, cy), vec2(-1.0, 0.0));
+            p.line_segment([pos2(rr, t + 3.0), pos2(rr, b - 3.0)], s);
+        }
+        "Left" | "Right" => {
+            let d = if key == "Left" { -1.0 } else { 1.0 };
+            p.line_segment([pos2(cx - d * 7.0, cy), pos2(cx + d * 7.0, cy)], s);
+            head(pos2(cx + d * 7.0, cy), vec2(d, 0.0));
+        }
+        _ => {
+            let d = if key == "Up" { -1.0 } else { 1.0 };
+            p.line_segment([pos2(cx, cy - d * 7.0), pos2(cx, cy + d * 7.0)], s);
+            head(pos2(cx, cy + d * 7.0), vec2(0.0, d));
+        }
+    }
+}

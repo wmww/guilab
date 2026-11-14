@@ -217,6 +217,8 @@ impl Server {
                     }
                     let o = s.output_info();
                     s.log.push(EventData::Output { width: o.width, height: o.height, scale: o.scale }, Some(key));
+                    let note = if o.scale == 1.0 { format!("{}×{}", o.width, o.height) } else { format!("{}×{} @{}x", o.width, o.height, o.scale) };
+                    s.viz.push(true, guilab_proto::viz::VizKind::Note(note));
                 }
                 Response::ok(s.output_info())
             }

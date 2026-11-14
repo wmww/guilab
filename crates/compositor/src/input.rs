@@ -210,6 +210,32 @@ impl Session {
         }
     }
 
+    /// Records pointer and touch input for the viewer's overlay (keys: see `inject`).
+    fn push_viz(&mut self, ev: &InputEvent, agent: bool) {
+        use guilab_proto::viz::{TouchPhase, VizKind};
+        let s = self.output.current_scale().fractional_scale();
+        let px = |p: Point<f64, Logical>| (p.x * s, p.y * s);
+        let kind = match ev {
+            InputEvent::PointerMotion { pos } => {
+                let (x, y) = px(*pos);
+                VizKind::Motion { x, y }
+            }
+            InputEvent::PointerButton { pressed, .. } => VizKind::Button { pressed: *pressed },
+            InputEvent::PointerAxis { .. } => VizKind::Scroll,
+            InputEvent::TouchDown { slot, pos } | InputEvent::TouchMotion { slot, pos } => {
+                let (x, y) = px(*pos);
+                let phase = if matches!(ev, InputEvent::TouchDown { .. }) { TouchPhase::Down } else { TouchPhase::Move };
+                VizKind::Touch { id: *slot, x, y, phase }
+            }
+            InputEvent::TouchUp { slot } => {
+                let (x, y) = self.held.touches.get(slot).map_or((0.0, 0.0), |p| px(*p));
+                VizKind::Touch { id: *slot, x, y, phase: TouchPhase::Up }
+            }
+            _ => return,
+        };
+        self.viz.push(agent, kind);
+    }
+
     /// Delivers one event to the seat. The only way input reaches clients.
     pub fn inject(&mut self, ev: InputEvent, source: InputSource) {
         self.last_input = Instant::now();
@@ -217,6 +243,7 @@ impl Session {
         if source == InputSource::Human {
             self.log_human(&ev);
         }
+        self.push_viz(&ev, source == InputSource::Agent);
         match ev {
             InputEvent::PointerMotion { pos } => {
                 let Some(ptr) = self.seat.get_pointer() else { return };
@@ -284,6 +311,14 @@ impl Session {
                     sym = Some(h.modified_sym());
                     FilterResult::Forward
                 });
+                if pressed
+                    && let Some(sym) = sym
+                {
+                    let m = kb.modifier_state();
+                    if let Some(label) = guilab_proto::viz::key_label(&xkb::keysym_get_name(sym), sym.key_char(), m.ctrl, m.alt, m.logo, m.shift) {
+                        self.viz.push(source == InputSource::Agent, guilab_proto::viz::VizKind::Key(label));
+                    }
+                }
                 if source == InputSource::Human
                     && let Some(sym) = sym
                 {

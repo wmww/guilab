@@ -311,6 +311,7 @@ impl Server {
                             locked: slot.lock.current.is_some(),
                             shared: slot.lock.current.as_ref().is_some_and(|l| l.shared),
                             cursor: egui_cursor(&slot.session.cursor_status),
+                            viz: &slot.session.viz,
                         }
                     })
                     .collect();
