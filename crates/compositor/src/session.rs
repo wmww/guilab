@@ -59,6 +59,8 @@ use smithay::{
     },
 };
 
+use guilab_proto::log::EventLog;
+
 use crate::{
     input::Held,
     keys::Keymap,
@@ -153,6 +155,10 @@ pub struct Session {
     /// Icon surface of an active drag.
     pub dnd_icon: Option<WlSurface>,
     pub xw: Xw,
+    /// The session's event log (the server adds commands, messages, lock changes).
+    pub log: EventLog,
+    /// Toplevels as last seen by `track_windows`: (surface id, title).
+    pub(crate) seen_windows: Vec<(u32, Option<String>)>,
 }
 
 impl Session {
@@ -306,6 +312,8 @@ impl Session {
             clip_mimes: None,
             dnd_icon: None,
             xw: Xw::default(),
+            log: EventLog::default(),
+            seen_windows: Vec::new(),
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();

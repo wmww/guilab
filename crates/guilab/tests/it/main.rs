@@ -4,6 +4,7 @@
 
 mod apps;
 mod cleanup;
+mod events;
 mod input;
 mod sessions;
 mod xwayland;

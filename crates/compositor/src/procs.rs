@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use guilab_proto::{ProcInfo, ProcState};
+use guilab_proto::{EventData, ProcInfo, ProcState};
 use rustix::process::{Pid, PidfdFlags, Signal, kill_process_group, pidfd_open};
 use smithay::reexports::calloop::{Interest, Mode, PostAction, generic::Generic};
 
@@ -28,6 +28,8 @@ struct Proc {
     info: ProcInfo,
     child: Option<Child>,
     kill_at: Option<Instant>,
+    /// Signalled by `kill` (its exit is expected).
+    killed: bool,
 }
 
 #[derive(Default)]
@@ -112,7 +114,7 @@ impl Session {
                 Ok(PostAction::Remove)
             })
             .map_err(|e| e.error)?;
-        self.procs.list.push(Proc { info: info.clone(), child: Some(child), kill_at: None });
+        self.procs.list.push(Proc { info: info.clone(), child: Some(child), kill_at: None, killed: false });
         Ok(info)
     }
 
@@ -129,6 +131,13 @@ impl Session {
             p.child = None;
             p.kill_at = None;
             tracing::info!("{}: app {id} {:?}", self.name, p.info.state);
+            let (code, signal) = match p.info.state {
+                ProcState::Exited { code } => (Some(code), None),
+                ProcState::Signaled { signal } => (None, Some(signal)),
+                ProcState::Running => (None, None),
+            };
+            let ev = EventData::AppExit { id, argv: p.info.argv.clone(), code, signal, killed: p.killed, log: p.info.log.clone() };
+            self.log.push(ev, None);
         }
     }
 
@@ -153,6 +162,7 @@ impl Session {
             if p.child.is_some() {
                 signal_group(p.info.pid, Signal::TERM);
                 p.kill_at.get_or_insert(now + KILL_GRACE);
+                p.killed = true;
                 out.push(p.info.clone());
             }
         }

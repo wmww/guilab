@@ -18,6 +18,8 @@ Quick start:
   guilab lock                      take the session's lock; prints a TOKEN
   guilab -t TOKEN input move 100 200 click     send input (guilab input --help)
   guilab -t TOKEN unlock
+  guilab poll --timeout 600        wait for the human (a message, ...); prints what happened
+  guilab say \"Done, have a look\" message the human
   guilab end                       end the session and kill its apps
 
 Coordinates everywhere are screenshot pixels, at any scale. Sessions end after 30 idle
@@ -27,7 +29,11 @@ X11-only apps, start the session with `new -x` (Xwayland; apps get DISPLAY).
 Locking: `input` needs the lock, so one agent drives a session at a time and the human
 watching isn't fighting it. While a session is locked, run, kill, output changes, clip set
 and end need the token too; read-only commands never do. Pass the token with -t TOKEN (on
-every command: shells don't keep variables between calls) or $GUILAB_TOKEN.";
+every command: shells don't keep variables between calls) or $GUILAB_TOKEN.
+
+Every command also prints, on stderr, what happened in the session since your previous
+command (human input, windows, apps exiting), so you see what changed under you.
+`guilab log` shows the full history.";
 
 #[derive(Parser)]
 #[command(name = "guilab", version, about = "Headless GUI sessions for humans and agents", disable_help_subcommand = true, after_help = AFTER_HELP)]
@@ -124,6 +130,86 @@ enum Cmd {
         #[command(subcommand)]
         op: ClipOp,
     },
+    /// Wait for the human: blocks until a wake event (by default: a human message, your
+    /// lock revoked, an app exiting on its own, the session about to expire), prints it with
+    /// everything else that happened since your last command, and exits.
+    #[command(after_help = POLL_HELP)]
+    Poll {
+        /// Give up after SECS (exit code 2), still printing what happened meanwhile.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<f64>,
+        /// Don't exit: print one line per wake event (for tools that watch output lines).
+        #[arg(short, long)]
+        follow: bool,
+        /// Also wake on these event kinds or groups (comma-separated).
+        #[arg(long, value_name = "KINDS")]
+        wake: Vec<String>,
+        /// Don't wake on these (they're reported with the next wake or command instead).
+        #[arg(long, value_name = "KINDS")]
+        passive: Vec<String>,
+    },
+    /// Show a message to the human (in the viewer's chat), optionally with images.
+    Say {
+        text: String,
+        /// Attach an image (repeatable).
+        #[arg(long, value_name = "PATH")]
+        image: Vec<PathBuf>,
+    },
+    /// Show the session's event log (oldest first): commands, human input and messages,
+    /// apps, windows, lock changes.
+    Log {
+        /// Only events since a time: 90s, 5m, 2h ago, or a clock time like 14:05 or 14:05:30.
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+        /// Only events after #SEQ.
+        #[arg(long, value_name = "SEQ")]
+        after: Option<u64>,
+        /// Only these kinds or groups (comma-separated; see poll --help).
+        #[arg(long, value_name = "KINDS")]
+        kind: Vec<String>,
+        /// Show at most the newest N events (0 = all).
+        #[arg(short = 'n', long, default_value_t = 100)]
+        last: usize,
+    },
+    /// Act as the human (for tests, until the viewer exists).
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        op: DebugOp,
+    },
+}
+
+const POLL_HELP: &str = "\
+Event kinds: message revoke app_exit expiring (wake by default); motion button key scroll
+touch gesture window_map window_unmap title output app_start lock unlock share (reported
+with the next wake or command); command say screenshot (your own actions, only in `log`).
+Groups: input (motion button key scroll touch gesture), window, app, all.
+An app ended by `guilab kill` doesn't wake you.
+
+Every guilab command also reports, on stderr, what happened since your previous command,
+so you see what the human did. Clients without a token share one \"last seen\" position per
+session; with -t TOKEN each lock holder has its own.";
+
+#[derive(Subcommand)]
+enum DebugOp {
+    /// Send a message as the human.
+    Message {
+        text: String,
+        #[arg(long, value_name = "PATH")]
+        image: Vec<PathBuf>,
+        /// A text annotation: "TEXT", "X,Y:TEXT" or "IMAGE@X,Y:TEXT" (IMAGE counts from 1).
+        #[arg(long, value_name = "NOTE")]
+        note: Vec<String>,
+    },
+    /// Send input as the human (same actions as `guilab input`).
+    Input {
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        actions: Vec<String>,
+    },
+    /// Revoke the agent's lock.
+    Revoke,
+    /// Share the locked session with the human (on) or stop (off).
+    Share { on: String },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +218,58 @@ enum ClipOp {
     Get,
     /// Set the clipboard to TEXT (or stdin if no TEXT). Needs the token while locked.
     Set { text: Option<String> },
+}
+
+fn parse_note(s: &str) -> Result<guilab_proto::Annotation, String> {
+    let mut a = guilab_proto::Annotation { text: s.to_string(), image: None, x: None, y: None };
+    let Some((place, text)) = s.split_once(':') else { return Ok(a) };
+    let (img, xy) = match place.split_once('@') {
+        Some((i, xy)) => (Some(i), xy),
+        None => (None, place),
+    };
+    let Some((x, y)) = xy.split_once(',') else { return Ok(a) };
+    let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse()) else { return Ok(a) };
+    if let Some(i) = img {
+        let i: usize = i.parse().map_err(|_| format!("bad image number in note {s:?}"))?;
+        a.image = Some(i.checked_sub(1).ok_or("images count from 1")?);
+    }
+    (a.text, a.x, a.y) = (text.to_string(), Some(x), Some(y));
+    Ok(a)
+}
+
+/// `--since`: "90s"/"5m"/"2h" ago, or a local clock time today ("14:05", "14:05:30"). Unix ms.
+fn parse_since(s: &str, tz: i64) -> Result<u64, String> {
+    let now = guilab_proto::events::now_ms();
+    let bad = || format!("bad time {s:?}: use 90s, 5m, 2h or 14:05[:30]");
+    if s.contains(':') {
+        let p: Vec<u64> = s.split(':').map(|x| x.parse().map_err(|_| bad())).collect::<Result<_, _>>()?;
+        let secs = p[0] * 3600 + p.get(1).copied().unwrap_or(0) * 60 + p.get(2).copied().unwrap_or(0);
+        let local_now = (now / 1000) as i64 + tz;
+        let midnight = local_now - local_now.rem_euclid(86400) - tz;
+        return Ok((midnight as u64 + secs) * 1000);
+    }
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = n.parse().map_err(|_| bad())?;
+    let mult = match unit {
+        "s" | "" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return Err(bad()),
+    };
+    Ok(now.saturating_sub(n * mult * 1000))
+}
+
+/// Local UTC offset in seconds.
+fn tz_offset() -> i64 {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
+    }
+}
+
+fn abs(p: PathBuf) -> PathBuf {
+    std::path::absolute(&p).unwrap_or(p)
 }
 
 fn parse_size(s: &str) -> Result<[u32; 2], String> {
@@ -148,6 +286,7 @@ fn main() {
 }
 
 fn real_main(cli: Cli) -> Result<(), String> {
+    let fmt = guilab_proto::text::Fmt { tz: tz_offset() };
     let cmd = match cli.cmd {
         Cmd::Server { stop: false, idle_exit } => return client::run_server(idle_exit),
         Cmd::Server { stop: true, .. } => return client::stop_server(),
@@ -170,6 +309,28 @@ fn real_main(cli: Cli) -> Result<(), String> {
         Cmd::Lock { force } => Command::Lock { force },
         Cmd::Unlock { force } => Command::Unlock { force },
         Cmd::Input { actions } => Command::Input { actions: guilab_proto::input::parse(&actions)? },
+        Cmd::Poll { timeout, follow, wake, passive } => {
+            let tiers = guilab_proto::Tiers { wake, passive };
+            tiers.check()?;
+            Command::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }
+        }
+        Cmd::Say { text, image } => Command::Say { text, images: image.into_iter().map(abs).collect() },
+        Cmd::Log { since, after, kind, last } => {
+            guilab_proto::events::expand_kinds(&kind)?;
+            Command::Log { after, since: since.map(|s| parse_since(&s, fmt.tz)).transpose()?, kinds: kind, last }
+        }
+        Cmd::Debug { op } => Command::Human {
+            op: match op {
+                DebugOp::Message { text, image, note } => guilab_proto::HumanOp::Message {
+                    text,
+                    images: image.into_iter().map(abs).collect(),
+                    annotations: note.iter().map(|n| parse_note(n)).collect::<Result<_, _>>()?,
+                },
+                DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
+                DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
+                DebugOp::Share { on } => guilab_proto::HumanOp::Share { on: matches!(on.as_str(), "on" | "1" | "true" | "yes") },
+            },
+        },
         Cmd::Clip { op: ClipOp::Get } => Command::ClipGet,
         Cmd::Clip { op: ClipOp::Set { text } } => Command::ClipSet {
             text: match text {
@@ -185,10 +346,37 @@ fn real_main(cli: Cli) -> Result<(), String> {
         token: cli.token.or_else(|| env("GUILAB_TOKEN")),
     };
     let mut c = client::connect()?;
-    let reply = c.request(target, cmd.clone())?;
+    let mut reply = c.request(target, cmd.clone())?;
+    if let Command::Poll { follow, timeout_ms, .. } = &cmd {
+        let timeout = timeout_ms.map(|ms| ms as f64 / 1000.0);
+        loop {
+            if !reply.ok {
+                return Err(reply.error.unwrap_or_default());
+            }
+            let timed_out = format::poll(&reply, &fmt, cli.json, *follow, timeout)?;
+            if timed_out {
+                std::process::exit(2);
+            }
+            if !follow {
+                return Ok(());
+            }
+            reply = c.next()?;
+        }
+    }
+    // Events go to stderr, so stdout stays parseable (`$(guilab screenshot)`).
+    if let Some(d) = &reply.events {
+        if cli.json {
+            eprintln!("{}", serde_json::to_string(d).unwrap_or_default());
+        } else if let Some(b) = format::events_block(&fmt, d) {
+            eprintln!("{b}");
+        }
+    }
+    if !reply.ok {
+        return Err(reply.error.unwrap_or_else(|| "unknown error".into()));
+    }
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&reply.data).unwrap_or_default());
         return Ok(());
     }
-    format::print(&cmd, reply)
+    format::print(&cmd, reply.data, &fmt)
 }

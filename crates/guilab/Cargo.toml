@@ -23,6 +23,7 @@ anyhow.workspace = true
 clap.workspace = true
 tracing-subscriber.workspace = true
 rustix.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 guilab-proto.workspace = true

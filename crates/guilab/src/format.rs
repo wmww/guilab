@@ -1,5 +1,10 @@
 //! Compact text output for agents.
 
+use guilab_proto::{
+    Delivery, Response,
+    events::{LogInfo, PollInfo},
+    text::Fmt,
+};
 use guilab_proto::{Command, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, SessionInfo, ShotInfo, TreeNode};
 use serde::de::DeserializeOwned;
 
@@ -65,7 +70,51 @@ fn tree(nodes: &[TreeNode], depth: usize, out: &mut String) {
     }
 }
 
-pub fn print(cmd: &Command, v: serde_json::Value) -> Result<(), String> {
+/// Events attached to a command reply, as printed on stderr.
+pub fn events_block(fmt: &Fmt, d: &Delivery) -> Option<String> {
+    let lines = fmt.delivery(d);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!("[guilab events {}; not errors]\n{}", fmt.since(d), lines.join("\n")))
+}
+
+/// Prints one poll reply. Returns whether it timed out.
+pub fn poll(r: &Response, fmt: &Fmt, json: bool, follow: bool, timeout: Option<f64>) -> Result<bool, String> {
+    let info: PollInfo = get(r.data.clone())?;
+    let empty = Delivery::default();
+    let d = r.events.as_ref().unwrap_or(&empty);
+    if json {
+        let v = serde_json::json!({ "timed_out": info.timed_out, "since": d.since, "events": d.events });
+        println!("{}", serde_json::to_string(&v).unwrap_or_default());
+    } else if follow {
+        for l in fmt.follow_lines(d) {
+            println!("{l}");
+        }
+        if info.timed_out {
+            println!("timed out after {}s", timeout.unwrap_or(0.0));
+        }
+    } else {
+        if info.timed_out {
+            println!("Timed out: no wake event within {}s (exit code 2).", timeout.unwrap_or(0.0));
+        }
+        let lines = fmt.delivery(d);
+        // Only the wake event: no heading needed.
+        let only_wake = !info.timed_out && d.events.len() == 1;
+        if !lines.is_empty() && !only_wake {
+            let s = fmt.since(d);
+            println!("{}{}:", s[..1].to_uppercase(), &s[1..]);
+        }
+        for l in lines {
+            println!("{l}");
+        }
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(info.timed_out)
+}
+
+pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), String> {
     let text = match cmd {
         Command::New { .. } => {
             let s: SessionInfo = get(v)?;
@@ -130,7 +179,19 @@ pub fn print(cmd: &Command, v: serde_json::Value) -> Result<(), String> {
             }
             return Ok(());
         }
-        Command::ClipSet { .. } => return Ok(()),
+        Command::ClipSet { .. } | Command::Say { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),
+        Command::Log { .. } => {
+            let l: LogInfo = get(v)?;
+            let mut out: Vec<String> = Vec::new();
+            if l.dropped > 0 {
+                out.push(format!("({} oldest events were dropped)", l.dropped));
+            }
+            if l.omitted > 0 {
+                out.push(format!("({} earlier events not shown; -n 0 shows all)", l.omitted));
+            }
+            out.extend(l.events.iter().map(|e| fmt.log_line(e)));
+            if out.is_empty() { "no events".into() } else { out.join("\n") }
+        }
         Command::Ping | Command::Shutdown => return Ok(()),
     };
     println!("{text}");

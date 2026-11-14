@@ -79,6 +79,7 @@ impl Session {
         }
         self.space.refresh();
         self.popups.cleanup();
+        self.track_windows();
         self.flush();
     }
 

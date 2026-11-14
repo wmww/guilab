@@ -10,7 +10,7 @@ use smithay::{
     backend::input::{AxisSource, ButtonState, InputTime, KeyState},
     desktop::{Window, WindowSurfaceType},
     input::{
-        keyboard::{FilterResult, Keycode},
+        keyboard::{FilterResult, Keycode, xkb},
         pointer::{
             AxisFrame, ButtonEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
             GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
@@ -22,7 +22,9 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::{focus::KbFocus, session::Session, xwayland::is_or};
+use guilab_proto::EventData;
+
+use crate::{focus::KbFocus, handlers::surface_id, session::Session, xwayland::is_or};
 
 /// Who sent an event (for the event log and lock policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,10 +138,69 @@ impl Session {
         false
     }
 
+    /// Output pixels of a global logical point.
+    fn px(&self, p: Point<f64, Logical>) -> (i32, i32) {
+        let s = self.output.current_scale().fractional_scale();
+        ((p.x * s).round() as i32, (p.y * s).round() as i32)
+    }
+
+    /// Logs a human input event (agent input is logged as its command). Keys are logged
+    /// by `inject` itself, which knows their keysym.
+    fn log_human(&mut self, ev: &InputEvent) {
+        let data = match ev {
+            InputEvent::PointerMotion { pos } => {
+                let (x, y) = self.px(*pos);
+                EventData::Motion { path: vec![[x, y, 0]] }
+            }
+            InputEvent::PointerButton { button, pressed } => {
+                let p = self.pointer_location();
+                let (x, y) = self.px(p);
+                let window = self.window_under(p).and_then(|w| w.wl_surface().and_then(|s| surface_id(&s)));
+                let button = match button {
+                    0x110 => "left".to_string(),
+                    0x111 => "right".to_string(),
+                    0x112 => "middle".to_string(),
+                    0x113 => "back".to_string(),
+                    0x114 => "forward".to_string(),
+                    b => format!("{b:#x}"),
+                };
+                EventData::Button { button, pressed: *pressed, x, y, window }
+            }
+            InputEvent::PointerAxis { delta, steps, .. } => {
+                let (x, y) = self.px(self.pointer_location());
+                let s = self.output.current_scale().fractional_scale();
+                let ((dx, dy), smooth) = match steps {
+                    Some(st) => (*st, false),
+                    None => ((delta.0 * s, delta.1 * s), true),
+                };
+                if dx == 0.0 && dy == 0.0 {
+                    return;
+                }
+                EventData::Scroll { dx, dy, x, y, smooth }
+            }
+            InputEvent::TouchDown { slot, pos } => {
+                let (x, y) = self.px(*pos);
+                EventData::Touch { finger: *slot, down: true, x, y }
+            }
+            InputEvent::TouchUp { slot } => {
+                let Some(pos) = self.held.touches.get(slot) else { return };
+                let (x, y) = self.px(*pos);
+                EventData::Touch { finger: *slot, down: false, x, y }
+            }
+            InputEvent::SwipeBegin { fingers } => EventData::Gesture { gesture: "swipe".into(), fingers: *fingers },
+            InputEvent::PinchBegin { fingers } => EventData::Gesture { gesture: "pinch".into(), fingers: *fingers },
+            _ => return,
+        };
+        self.log.push(data, None);
+    }
+
     /// Delivers one event to the seat. The only way input reaches clients.
-    pub fn inject(&mut self, ev: InputEvent, _source: InputSource) {
+    pub fn inject(&mut self, ev: InputEvent, source: InputSource) {
         self.last_input = Instant::now();
         let time = InputTime::now();
+        if source == InputSource::Human {
+            self.log_human(&ev);
+        }
         match ev {
             InputEvent::PointerMotion { pos } => {
                 let Some(ptr) = self.seat.get_pointer() else { return };
@@ -189,7 +250,18 @@ impl Session {
             InputEvent::Key { code, pressed } => {
                 let Some(kb) = self.seat.get_keyboard() else { return };
                 let state = if pressed { KeyState::Pressed } else { KeyState::Released };
-                kb.input::<(), _>(self, code, state, SERIAL_COUNTER.next_serial(), time, |_, _, _| FilterResult::Forward);
+                let mut sym = None;
+                kb.input::<(), _>(self, code, state, SERIAL_COUNTER.next_serial(), time, |_, _, h| {
+                    sym = Some(h.modified_sym());
+                    FilterResult::Forward
+                });
+                if source == InputSource::Human
+                    && let Some(sym) = sym
+                {
+                    let key = xkb::keysym_get_name(sym);
+                    let text = sym.key_char().map(String::from);
+                    self.log.push(EventData::Key { key, pressed, text }, None);
+                }
             }
             InputEvent::TouchDown { slot, pos } => {
                 let Some(touch) = self.seat.get_touch() else { return };

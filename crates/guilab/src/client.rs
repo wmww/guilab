@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use guilab_proto::{Client, Command, Request, ServerInfo, Target};
+use guilab_proto::{Client, Command, Request, Response, ServerInfo, Target};
 
 /// Autostarted servers exit after this long without sessions.
 const AUTOSTART_IDLE_EXIT: u64 = 600;
@@ -73,10 +73,16 @@ fn worktree_root() -> Option<PathBuf> {
 }
 
 impl Conn {
-    pub fn request(&mut self, mut target: Target, cmd: Command) -> Result<serde_json::Value, String> {
+    /// Sends a request; the reply may be an error (`ok: false`) carrying events.
+    pub fn request(&mut self, mut target: Target, cmd: Command) -> Result<Response, String> {
         target.root = worktree_root();
         let req = Request { target, cmd };
-        self.client.call_as(&req)
+        self.client.call(&req).map_err(|e| e.to_string())
+    }
+
+    /// The next reply of a streaming request (`poll --follow`).
+    pub fn next(&mut self) -> Result<Response, String> {
+        self.client.read_reply().map_err(|e| e.to_string())
     }
 
     /// A server started from an older build keeps running old code; say so.

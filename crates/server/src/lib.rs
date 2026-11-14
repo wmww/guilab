@@ -44,12 +44,16 @@ pub(crate) struct Slot {
     pub ttl: u64,
     pub last_active: Instant,
     pub lock: lock::LockState,
+    /// `last_active` when the expiry warning was logged (once per idle stretch).
+    pub warned: Option<Instant>,
     token: RegistrationToken,
 }
 
 /// An input chain paused at a sleep (or queued behind another chain of its session).
 pub(crate) struct InputJob {
     pub session: String,
+    /// Delivery key of the requester (see `guilab_proto::log`); None for the human.
+    pub key: Option<String>,
     pub stream: UnixStream,
     pub chain: Chain,
     pub resume_at: Instant,
@@ -58,6 +62,7 @@ pub(crate) struct InputJob {
 /// A `clip get` reading the owning client's pipe.
 pub(crate) struct ClipWait {
     pub session: String,
+    pub key: String,
     pub stream: UnixStream,
     pub pipe: File,
     pub buf: Vec<u8>,
@@ -67,6 +72,7 @@ pub(crate) struct ClipWait {
 /// A screenshot request waiting for its session to settle.
 pub(crate) struct ShotWait {
     pub session: String,
+    pub key: String,
     pub stream: UnixStream,
     pub path: PathBuf,
     pub settle: bool,
@@ -78,6 +84,18 @@ pub(crate) struct NewWait {
     pub session: String,
     pub stream: UnixStream,
     pub deadline: Instant,
+}
+
+/// A `poll` waiting for a wake event (or streaming them with `follow`).
+pub(crate) struct PollWait {
+    pub session: String,
+    pub key: String,
+    pub stream: UnixStream,
+    pub deadline: Option<Instant>,
+    pub tiers: guilab_proto::Tiers,
+    pub follow: bool,
+    /// Wake events from this seq on end the wait.
+    pub watch_from: u64,
 }
 
 /// Processes of an ended session, to SIGKILL after the grace period and reap.
@@ -96,6 +114,7 @@ pub struct Server {
     pub(crate) inputs: Vec<InputJob>,
     pub(crate) clips: Vec<ClipWait>,
     pub(crate) news: Vec<NewWait>,
+    pub(crate) polls: Vec<PollWait>,
     graveyard: Vec<Grave>,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) info: ServerInfo,
@@ -173,6 +192,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         inputs: Vec::new(),
         clips: Vec::new(),
         news: Vec::new(),
+        polls: Vec::new(),
         graveyard: Vec::new(),
         sessions_dir,
         info,
@@ -258,9 +278,11 @@ impl Server {
         self.check_clips(now);
         self.check_news(now);
         self.check_waiters(now);
+        self.check_polls(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
             self.last_slow_tick = now;
+            self.warn_expiry(now);
             let expired: Vec<String> = self
                 .sessions
                 .iter()
@@ -312,22 +334,70 @@ impl Server {
         for c in self.clips.extract_if(.., |c| c.session == name) {
             send(&c.stream, &ended);
         }
+        for p in self.polls.extract_if(.., |p| p.session == name) {
+            send(&p.stream, &ended);
+        }
         Some(info)
     }
 
     /// Fails the session's running and queued input chains.
     pub(crate) fn abort_inputs(&mut self, name: &str, resp: &Response) {
-        for j in self.inputs.extract_if(.., |j| j.session == name) {
-            send(&j.stream, resp);
+        let jobs: Vec<InputJob> = self.inputs.extract_if(.., |j| j.session == name).collect();
+        for j in jobs {
+            let r = self.attach(name, j.key.as_deref(), resp.clone());
+            send(&j.stream, &r);
         }
+    }
+
+    /// Adds the events `key` hasn't seen to a reply to it.
+    pub(crate) fn attach(&mut self, session: &str, key: Option<&str>, mut resp: Response) -> Response {
+        if let Some(key) = key
+            && let Some(slot) = self.sessions.get_mut(session)
+        {
+            let d = slot.session.log.deliver(key, &Default::default(), None);
+            if !d.events.is_empty() {
+                resp.events = Some(d);
+            }
+        }
+        resp
     }
 
     /// Viewer's Revoke button: drop the agent's lock, stop its input, release held keys.
     pub fn revoke_lock(&mut self, name: &str) {
         let Some(slot) = self.sessions.get_mut(name) else { return };
+        if slot.lock.current.is_none() {
+            return;
+        }
         slot.lock.revoke();
         slot.session.release_all(InputSource::Agent);
+        slot.session.log.push(guilab_proto::EventData::Revoke, None);
         self.abort_inputs(name, &Response::err("the human revoked your lock; input stopped"));
+    }
+
+    /// Viewer's Share button: the human may use the locked session too.
+    pub fn share(&mut self, name: &str, on: bool) {
+        let Some(slot) = self.sessions.get_mut(name) else { return };
+        if slot.lock.current.as_ref().is_none_or(|l| l.shared == on) {
+            return;
+        }
+        slot.lock.set_shared(on);
+        slot.session.log.push(guilab_proto::EventData::Share { on }, None);
+    }
+
+    /// Logs a warning shortly before a session expires (a wake event, so pollers can keep
+    /// it alive).
+    fn warn_expiry(&mut self, now: Instant) {
+        for slot in self.sessions.values_mut() {
+            if slot.ttl == 0 || slot.warned == Some(slot.last_active) {
+                continue;
+            }
+            let idle = now.duration_since(slot.last_active).as_secs();
+            let warn = (slot.ttl / 2).min(60);
+            if idle + warn >= slot.ttl {
+                slot.warned = Some(slot.last_active);
+                slot.session.log.push(guilab_proto::EventData::Expiring { secs: slot.ttl.saturating_sub(idle) }, None);
+            }
+        }
     }
 
     /// Registers a session's nested loop in the server loop.
@@ -355,7 +425,7 @@ impl Server {
             })
             .map_err(|e| e.error)?;
         let _ = fs::set_permissions(&session.dir, fs::Permissions::from_mode(0o700));
-        self.sessions.insert(name, Slot { session, root, ttl, last_active: Instant::now(), lock: Default::default(), token });
+        self.sessions.insert(name, Slot { session, root, ttl, last_active: Instant::now(), lock: Default::default(), warned: None, token });
         Ok(())
     }
 }

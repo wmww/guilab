@@ -14,7 +14,11 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub mod events;
 pub mod input;
+pub mod log;
+pub mod text;
+pub use events::{Annotation, Delivery, Event, EventData, Tier, Tiers};
 pub use input::{Action, Button};
 
 /// `$XDG_RUNTIME_DIR/guilab`.
@@ -106,6 +110,52 @@ pub enum Command {
     ClipGet,
     /// Set the clipboard to text (owned by the server). Reply: null.
     ClipSet { text: String },
+    /// Wait for a wake event. Reply: [`events::PollInfo`], events in `Response::events`.
+    /// `follow`: keep the connection open and send one reply per wake event.
+    Poll {
+        /// Give up after this many ms (None = wait forever).
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        follow: bool,
+        #[serde(default)]
+        tiers: Tiers,
+    },
+    /// Read the event log. Reply: [`events::LogInfo`].
+    Log {
+        /// Only events with a larger seq.
+        after: Option<u64>,
+        /// Only events at or after this unix time (ms).
+        since: Option<u64>,
+        /// Kind or group names; empty = all.
+        #[serde(default)]
+        kinds: Vec<String>,
+        /// At most this many (the newest); 0 = all.
+        #[serde(default)]
+        last: usize,
+    },
+    /// Agent -> human message (for the viewer's feed). Images are copied into the session dir.
+    /// Reply: null.
+    Say { text: String, images: Vec<PathBuf> },
+    /// What the viewer does for the human (until it exists: `guilab debug`, for tests).
+    Human { op: HumanOp },
+}
+
+/// Human actions (the viewer's, later). Reply: null.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum HumanOp {
+    /// A message; images are copied into the session dir.
+    Message {
+        text: String,
+        #[serde(default)]
+        images: Vec<PathBuf>,
+        #[serde(default)]
+        annotations: Vec<Annotation>,
+    },
+    /// Input as the human (blocked while the session is locked and not shared).
+    Input { actions: Vec<Action> },
+    Revoke,
+    Share { on: bool },
 }
 
 /// What a command may do to a session, for the lock check.
@@ -128,6 +178,38 @@ impl Command {
             _ => Access::Read,
         }
     }
+
+    /// The command as it goes into the event log (CLI form without `guilab`), or None
+    /// for commands that aren't logged (they don't act on a session or have their own events).
+    pub fn log_text(&self) -> Option<String> {
+        let opt = |name: &str, v: Option<String>| v.map(|v| format!(" {name} {v}")).unwrap_or_default();
+        Some(match self {
+            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => return None,
+            Command::Poll { .. } | Command::Log { .. } | Command::Say { .. } | Command::Human { .. } => return None,
+            Command::End => "end".into(),
+            Command::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
+            Command::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
+            Command::Ps => "ps".into(),
+            Command::Tree => "tree".into(),
+            Command::Screenshot { path, settle } => format!(
+                "screenshot{}{}",
+                opt("-o", path.as_ref().map(|p| p.display().to_string())),
+                if *settle { "" } else { " --no-settle" }
+            ),
+            Command::Output { size, scale } => format!(
+                "output{}{}",
+                opt("-s", size.map(|[w, h]| format!("{w}x{h}"))),
+                opt("--scale", scale.map(|s| s.to_string()))
+            ),
+            Command::Lock { force } => if *force { "lock --force" } else { "lock" }.into(),
+            Command::Unlock { force } => if *force { "unlock --force" } else { "unlock" }.into(),
+            Command::Input { actions } => {
+                format!("input {}", actions.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" "))
+            }
+            Command::ClipGet => "clip get".into(),
+            Command::ClipSet { text } => format!("clip set {text:?}"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,14 +219,17 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(default)]
     pub data: serde_json::Value,
+    /// Session events this client hasn't seen yet (see `log.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Delivery>,
 }
 
 impl Response {
     pub fn ok(data: impl Serialize) -> Self {
-        Response { ok: true, error: None, data: serde_json::to_value(data).unwrap_or_default() }
+        Response { ok: true, error: None, data: serde_json::to_value(data).unwrap_or_default(), events: None }
     }
     pub fn err(msg: impl Into<String>) -> Self {
-        Response { ok: false, error: Some(msg.into()), data: serde_json::Value::Null }
+        Response { ok: false, error: Some(msg.into()), data: serde_json::Value::Null, events: None }
     }
 }
 
@@ -287,6 +372,11 @@ impl Client {
         let mut line = serde_json::to_vec(req)?;
         line.push(b'\n');
         self.writer.write_all(&line)?;
+        self.read_reply()
+    }
+
+    /// Reads one more reply line (`poll --follow` streams them).
+    pub fn read_reply(&mut self) -> io::Result<Response> {
         let mut buf = String::new();
         if self.reader.read_line(&mut buf)? == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed the connection"));

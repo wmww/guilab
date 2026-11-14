@@ -44,6 +44,7 @@ pub struct Chain {
     origin: Option<u32>,
     /// How long the next keyboard action has waited for a menu to close.
     menu_wait: Duration,
+    source: InputSource,
 }
 
 /// Failure in the middle of a chain: which action, and why.
@@ -67,8 +68,9 @@ fn find_node(nodes: &[TreeNode], id: u32) -> Option<&TreeNode> {
 }
 
 impl Chain {
-    pub fn new(actions: Vec<Action>) -> Chain {
-        Chain { steps: actions.into_iter().enumerate().map(|(i, a)| Step::Act(i, a)).collect(), origin: None, menu_wait: Duration::ZERO }
+    pub fn new(actions: Vec<Action>, source: InputSource) -> Chain {
+        let steps = actions.into_iter().enumerate().map(|(i, a)| Step::Act(i, a)).collect();
+        Chain { steps, origin: None, menu_wait: Duration::ZERO, source }
     }
 }
 
@@ -95,7 +97,7 @@ impl Session {
         while let Some(step) = chain.steps.pop_front() {
             match step {
                 Step::Sleep(d) => return Ok(Some(d)),
-                Step::Ev(ev) => self.inject(ev, InputSource::Agent),
+                Step::Ev(ev) => self.inject(ev, chain.source),
                 Step::Keymap(text, placed) => {
                     let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
                     kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
@@ -155,23 +157,25 @@ impl Session {
         px / self.output.current_scale().fractional_scale()
     }
 
-    fn need_focus(&self) -> Result<(), String> {
-        if self.seat.get_keyboard().and_then(|k| k.current_focus()).is_none() {
+    /// Agent keys need a focused window (else they go nowhere, silently). The human's
+    /// keys go wherever they go.
+    fn need_focus(&self, src: InputSource) -> Result<(), String> {
+        if src == InputSource::Agent && self.seat.get_keyboard().and_then(|k| k.current_focus()).is_none() {
             return Err("no window has keyboard focus (click one first)".into());
         }
         Ok(())
     }
 
-    fn key(&mut self, code: Keycode, pressed: bool) {
-        self.inject(InputEvent::Key { code, pressed }, InputSource::Agent);
+    fn key(&mut self, code: Keycode, pressed: bool, source: InputSource) {
+        self.inject(InputEvent::Key { code, pressed }, source);
     }
 
     /// Plans typing `text`. Characters missing from the keymap are typed through a seat
     /// keymap extended with them (keys.rs). The extended keymap stays active afterwards
     /// (its other keys are unchanged): swapping straight back raced with X clients, which
     /// can read the swap-back before looking up the keys typed just before it.
-    fn type_text(&mut self, text: &str, later: &mut Vec<Step>) -> Result<(), String> {
-        self.need_focus()?;
+    fn type_text(&mut self, text: &str, src: InputSource, later: &mut Vec<Step>) -> Result<(), String> {
+        self.need_focus(src)?;
         let syms: Vec<Keysym> = text.chars().map(|c| char_keysym(c).ok_or_else(|| format!("can't type {c:?}"))).collect::<Result<_, _>>()?;
         let x11 = self.seat.get_keyboard().and_then(|k| k.current_focus()).is_some_and(|f| f.is_x11());
         let spare = self.keymap.spare_count();
@@ -238,26 +242,27 @@ impl Session {
     }
 
     fn act(&mut self, chain: &mut Chain, a: &Action, later: &mut Vec<Step>) -> Result<(), String> {
+        let src = chain.source;
         match a {
             Action::Move { x, y, ms } => {
                 let to = self.point(chain, *x, *y)?;
                 if *ms == 0 {
-                    self.inject(InputEvent::PointerMotion { pos: to }, InputSource::Agent);
+                    self.inject(InputEvent::PointerMotion { pos: to }, src);
                 } else {
                     *later = Self::glide(self.pointer_location(), to, *ms, |pos| InputEvent::PointerMotion { pos });
                 }
             }
-            Action::Down { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, InputSource::Agent),
-            Action::Up { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, InputSource::Agent),
+            Action::Down { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, src),
+            Action::Up { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, src),
             Action::Click { button, count } => {
                 for _ in 0..*count {
-                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, InputSource::Agent);
-                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, InputSource::Agent);
+                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, src);
+                    self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, src);
                 }
             }
             Action::Scroll { dx, dy } => self.inject(
                 InputEvent::PointerAxis { source: AxisSource::Wheel, delta: (dx * WHEEL_PX, dy * WHEEL_PX), steps: Some((*dx, *dy)), stop: false },
-                InputSource::Agent,
+                src,
             ),
             Action::ScrollPx { dx, dy } => {
                 // Touchpad-style: a few frames, then the fingers rest before lifting (the stop),
@@ -272,7 +277,7 @@ impl Session {
                 later.push(Step::Ev(InputEvent::PointerAxis { source: AxisSource::Finger, delta: (0.0, 0.0), steps: None, stop: true }));
             }
             Action::Key { keys } => {
-                self.need_focus()?;
+                self.need_focus(src)?;
                 let mut press: Vec<Keycode> = Vec::new();
                 for k in keys {
                     let k = self.keymap.key(k)?;
@@ -283,33 +288,33 @@ impl Session {
                     }
                 }
                 for c in &press {
-                    self.key(*c, true);
+                    self.key(*c, true, chain.source);
                 }
                 for c in press.iter().rev() {
-                    self.key(*c, false);
+                    self.key(*c, false, chain.source);
                 }
             }
             Action::KeyDown { key } => {
-                self.need_focus()?;
+                self.need_focus(src)?;
                 let k = self.keymap.key(key)?;
                 for code in k.mods.iter().chain([&k.code]) {
-                    self.key(*code, true);
+                    self.key(*code, true, chain.source);
                 }
             }
             Action::KeyUp { key } => {
                 let k = self.keymap.key(key)?;
                 for code in [&k.code].into_iter().chain(k.mods.iter().rev()) {
-                    self.key(*code, false);
+                    self.key(*code, false, chain.source);
                 }
             }
-            Action::Type { text } => self.type_text(text, later)?,
+            Action::Type { text } => self.type_text(text, src, later)?,
             Action::TouchDown { id, x, y } => {
                 if self.held.touches.contains_key(id) {
                     return Err(format!("finger {id} is already down"));
                 }
                 let pos = self.point(chain, *x, *y)?;
-                self.inject(InputEvent::TouchDown { slot: *id, pos }, InputSource::Agent);
-                self.inject(InputEvent::TouchFrame, InputSource::Agent);
+                self.inject(InputEvent::TouchDown { slot: *id, pos }, src);
+                self.inject(InputEvent::TouchFrame, src);
             }
             Action::TouchMove { id, x, y, ms } => {
                 let Some(from) = self.held.touches.get(id).copied() else {
@@ -333,14 +338,14 @@ impl Session {
                 if !self.held.touches.contains_key(id) {
                     return Err(format!("finger {id} isn't down"));
                 }
-                self.inject(InputEvent::TouchUp { slot: *id }, InputSource::Agent);
-                self.inject(InputEvent::TouchFrame, InputSource::Agent);
+                self.inject(InputEvent::TouchUp { slot: *id }, src);
+                self.inject(InputEvent::TouchFrame, src);
             }
             Action::Tap { x, y } => {
                 let pos = self.point(chain, *x, *y)?;
                 let slot = (0..).find(|s| !self.held.touches.contains_key(s)).unwrap();
                 for ev in [InputEvent::TouchDown { slot, pos }, InputEvent::TouchFrame, InputEvent::TouchUp { slot }, InputEvent::TouchFrame] {
-                    self.inject(ev, InputSource::Agent);
+                    self.inject(ev, src);
                 }
             }
             Action::Pinch { scale, rotate } => {

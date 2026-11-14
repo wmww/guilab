@@ -2,7 +2,7 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Plan steps 1-4 (skeleton, headless compositor, input and locking, Xwayland) are built; see `plan.md` for what's next and `code-map.md` for the code.
+Plan steps 1-5 (skeleton, headless compositor, input and locking, Xwayland, event log) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
@@ -41,18 +41,24 @@ Plan steps 1-4 (skeleton, headless compositor, input and locking, Xwayland) are 
   - **Share:** unblocks the human's input while the agent keeps its lock. Both act at once.
 
 ## Event log
-- Each session has an append-only, timestamped log of everything: human input, agent commands, app start/exit, window map/unmap, messages, screenshots.
-- Every event has one of two delivery tiers:
-  - **Wake:** ends a blocking `poll` (or emits a `--follow` line). Defaults: human message (including drawings), lock revoked, app exited or crashed, session about to expire.
-  - **Passive:** never wakes anything. It queues up and rides along with the next delivery. Defaults: human input (pointer motion, clicks, keys, scrolls), window map/unmap/title changes, output changes.
-- Any delivery carries every queued passive event since the agent's last one, compactly summarized (coalesced motion, with timestamps). A delivery is either a wake event or the response to any agent command. So the agent always knows what changed under it.
-- `poll --wake`/`--passive` can move event kinds between tiers. Use this tier split anywhere new event kinds appear, rather than ad-hoc rules.
-- Frames are not persisted by default and there's no scrubbing UI. The log is designed so frame history could be added later.
+- Each session has an append-only, timestamped (unix ms), numbered (`seq`) log: agent commands with args, human input, app start/exit (code, signal, after `kill` or not), window open/close/title (toplevels and X windows; diffed each frame), output changes, lock/unlock/revoke/share, human messages, `say`, screenshots, the expiry warning. In memory, capped at 100k events (oldest dropped); it dies with the session.
+- Human input is logged per event, with motion coalesced into one event per run (`path` of `[x, y, ms]`, new run after a 500 ms gap or any other event) and consecutive scrolls summed. Agent input is logged only as its `input ...` command.
+- Three tiers:
+  - **Wake:** ends a blocking `poll` (or emits a `--follow` line). Defaults: human message, lock revoked, app exited or crashed on its own, session about to expire (warned `min(60 s, ttl/2)` before; a waiting poll doesn't count as activity, so the warning reaches it and the agent can keep the session alive).
+  - **Passive:** rides along with the next delivery. Defaults: human input, windows, output, app start, app ended by `guilab kill`, lock/unlock/share.
+  - **Log:** only in `guilab log`: commands, `say`, screenshots (the agent's own actions).
+- A delivery is a poll result or the reply to any agent command (not `log`, `poll` itself or the human's actions). It carries every non-log event since that client's previous delivery, except events its own commands caused (each event records the delivery key that caused it; e.g. its own `run` doesn't come back as "app started"). Replies print them on **stderr** (`[guilab events since your previous guilab command at HH:MM:SS; not errors]`), so stdout stays parseable; `--json` puts them as one JSON line on stderr.
+- **Delivery keys:** the lock token if the command has one, else one shared anonymous key per session. A new lock token starts at the end (it has seen everything); an unknown token starts at the anonymous position. 32 keys kept per session, least recently used dropped.
+- **Several pollers on one key:** each wake event reaches all of them (a poll fires on any wake event after it started, even if a sibling already consumed it); passive events go to whichever delivery comes first. Two agents sharing a session without tokens therefore split passive events between them; use tokens to keep them apart.
+- `poll --wake`/`--passive KINDS` override tiers for that poll only (kind or group names: `input`, `window`, `app`, `all`). Use this tier split anywhere new event kinds appear, rather than ad-hoc rules.
+- Text output (`proto/src/text.rs`) is written for agents reading it cold and was checked with context-free sub-agents: chronological, one line per event, human input runs merged into one line of phrases (`moved pointer A → B (0.8s); double-clicked at X,Y in window 7; typed "hi"; pressed ctrl+s; dragged from A to B`), messages in full with image paths, annotations and a `guilab say` hint.
+- Frames are not persisted and there's no scrubbing UI. Frame history would add a `frame` event kind (seq + file path or ring-buffer index) to the same log; nothing else assumes events are small.
 
 ## Messaging
-- `guilab poll` blocks until the next wake event, prints it with the queued passive events, and exits. `--follow` streams one line per wake event instead, for Monitor-style tools.
-- A human message has text, image attachments (written to files, path given), and the queued passive events.
-- `guilab say` posts agent → human messages (text, optional images) into the viewer's chat.
+- `guilab poll [--timeout SECS]` blocks until a wake event, prints it and everything else since the previous delivery, and exits 0 (2 on timeout, still printing what happened). `--follow` keeps going with one line per wake event (passive events appended as `(meanwhile: ...)`), for Monitor-style tools.
+- A human message has text, image attachments (copied into the session dir as `msg-SEQ-N.EXT`, path given) and text annotations (`{text, image?, x?, y?}`, positions in image pixels). How the viewer delivers annotation text (baked into the image, as data, or both) is decided in step 7; the event carries both kinds.
+- `guilab say TEXT [--image PATH]` logs an agent → human message (images copied as `say-SEQ-N.EXT`) for the viewer's feed.
+- Until the viewer exists, the hidden `guilab debug message|input|revoke|share` acts as the human (tests use it). Human input goes through `Session::inject(.., InputSource::Human)`, which logs it; it's refused while locked and not shared.
 
 ## Viewer
 Start with basic functionality. Don't build UI or features we aren't sure we need.
@@ -86,9 +92,9 @@ Drawing flow:
   - apps: `run -- CMD...`, `kill [ID]`, `ps` (with exit status). No restart or watch mode: `build && guilab kill && guilab run ...` is enough.
   - control: `lock`, `unlock`, `output [-s WxH] [--scale S]` (no args: show)
   - input chain: `input ACTION...`, grammar and docs in `guilab input --help` (`proto/src/input.rs` `HELP`): `move X Y [MS]` (MS = glide), `down/up [BTN]`, `click [BTN] [N]`, `scroll DX DY` (wheel notches), `scrollpx DX DY` (touchpad), `key CHORD`, `keydown/keyup KEY`, `type TEXT`, `touch down|move|up ID [X Y] [MS]`, `tap X Y`, `pinch SCALE [DEG]`, `swipe DX DY [FINGERS]`, `on ID|output` (surface-local pixels from the surface's `tree` origin; events still go to whatever is on top), `sleep MS`. Chains are parsed and key names checked before anything runs. Sleeps don't block the server; a session's chains run one at a time in order. Replies with the pointer position, surface under it and keyboard focus.
-  - inspect: `tree` (toplevels topmost first, with popups and subsurfaces nested; X windows as `x11` / `x11_popup` with xid, class, title, `_NET_WM_PID`; all with ids and pixel geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir), `log`
+  - inspect: `log [--since 5m|14:05] [--after SEQ] [--kind K,..] [-n N]` (default newest 100), `tree` (toplevels topmost first, with popups and subsurfaces nested; X windows as `x11` / `x11_popup` with xid, class, title, `_NET_WM_PID`; all with ids and pixel geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir)
   - clipboard: `clip get`, `clip set [TEXT]` (stdin without TEXT); text only, clipboard selection only (no primary)
-  - messaging: `poll [--follow]`, `say TEXT [--image PATH]`
+  - messaging: `poll [--follow] [--timeout SECS] [--wake K] [--passive K]`, `say TEXT [--image PATH]`
 
 ## Later
 - Private D-Bus per session (portals, AT-SPI accessibility tree as a text view of the UI).

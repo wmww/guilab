@@ -1,6 +1,6 @@
 //! `tree`: the session's surfaces with ids and pixel geometry.
 
-use guilab_proto::{NodeKind, TreeNode};
+use guilab_proto::{EventData, NodeKind, TreeNode};
 use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
     desktop::{PopupKind, PopupManager},
@@ -12,9 +12,43 @@ use smithay::{
     },
 };
 
-use crate::{handlers::surface_id, session::Session, shell::toplevel_ids};
+use crate::{handlers::surface_id, session::Session, shell::toplevel_ids, xwayland::is_or};
 
 impl Session {
+    /// Logs windows opening, closing and changing title since the last call (each frame).
+    /// Diffing catches every path (xdg, X, client unmaps, disconnects) in one place.
+    pub(crate) fn track_windows(&mut self) {
+        let nonempty = |s: String| (!s.is_empty()).then_some(s);
+        let mut now = Vec::new();
+        for w in self.space.elements().filter(|w| !is_or(w)) {
+            let Some(id) = w.wl_surface().and_then(|s| surface_id(&s)) else { continue };
+            let (window, app_id, title) = match w.x11_surface() {
+                Some(x) => ("x11", nonempty(x.class()), nonempty(x.title())),
+                None => {
+                    let (app_id, title) = w.wl_surface().map(|s| toplevel_ids(&s)).unwrap_or_default();
+                    ("toplevel", app_id, title)
+                }
+            };
+            now.push((id, window, app_id, title));
+        }
+        for (id, title) in &self.seen_windows {
+            if !now.iter().any(|n| n.0 == *id) {
+                self.log.push(EventData::WindowUnmap { id: *id, title: title.clone() }, None);
+            }
+        }
+        for (id, window, app_id, title) in &now {
+            match self.seen_windows.iter().find(|s| s.0 == *id) {
+                None => self.log.push(
+                    EventData::WindowMap { id: *id, window: window.to_string(), app_id: app_id.clone(), title: title.clone() },
+                    None,
+                ),
+                Some((_, t)) if t != title => self.log.push(EventData::Title { id: *id, title: title.clone() }, None),
+                Some(_) => continue,
+            };
+        }
+        self.seen_windows = now.into_iter().map(|(id, _, _, t)| (id, t)).collect();
+    }
+
     /// Mapped toplevels, topmost first, each with its subsurfaces and popups nested.
     pub fn tree(&self) -> Vec<TreeNode> {
         let scale = self.output.current_scale().fractional_scale();

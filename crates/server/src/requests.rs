@@ -7,9 +7,9 @@ use std::{
 };
 
 use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle, XState};
-use guilab_proto::{Command, LockInfo, Request, Response, SessionInfo, ShotInfo, Target};
+use guilab_proto::{Command, EventData, HumanOp, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo};
 
-use crate::{ClipWait, DEFAULT_TTL, InputJob, NewWait, Server, ShotWait, Slot, send};
+use crate::{ClipWait, DEFAULT_TTL, InputJob, NewWait, PollWait, Server, ShotWait, Slot, send};
 
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -104,90 +104,252 @@ impl Server {
                     Ok(n) => n,
                     Err(e) => return Some(Response::err(e)),
                 };
-                let token = target.token.as_deref();
-                let slot = self.sessions.get_mut(&name).unwrap();
-                if let Err(e) = slot.lock.check(&name, cmd.access(), token) {
-                    return Some(Response::err(e));
-                }
-                slot.last_active = Instant::now();
-                let s = &mut slot.session;
-                match cmd {
-                    Command::End => Response::ok(self.end_session(&name)),
-                    Command::Lock { force } => match slot.lock.take(&name, token, force) {
-                        Ok(token) => {
-                            // Taking over: the old holder's chains stop.
-                            if force {
-                                self.abort_inputs(&name, &Response::err("your lock was taken over (guilab lock --force)"));
-                            }
-                            Response::ok(LockInfo { session: name, token })
-                        }
-                        Err(e) => Response::err(e),
-                    },
-                    Command::Unlock { force } => match slot.lock.release(&name, token, force) {
-                        Ok(_) => {
-                            s.release_all(InputSource::Agent);
-                            self.abort_inputs(&name, &Response::err("the lock was released; input stopped"));
-                            Response::ok(())
-                        }
-                        Err(e) => Response::err(e),
-                    },
-                    Command::Input { actions } => {
-                        if let Err(e) = s.check_chain(&actions) {
-                            return Some(Response::err(e));
-                        }
-                        let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
-                        // Queued behind the session's running chain, if any; else runs now.
-                        let now = Instant::now();
-                        self.inputs.push(InputJob { session: name, stream, chain: Chain::new(actions), resume_at: now });
-                        self.run_inputs(now);
-                        return None;
-                    }
-                    Command::ClipGet => match s.clip_get() {
-                        Ok(ClipRead::Text(t)) => Response::ok(t),
-                        Ok(ClipRead::Pipe(fd)) => {
-                            let pipe = std::fs::File::from(fd);
-                            let _ = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK);
-                            let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
-                            let deadline = Instant::now() + CLIP_TIMEOUT;
-                            self.clips.push(ClipWait { session: name, stream, pipe, buf: Vec::new(), deadline });
-                            return None;
-                        }
-                        Err(e) => Response::err(e),
-                    },
-                    Command::ClipSet { text } => {
-                        s.clip_set(text);
-                        Response::ok(())
-                    }
-                    Command::Run { argv, cwd, env } => result(s.spawn(&argv, &cwd, &env)),
-                    Command::Kill { id } => result(s.kill(id)),
-                    Command::Ps => Response::ok(s.ps()),
-                    Command::Tree => Response::ok(s.tree()),
-                    Command::Output { size, scale } => {
-                        if (size.is_some() || scale.is_some())
-                            && let Err(e) = s.set_output(size.map(|[w, h]| (w as i32, h as i32)), scale)
-                        {
-                            return Some(Response::err(format!("{e:#}")));
-                        }
-                        Response::ok(s.output_info())
-                    }
-                    Command::Screenshot { path, settle } => {
-                        let path = match path {
-                            Some(p) => p,
-                            None => {
-                                let n = (1..).find(|i| !s.dir.join(format!("shot-{i}.png")).exists()).unwrap();
-                                s.dir.join(format!("shot-{n}.png"))
-                            }
-                        };
-                        let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
-                        // Answered after the next frame (see check_waiters).
-                        self.waiters.push(ShotWait { session: name, stream, path, settle, start: Instant::now() });
-                        return None;
-                    }
-                    Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => unreachable!(),
-                }
+                let key = target.token.clone().unwrap_or_default();
+                // Not deliveries: the human's actions (the viewer's), reading the log, and
+                // polls (they deliver themselves).
+                let attach = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
+                let r = self.handle_session(&name, &key, cmd, target.token.as_deref(), stream);
+                return if attach { r.map(|r| self.attach(&name, Some(&key), r)) } else { r };
             }
         };
         Some(r)
+    }
+
+    /// A command on session `name`. `None` = answered later.
+    fn handle_session(&mut self, name: &str, key: &str, cmd: Command, token: Option<&str>, stream: &UnixStream) -> Option<Response> {
+        let slot = self.sessions.get_mut(name).unwrap();
+        if let Err(e) = slot.lock.check(name, cmd.access(), token) {
+            return Some(Response::err(e));
+        }
+        slot.last_active = Instant::now();
+        if let Some(text) = cmd.log_text() {
+            slot.session.log.push(EventData::Command { cmd: text }, Some(key));
+        }
+        let clone = || stream.try_clone().map_err(|_| Response::err("internal: clone stream"));
+        let s = &mut slot.session;
+        let r = match cmd {
+            Command::End => Response::ok(self.end_session(name)),
+            Command::Lock { force } => {
+                let had = slot.lock.current.as_ref().map(|l| l.token.clone());
+                match slot.lock.take(name, token, force) {
+                    Ok(token) => {
+                        if had.as_deref() != Some(token.as_str()) {
+                            s.log.push(EventData::Lock { forced: had.is_some() }, Some(key));
+                            // The new token has seen everything so far.
+                            s.log.start_key(&token);
+                        }
+                        // Taking over: the old holder's chains stop.
+                        if force {
+                            self.abort_inputs(name, &Response::err("your lock was taken over (guilab lock --force)"));
+                        }
+                        Response::ok(LockInfo { session: name.to_string(), token })
+                    }
+                    Err(e) => Response::err(e),
+                }
+            }
+            Command::Unlock { force } => match slot.lock.release(name, token, force) {
+                Ok(was) => {
+                    if was {
+                        s.log.push(EventData::Unlock, Some(key));
+                    }
+                    s.release_all(InputSource::Agent);
+                    self.abort_inputs(name, &Response::err("the lock was released; input stopped"));
+                    Response::ok(())
+                }
+                Err(e) => Response::err(e),
+            },
+            Command::Input { actions } => {
+                if let Err(e) = s.check_chain(&actions) {
+                    return Some(Response::err(e));
+                }
+                let stream = match clone() {
+                    Ok(s) => s,
+                    Err(e) => return Some(e),
+                };
+                self.queue_input(name, Some(key), stream, Chain::new(actions, InputSource::Agent));
+                return None;
+            }
+            Command::ClipGet => match s.clip_get() {
+                Ok(ClipRead::Text(t)) => Response::ok(t),
+                Ok(ClipRead::Pipe(fd)) => {
+                    let pipe = std::fs::File::from(fd);
+                    let _ = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK);
+                    let stream = match clone() {
+                        Ok(s) => s,
+                        Err(e) => return Some(e),
+                    };
+                    let deadline = Instant::now() + CLIP_TIMEOUT;
+                    self.clips.push(ClipWait { session: name.to_string(), key: key.to_string(), stream, pipe, buf: Vec::new(), deadline });
+                    return None;
+                }
+                Err(e) => Response::err(e),
+            },
+            Command::ClipSet { text } => {
+                s.clip_set(text);
+                Response::ok(())
+            }
+            Command::Run { argv, cwd, env } => match s.spawn(&argv, &cwd, &env) {
+                Ok(p) => {
+                    s.log.push(EventData::AppStart { id: p.id, argv: p.argv.clone() }, Some(key));
+                    Response::ok(p)
+                }
+                Err(e) => Response::err(format!("{e:#}")),
+            },
+            Command::Kill { id } => result(s.kill(id)),
+            Command::Ps => Response::ok(s.ps()),
+            Command::Tree => Response::ok(s.tree()),
+            Command::Output { size, scale } => {
+                if size.is_some() || scale.is_some() {
+                    if let Err(e) = s.set_output(size.map(|[w, h]| (w as i32, h as i32)), scale) {
+                        return Some(Response::err(format!("{e:#}")));
+                    }
+                    let o = s.output_info();
+                    s.log.push(EventData::Output { width: o.width, height: o.height, scale: o.scale }, Some(key));
+                }
+                Response::ok(s.output_info())
+            }
+            Command::Screenshot { path, settle } => {
+                let path = match path {
+                    Some(p) => p,
+                    None => {
+                        let n = (1..).find(|i| !s.dir.join(format!("shot-{i}.png")).exists()).unwrap();
+                        s.dir.join(format!("shot-{n}.png"))
+                    }
+                };
+                let stream = match clone() {
+                    Ok(s) => s,
+                    Err(e) => return Some(e),
+                };
+                // Answered after the next frame (see check_waiters).
+                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, start: Instant::now() });
+                return None;
+            }
+            Command::Poll { timeout_ms, follow, tiers } => {
+                if let Err(e) = tiers.check() {
+                    return Some(Response::err(e));
+                }
+                let log = &mut s.log;
+                if log.has_wake(key, &tiers) {
+                    let d = log.deliver(key, &tiers, None);
+                    let mut r = Response::ok(PollInfo { timed_out: false });
+                    r.events = Some(d);
+                    if !follow {
+                        return Some(r);
+                    }
+                    send(stream, &r);
+                }
+                // Motion going on now must not hide in an older event.
+                log.seal();
+                let stream = match clone() {
+                    Ok(s) => s,
+                    Err(e) => return Some(e),
+                };
+                let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+                let watch_from = log.end();
+                self.polls.push(PollWait { session: name.to_string(), key: key.to_string(), stream, deadline, tiers, follow, watch_from });
+                return None;
+            }
+            Command::Log { after, since, kinds, last } => {
+                let kinds = match guilab_proto::events::expand_kinds(&kinds) {
+                    Ok(k) => k,
+                    Err(e) => return Some(Response::err(e)),
+                };
+                return Some(Response::ok(s.log.query(after, since, &kinds, last)));
+            }
+            Command::Say { text, images } => match copy_images(&s.dir, "say", s.log.end(), &images) {
+                Ok(images) => {
+                    s.log.push(EventData::Say { text, images }, Some(key));
+                    Response::ok(())
+                }
+                Err(e) => Response::err(e),
+            },
+            Command::Human { op } => match op {
+                HumanOp::Message { text, images, annotations } => match copy_images(&s.dir, "msg", s.log.end(), &images) {
+                    Ok(images) => {
+                        if let Some(a) = annotations.iter().find(|a| a.image.is_some_and(|i| i >= images.len())) {
+                            return Some(Response::err(format!("annotation {:?} is on a missing image", a.text)));
+                        }
+                        s.log.push(EventData::Message { text, images, annotations }, None);
+                        Response::ok(())
+                    }
+                    Err(e) => Response::err(e),
+                },
+                HumanOp::Input { actions } => {
+                    if !slot.lock.human_input_allowed() {
+                        return Some(Response::err("the session is locked: human input is blocked (unless shared)"));
+                    }
+                    if let Err(e) = s.check_chain(&actions) {
+                        return Some(Response::err(e));
+                    }
+                    let stream = match clone() {
+                        Ok(s) => s,
+                        Err(e) => return Some(e),
+                    };
+                    self.queue_input(name, None, stream, Chain::new(actions, InputSource::Human));
+                    return None;
+                }
+                HumanOp::Revoke => {
+                    if slot.lock.current.is_none() {
+                        return Some(Response::err("not locked"));
+                    }
+                    self.revoke_lock(name);
+                    Response::ok(())
+                }
+                HumanOp::Share { on } => {
+                    if slot.lock.current.is_none() {
+                        return Some(Response::err("not locked"));
+                    }
+                    self.share(name, on);
+                    Response::ok(())
+                }
+            },
+            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => unreachable!(),
+        };
+        Some(r)
+    }
+
+    /// Queues an input chain behind the session's running one, if any; else runs it now.
+    fn queue_input(&mut self, name: &str, key: Option<&str>, stream: UnixStream, chain: Chain) {
+        let now = Instant::now();
+        self.inputs.push(InputJob { session: name.to_string(), key: key.map(str::to_string), stream, chain, resume_at: now });
+        self.run_inputs(now);
+    }
+
+    /// Answers polls that got a wake event or timed out; drops those whose client left.
+    pub(crate) fn check_polls(&mut self, now: Instant) {
+        let mut i = 0;
+        while i < self.polls.len() {
+            let p = &mut self.polls[i];
+            if peer_gone(&mut p.stream) {
+                self.polls.remove(i);
+                continue;
+            }
+            let Some(slot) = self.sessions.get_mut(&p.session) else {
+                i += 1;
+                continue;
+            };
+            let log = &mut slot.session.log;
+            let (resp, done) = if let Some(w) = log.first_wake(&p.key, &p.tiers, p.watch_from) {
+                let mut r = Response::ok(PollInfo { timed_out: false });
+                r.events = Some(log.deliver(&p.key, &p.tiers, Some(w)));
+                p.watch_from = log.end();
+                (r, !p.follow)
+            } else if p.deadline.is_some_and(|d| now >= d) {
+                let mut r = Response::ok(PollInfo { timed_out: true });
+                let d = log.deliver(&p.key, &p.tiers, None);
+                r.events = (!d.events.is_empty()).then_some(d);
+                (r, true)
+            } else {
+                i += 1;
+                continue;
+            };
+            send(&p.stream, &resp);
+            if done {
+                self.polls.remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn new_session(
@@ -301,9 +463,13 @@ impl Server {
             };
             let w = self.waiters.remove(i);
             let resp = match s.write_png(&w.path) {
-                Ok((width, height)) => Response::ok(ShotInfo { path: w.path, width, height, settled }),
+                Ok((width, height)) => {
+                    s.log.push(EventData::Screenshot { path: w.path.clone() }, Some(&w.key));
+                    Response::ok(ShotInfo { path: w.path, width, height, settled })
+                }
                 Err(e) => Response::err(format!("screenshot: {e:#}")),
             };
+            let resp = self.attach(&w.session, Some(&w.key), resp);
             send(&w.stream, &resp);
         }
     }
@@ -330,17 +496,22 @@ impl Server {
             let job = &mut self.inputs[i];
             match slot.session.run_chain(&mut job.chain) {
                 Ok(Some(delay)) => {
-                    job.resume_at = now + delay;
+                    // From the scheduled time, so 16.7 ms glide steps don't stretch to two
+                    // 16 ms ticks each.
+                    job.resume_at = (job.resume_at + delay).max(now);
                     busy.push(name);
                     i += 1;
                 }
                 Ok(None) => {
                     let j = self.inputs.remove(i);
-                    send(&j.stream, &Response::ok(slot.session.input_info()));
+                    let r = Response::ok(slot.session.input_info());
+                    let r = self.attach(&name, j.key.as_deref(), r);
+                    send(&j.stream, &r);
                 }
                 Err(e) => {
                     let j = self.inputs.remove(i);
-                    send(&j.stream, &Response::err(e));
+                    let r = self.attach(&name, j.key.as_deref(), Response::err(e));
+                    send(&j.stream, &r);
                 }
             }
         }
@@ -371,11 +542,34 @@ impl Server {
                         Ok(()) => Response::ok(String::from_utf8_lossy(&c.buf)),
                         Err(e) => Response::err(e),
                     };
+                    let resp = self.attach(&c.session, Some(&c.key), resp);
                     send(&c.stream, &resp);
                 }
             }
         }
     }
+}
+
+/// Whether the client of a waiting request hung up (it sends nothing after its request).
+fn peer_gone(stream: &mut UnixStream) -> bool {
+    use std::io::Read;
+    let mut b = [0u8; 64];
+    match stream.read(&mut b) {
+        Ok(n) => n == 0,
+        Err(e) => !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted),
+    }
+}
+
+/// Copies message attachments into the session dir as `PREFIX-SEQ-N.EXT`.
+fn copy_images(dir: &Path, prefix: &str, seq: u64, images: &[std::path::PathBuf]) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut out = Vec::new();
+    for (i, src) in images.iter().enumerate() {
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
+        let dst = dir.join(format!("{prefix}-{seq}-{}.{ext}", i + 1));
+        std::fs::copy(src, &dst).map_err(|e| format!("image {}: {e}", src.display()))?;
+        out.push(dst);
+    }
+    Ok(out)
 }
 
 fn result<T: serde::Serialize>(r: anyhow::Result<T>) -> Response {
