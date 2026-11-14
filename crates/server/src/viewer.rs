@@ -459,7 +459,7 @@ fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
             match &e.data {
                 EventData::Message { text, images, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images) },
                 EventData::Say { text, images } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images) },
-                EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: format!("guilab {cmd}"), images: Vec::new() },
+                EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: cmd.clone(), images: Vec::new() },
                 _ => unreachable!("filtered"),
             }
         })

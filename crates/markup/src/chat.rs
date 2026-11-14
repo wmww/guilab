@@ -114,7 +114,7 @@ impl Chat {
                                 .id(draft_id)
                                 // A custom frame replaces `.margin()`, so the padding goes here.
                                 .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
-                                .hint_text("Message the agent (Enter: send, Shift+Enter: new line)")
+                                .hint_text("Message the agent")
                                 .desired_rows(1)
                                 .min_size(vec2(0.0, button))
                                 .desired_width(ui.available_width() - button - 8.0);
@@ -158,10 +158,11 @@ fn show_item(ui: &mut Ui, item: &mut Item) {
     let f = &item.feed;
     match f.who {
         Who::Log => {
+            // Activity, not a message: a prompt mark, dim, the time on hover.
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(&f.time).small().weak());
-                ui.label(RichText::new(&f.text).small().monospace().weak());
+                ui.label(RichText::new("›").small().monospace().weak());
+                ui.label(RichText::new(&f.text).small().monospace().weak()).on_hover_text(&f.time);
             });
         }
         Who::Human | Who::Agent => {

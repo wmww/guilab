@@ -195,6 +195,16 @@ pub struct ViewerUi {
     /// Messages for the human (e.g. "Saved to ..."), shown as a toast; and when shown.
     notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     notice: Option<(String, f64)>,
+    pub chat_place: ChatPlace,
+}
+
+/// Where the chat panel goes (View menu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatPlace {
+    Off,
+    #[default]
+    Bottom,
+    Right,
 }
 
 /// How long toasts stay up after the thing that raised them (seconds).
@@ -337,11 +347,18 @@ impl ViewerUi {
         egui::Panel::left("tools").resizable(false).exact_size(40.0).show(ui, |ui| {
             ui.vertical_centered(|ui| p.sketch.toolbar(ui));
         });
-        egui::Panel::bottom("chat").resizable(true).default_size(180.0).size_range(90.0..=800.0).show(ui, |ui| {
-            if let Some(m) = p.chat.show(ui, &mut p.sketch) {
-                out.push(Action::Message { session: s.name.to_string(), text: m.text, images: m.images });
-            }
-        });
+        let panel = match self.chat_place {
+            ChatPlace::Off => None,
+            ChatPlace::Bottom => Some(egui::Panel::bottom("chat").default_size(180.0).size_range(90.0..=800.0)),
+            ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(360.0).size_range(220.0..=1200.0)),
+        };
+        if let Some(panel) = panel {
+            panel.resizable(true).show(ui, |ui| {
+                if let Some(m) = p.chat.show(ui, &mut p.sketch) {
+                    out.push(Action::Message { session: s.name.to_string(), text: m.text, images: m.images });
+                }
+            });
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
@@ -401,6 +418,7 @@ impl ViewerUi {
     /// File / Edit / View, for the current session.
     fn menu_bar(&mut self, ui: &mut egui::Ui, sessions: &[SessionView], out: &mut Vec<Action>) {
         let cur = self.current.clone();
+        let mut chat_place = self.chat_place;
         let p = cur.as_deref().and_then(|c| {
             let key = sessions.iter().find(|s| s.name == c)?.key;
             Some(self.per(c, key))
@@ -426,28 +444,42 @@ impl ViewerUi {
                         p.sketch.redo();
                     }
                 });
-                ui.menu_button("View", |ui| {
+                // Stays open on clicks inside, so zoom can be stepped; choices close it.
+                let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                egui::containers::menu::MenuButton::new("View").config(keep_open).ui(ui, |ui| {
                     let z = &mut p.zoom;
-                    if ui.button("Zoom in").clicked() {
-                        z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
-                        z.fit = false;
-                    }
-                    if ui.button("Zoom out").clicked() {
-                        z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
-                        z.fit = false;
-                    }
-                    ui.separator();
-                    if ui.radio(z.fit, "Fit to window").clicked() {
+                    ui.horizontal(|ui| {
+                        ui.label("Zoom");
+                        // Menus draw buttons flat; these are steppers, so frame them.
+                        let fill = ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.6);
+                        let step = |t| egui::Button::new(t).fill(fill).min_size(vec2(24.0, 0.0));
+                        if ui.add(step("−")).clicked() {
+                            z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
+                            z.fit = false;
+                        }
+                        if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).fill(fill).min_size(vec2(52.0, 0.0))).on_hover_text("Actual size (100%)").clicked() {
+                            *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                        }
+                        if ui.add(step("+")).clicked() {
+                            z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
+                            z.fit = false;
+                        }
+                    });
+                    if ui.add_enabled(!z.fit, egui::Button::new("Fit to window")).clicked() {
                         *z = Zoom::default();
                     }
-                    if ui.radio(!z.fit && z.zoom == 1.0, "Actual size (1:1)").clicked() {
-                        *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
-                    }
                     ui.separator();
-                    ui.weak(format!("Zoom {:.0}%", z.zoom * 100.0));
+                    ui.label("Chat");
+                    for (place, label) in [(ChatPlace::Off, "Off"), (ChatPlace::Bottom, "Bottom"), (ChatPlace::Right, "Right side")] {
+                        if ui.radio(chat_place == place, label).clicked() {
+                            chat_place = place;
+                            ui.close();
+                        }
+                    }
                 });
             });
         });
+        self.chat_place = chat_place;
     }
 
     #[allow(clippy::too_many_arguments)]
