@@ -198,6 +198,9 @@ fn messages_wait_for_poll() {
         assert!(!out.contains("wrong window") && !err.contains("wrong window"), "{err}");
         assert!(err.contains("[guilab: a human message waiting since ") && err.contains("read it now: guilab poll]"), "{err}");
     }
+    // `done` won't answer before it's read.
+    let (ok, _, err) = lab.try_run(&["done", "all fixed"]);
+    assert!(!ok && err.contains("haven't read") && err.contains("guilab poll"), "{err}");
     // A poll returns it at once, even while working, and marks the agent on it.
     let t = Instant::now();
     let (code, out, _) = lab.status(&["poll", "--timeout", "10"]);

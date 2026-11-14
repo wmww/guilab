@@ -338,6 +338,14 @@ impl Server {
                 Response::ok(())
             }
             Command::Done { message, images } => {
+                // Answering without reading what the human just said would ignore it.
+                if let Some(first) = s.log.unread().next() {
+                    let at = guilab_proto::text::Fmt { tz: crate::tz_offset() }.clock(first.t);
+                    return Some(Response::err(format!(
+                        "a human message arrived at {at} that you haven't read. Read it first: guilab poll (it returns at \
+                         once), then finish with guilab done"
+                    )));
+                }
                 // Done means hands off: release the lock, with or without the token (a
                 // wrong token is still an error, so a stale holder learns it lost the lock).
                 let unlocked = if slot.lock.current.is_some() {

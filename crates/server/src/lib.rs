@@ -507,6 +507,16 @@ impl Server {
     }
 }
 
+/// The local UTC offset in seconds (for times the server formats).
+pub(crate) fn tz_offset() -> i64 {
+    // SAFETY: localtime_r writes only to `tm`.
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
+    }
+}
+
 /// Writes one response line, blocking briefly if the socket is full.
 pub(crate) fn send(stream: &UnixStream, resp: &Response) {
     let mut line = serde_json::to_vec(resp).unwrap_or_default();

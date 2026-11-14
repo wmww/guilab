@@ -487,19 +487,10 @@ pub(crate) fn insert_channel(handle: &calloop::LoopHandle<'static, Server>) -> a
     Ok(tx)
 }
 
-/// The session's local UTC offset in seconds (for feed times).
-fn tz_offset() -> i64 {
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
-    }
-}
-
 /// Feed items for the log's messages (both ways), agent commands and status changes from
 /// seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
 fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
-    let fmt = Fmt { tz: tz_offset() };
+    let fmt = Fmt { tz: crate::tz_offset() };
     let wanted = |e: &&guilab_proto::Event| {
         matches!(e.data, EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::Command { .. } | EventData::Work { .. } | EventData::Done)
     };
