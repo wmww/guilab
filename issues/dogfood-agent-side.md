@@ -46,3 +46,9 @@ Severity: high. Every command prints "events since your previous command" on std
 
 ## Short human messages are easy to misread without the viewer state they refer to
 "also that black color" / "still no black color??" meant "the color picker has no black", but I read it as complaints about a black UI area twice. Text-only messages don't say what the human was looking at or pointing to. Idea: attach lightweight context to each message (selected tool, hovered widget/region, current tab), or encourage drawing in the hint. Not a bug, but costs round trips.
+
+## Overlay tests: input went to a session the viewer wasn't showing
+After restarting the inner guilab and creating sessions in order demo, colors, the viewer stayed on `demo` (current is fixed at the first frame, when only `demo` existed), while I assumed the alphabetically-first tab. Agent input to `colors` then showed nothing, and I spent several rounds thinking the overlay was broken. Nothing in the CLI says which session a viewer is showing. Suggest: `guilab show`/`ls` report the viewer's current tab, or a `--focus`/`show -S NAME` to pick it.
+
+## `screenshot --no-settle` of a nested viewer can be a frame behind
+Right after agent input to the inner session, an outer `screenshot --no-settle` often showed the inner viewer's previous frame (no key chips, chat not updated). Settled screenshots take 3 s with animations. Needed `sleep 0.3` by hand. A middle ground (`--wait-ms N`, or settle that ignores known overlay animation) would help.
