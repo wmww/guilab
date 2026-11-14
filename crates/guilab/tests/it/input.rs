@@ -94,6 +94,13 @@ fn lock_rules() {
     assert!(start.elapsed() < Duration::from_millis(500));
     assert!(slow.wait().unwrap().success());
     assert!(start.elapsed() >= Duration::from_millis(600));
+    // A chain whose client gave up (Ctrl-C) stops.
+    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "400", "move", "30", "30"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    slow.kill().unwrap();
+    let _ = slow.wait();
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(lab.input(&t, &["sleep", "1"])["pointer"], serde_json::json!([2.0, 2.0]));
 
     // Taking over: the old token stops working.
     let t2 = lab.json(&["lock", "--force"])["token"].as_str().unwrap().to_string();
@@ -107,8 +114,8 @@ fn lock_rules() {
     lab.run(&["end"]);
 }
 
-/// Whoever ends a lock (takeover, unlock), nothing the old holder held stays held:
-/// keys are released and an open touchpad gesture is ended.
+/// Whoever ends a lock (takeover, unlock) or gives up a chain, nothing stays held: keys
+/// are released and an open touchpad gesture is ended.
 #[test]
 fn lock_end_releases_input() {
     if !gtk4() {
@@ -125,6 +132,12 @@ fn lock_end_releases_input() {
     // Taken over: the new holder doesn't inherit a held shift.
     let t2 = lab.json(&["lock", "--force"])["token"].as_str().unwrap().to_string();
     wait_log(&log, "keyup Shift_L", 5);
+    // A chain given up mid-way (Ctrl-C) lets go too.
+    let mut held = lab.cmd(&["-t", &t2, "input", "keydown", "ctrl", "sleep", "5000"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+    wait_log(&log, "key Control_L", 5);
+    held.kill().unwrap();
+    let _ = held.wait();
+    wait_log(&log, "keyup Control_L", 5);
 
     // Unlocked mid-pinch: the app sees the gesture end.
     let (zx, zy) = center(&l, "zoom", 1.0);

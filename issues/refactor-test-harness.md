@@ -12,7 +12,7 @@ Priority: medium (flakiness under load; notes already say "reproduce flaky tests
 
 ## Proposed shape
 - `tests/it/util.rs` (or keep in `main.rs`): `fn wait_until<T>(what: &str, secs: u64, f: impl FnMut() -> Option<T>) -> T` (30 ms interval, panics with `what` and the last observed state). Rebuild `wait_tree`, `wait_log` and the inline loops on it. Replace every sleep-then-assert with `wait_until` on the observable (`ps` state, `pgrep`, `ls`).
-- For "the poller is registered": expose pending-request counts in `ServerInfo` (`ping`), e.g. `pending: { polls, inputs, shots }`, and wait on that. Cheap, also useful for debugging a stuck server. (Pairs with `refactor-deferred-replies.md`, which makes the count trivial.)
+- For "the poller is registered": expose pending-request counts in `ServerInfo` (`ping`), e.g. `pending: { polls, inputs, shots }`, and wait on that. Cheap, also useful for debugging a stuck server. (Trivial now: all of them are in `Server::pending`.)
 - One runner: `Lab::exec(args) -> Out { code, stdout, stderr }` with builder-ish `.env()`/`.cwd()`; `run`/`json`/`try_run` become one-liners on it. Move shared app/skip helpers (`have`, `gtk4`, `qt6`, `has_python_module`, `wait_log`, `center`) into one `apps.rs`-style helper module, separate from the `apps` test module.
 - Skips: count them (static counter) and print a summary, or honor `GUILAB_REQUIRE_APPS=1` to turn skips into failures for CI-like runs.
 - Seen flaky: `xwayland::x11_clipboard_bridging` timed out in `wait_log` once in a full run (machine busy with a nested viewer); passed 3/3 alone.

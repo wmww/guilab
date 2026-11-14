@@ -3,6 +3,8 @@
 
 mod images;
 mod lock;
+mod out;
+mod pending;
 mod requests;
 mod slot;
 mod viewer;
@@ -10,7 +12,7 @@ mod viewer;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read},
     os::unix::{
         fs::{DirBuilderExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -29,7 +31,7 @@ use calloop::{
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
-use guilab_compositor::{Chain, Gpu, Session, SharedGpu, procs};
+use guilab_compositor::{Gpu, Session, SharedGpu, procs};
 use guilab_proto::{Response, ServerInfo};
 use slot::Slot;
 
@@ -46,67 +48,6 @@ pub struct Options {
 pub const DEFAULT_TTL: u64 = 1800;
 const TICK: Duration = Duration::from_millis(16);
 
-/// An input chain paused at a sleep (or queued behind another chain of its session).
-pub(crate) struct InputJob {
-    pub session: String,
-    /// Delivery key of the requester (see `guilab_proto::log`); None for the human.
-    pub key: Option<String>,
-    pub stream: UnixStream,
-    pub chain: Chain,
-    pub resume_at: Instant,
-}
-
-/// A `clip get` reading the owning client's pipe.
-pub(crate) struct ClipWait {
-    pub session: String,
-    pub key: String,
-    pub stream: UnixStream,
-    pub pipe: File,
-    pub buf: Vec<u8>,
-    pub deadline: Instant,
-}
-
-/// A screenshot request waiting for its session to settle.
-pub(crate) struct ShotWait {
-    pub session: String,
-    pub key: String,
-    pub stream: UnixStream,
-    pub path: Option<PathBuf>,
-    pub settle: bool,
-    pub cursor: bool,
-    pub crop: Option<guilab_image::IRect>,
-    pub max: Option<[u32; 2]>,
-    pub start: Instant,
-}
-
-/// A `kill` waiting for its apps to exit.
-pub(crate) struct KillWait {
-    pub session: String,
-    pub key: String,
-    pub stream: UnixStream,
-    pub killed: Vec<guilab_proto::ProcInfo>,
-    pub deadline: Instant,
-}
-
-/// A `new -x` waiting for Xwayland to start.
-pub(crate) struct NewWait {
-    pub session: String,
-    pub stream: UnixStream,
-    pub deadline: Instant,
-}
-
-/// A `poll` waiting for a wake event (or streaming them with `follow`).
-pub(crate) struct PollWait {
-    pub session: String,
-    pub key: String,
-    pub stream: UnixStream,
-    pub deadline: Option<Instant>,
-    pub tiers: guilab_proto::Tiers,
-    pub follow: bool,
-    /// Wake events from this seq on end the wait.
-    pub watch_from: u64,
-}
-
 /// Processes of an ended session, to SIGKILL after the grace period and reap.
 struct Grave {
     children: Vec<Child>,
@@ -119,12 +60,9 @@ pub struct Server {
     pub(crate) handle: LoopHandle<'static, Server>,
     pub(crate) gpu: SharedGpu,
     pub(crate) sessions: BTreeMap<String, Slot>,
-    pub(crate) waiters: Vec<ShotWait>,
-    pub(crate) inputs: Vec<InputJob>,
-    pub(crate) clips: Vec<ClipWait>,
-    pub(crate) news: Vec<NewWait>,
-    pub(crate) polls: Vec<PollWait>,
-    pub(crate) kills: Vec<KillWait>,
+    /// Requests answered later.
+    pub(crate) pending: Vec<pending::Pending>,
+    pub(crate) out: out::Outbox,
     graveyard: Vec<Grave>,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) info: ServerInfo,
@@ -216,12 +154,8 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         handle,
         gpu: Rc::new(RefCell::new(gpu)),
         sessions: BTreeMap::new(),
-        waiters: Vec::new(),
-        inputs: Vec::new(),
-        clips: Vec::new(),
-        news: Vec::new(),
-        polls: Vec::new(),
-        kills: Vec::new(),
+        pending: Vec::new(),
+        out: Default::default(),
         graveyard: Vec::new(),
         sessions_dir,
         info,
@@ -291,9 +225,7 @@ impl Server {
                 if line.iter().all(|b| b.is_ascii_whitespace()) {
                     continue;
                 }
-                if let Some(resp) = srv.handle_line(&line, stream) {
-                    send(stream, &resp);
-                }
+                srv.handle_line(&line, stream);
             }
             Ok(if eof { PostAction::Remove } else { PostAction::Continue })
         });
@@ -302,27 +234,28 @@ impl Server {
         }
     }
 
-    fn handle_line(&mut self, line: &[u8], stream: &UnixStream) -> Option<Response> {
+    fn handle_line(&mut self, line: &[u8], stream: &UnixStream) {
         let v: serde_json::Value = match serde_json::from_slice(line) {
             Ok(v) => v,
-            Err(e) => return Some(Response::err(format!("bad request: {e}"))),
+            Err(e) => return self.out.send(stream, &Response::err(format!("bad request: {e}"))),
         };
         // ping and shutdown work across versions (the CLI checks the version with ping,
         // and `server --stop` must reach an old server).
         let proto = v.get("proto").and_then(|p| p.as_u64()).unwrap_or(0);
         let basic = matches!(v.get("cmd").and_then(|c| c.as_str()), Some("ping" | "shutdown"));
         if proto != guilab_proto::PROTO as u64 && !basic {
-            return Some(Response::err(format!(
+            let e = format!(
                 "this guilab CLI speaks protocol {proto}, the server (pid {}, {}) speaks {}. Restart the server with \
                  `guilab server --stop` (ends its sessions), or use the guilab binary it runs",
                 self.info.pid,
                 self.info.exe.display(),
                 guilab_proto::PROTO
-            )));
+            );
+            return self.out.send(stream, &Response::err(e));
         }
         match serde_json::from_value::<guilab_proto::Request>(v) {
             Ok(req) => self.handle(req, stream),
-            Err(e) => Some(Response::err(format!("bad request: {e}"))),
+            Err(e) => self.out.send(stream, &Response::err(format!("bad request: {e}"))),
         }
     }
 
@@ -332,13 +265,9 @@ impl Server {
             slot.session.tick();
             slot.session.reap_tick(now);
         }
-        self.run_inputs(now);
-        self.check_clips(now);
-        self.check_news(now);
-        self.check_waiters(now);
-        self.check_polls(now);
-        self.check_kills(now);
+        self.step_pending(now, false);
         self.viewer_tick(now);
+        self.out.flush(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
             self.last_slow_tick = now;
@@ -389,30 +318,8 @@ impl Server {
         drop(slot);
         self.graveyard.push(Grave { children, tag, kill_at: Instant::now() + procs::KILL_GRACE, killed: false });
         let _ = fs::remove_dir_all(&dir);
-        let ended = Response::err(format!("session {name} ended"));
-        for w in self.waiters.extract_if(.., |w| w.session == name) {
-            send(&w.stream, &ended);
-        }
-        self.abort_inputs(name, &ended);
-        for c in self.clips.extract_if(.., |c| c.session == name) {
-            send(&c.stream, &ended);
-        }
-        for p in self.polls.extract_if(.., |p| p.session == name) {
-            send(&p.stream, &ended);
-        }
-        for k in self.kills.extract_if(.., |k| k.session == name) {
-            send(&k.stream, &Response::ok(&k.killed));
-        }
+        self.end_pending(name);
         Some(info)
-    }
-
-    /// Fails the session's running and queued input chains.
-    pub(crate) fn abort_inputs(&mut self, name: &str, resp: &Response) {
-        let jobs: Vec<InputJob> = self.inputs.extract_if(.., |j| j.session == name).collect();
-        for j in jobs {
-            let r = self.attach(name, j.key.as_deref(), resp.clone());
-            send(&j.stream, &r);
-        }
     }
 
     /// Adds the events `key` hasn't seen to a reply to it.
@@ -485,17 +392,4 @@ pub(crate) fn tz_offset() -> i64 {
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
     }
-}
-
-/// Writes one response line, blocking briefly if the socket is full.
-pub(crate) fn send(stream: &UnixStream, resp: &Response) {
-    let mut line = serde_json::to_vec(resp).unwrap_or_default();
-    line.push(b'\n');
-    let mut s = stream;
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    if let Err(e) = s.write_all(&line) {
-        tracing::debug!("reply: {e}");
-    }
-    let _ = stream.set_nonblocking(true);
 }

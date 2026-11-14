@@ -17,6 +17,3 @@ Priority: low. One sitting; each item is small. (Session-struct dead fields are 
 ## Small dead or stale bits
 - `guilab_image::Store::release` is used only by tests; message holds are never released (by design: held until the session ends). Remove it, or document that holds are session-scoped and make `drop_group` the only release.
 - `guilab_compositor::write_rgba_png` (`frame.rs`) is only used by the viewer's save dialog (`server/src/viewer.rs save_dialog`); the image crate already encodes PNGs (`Rendered::png`). Move it next to its one user or reuse the image crate.
-- `server/src/requests.rs handle`: doc says "`None` means the reply is sent later (screenshot settle wait)"; it's every deferred command.
-- `tests/it/events.rs` module doc lists "say", which is gone.
-- `server/src/lib.rs send`: on a serialization failure it sends a bare newline (`unwrap_or_default`); the CLI then reports a JSON parse error. Send a `Response::err` instead.

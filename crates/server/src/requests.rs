@@ -6,18 +6,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle, XState};
+use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig};
 use guilab_image::{Made, MakeReq, Region, RenderOpts};
 use guilab_proto::{
-    Command, Delivery, DoneInfo, EventData, HumanOp, ImageInfo, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo,
+    Command, Delivery, DoneInfo, EventData, HumanOp, ImageInfo, LockInfo, Request, Response, SessionInfo, Target, events::PollInfo,
     log::ANON,
 };
 
 use crate::{
-    ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait,
+    DEFAULT_TTL, Server,
     images::Images,
     lock::Took,
-    send,
+    pending::{Pending, Reply, Wait},
     slot::{LockEnd, Slot},
 };
 
@@ -29,10 +29,6 @@ const KILL_WAIT: Duration = Duration::from_secs(3);
 
 /// How long `new -x` waits for Xwayland.
 const XWAYLAND_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Settle wait caps: once a window is up, and while waiting for the first window.
-const SETTLE_CAP: Duration = Duration::from_secs(3);
-const MAP_CAP: Duration = Duration::from_secs(10);
 
 const DEFAULT_SIZE: [u32; 2] = [1280, 720];
 
@@ -82,8 +78,8 @@ impl Server {
         }
     }
 
-    /// Handles a request. `None` means the reply is sent later (screenshot settle wait).
-    pub(crate) fn handle(&mut self, req: Request, stream: &UnixStream) -> Option<Response> {
+    /// Handles a request: replies now, or registers it to be answered later.
+    pub(crate) fn handle(&mut self, req: Request, stream: &UnixStream) {
         let Request { target, cmd, .. } = req;
         let r = match cmd {
             Command::Ping => {
@@ -91,16 +87,19 @@ impl Server {
                 info.viewer = self.viewer_info();
                 Response::ok(info)
             }
-            Command::Show { display } => {
+            Command::Show { display } => 'show: {
                 // `-S NAME show` also picks the tab.
                 if let Some(n) = &target.name {
                     if !self.sessions.contains_key(n) {
-                        return Some(Response::err(format!("no session '{n}' (see guilab ls)")));
+                        break 'show Response::err(format!("no session '{n}' (see guilab ls)"));
                     }
                     self.viewer_tab = Some(n.clone());
                 }
-                let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
-                return self.show(display, Some(stream));
+                let Ok(clone) = stream.try_clone() else { break 'show Response::err("internal: clone stream") };
+                match self.show(display, Some(clone)) {
+                    Some(r) => r,
+                    None => return,
+                }
             }
             Command::Hide => {
                 self.hide_viewer(None);
@@ -117,19 +116,15 @@ impl Server {
                 Response::ok(list)
             }
             Command::New { name, size, scale, ttl, xwayland } => match self.new_session(&target, name, size, scale, ttl, xwayland) {
-                // Answered once Xwayland is up (see check_news).
-                Ok(name) if xwayland => {
-                    let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
-                    self.news.push(NewWait { session: name, stream, deadline: Instant::now() + XWAYLAND_TIMEOUT });
-                    return None;
-                }
+                // Answered once Xwayland is up.
+                Ok(name) if xwayland => return self.later(name, None, stream, Wait::New { deadline: Instant::now() + XWAYLAND_TIMEOUT }),
                 Ok(name) => Response::ok(self.sessions[&name].info(&name)),
                 Err(e) => Response::err(e),
             },
             cmd => {
                 let name = match self.resolve(&target) {
                     Ok(n) => n,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return self.out.send(stream, &Response::err(e)),
                 };
                 // One delivery cursor per agent (see guilab_proto::log): requests from the
                 // session's own worktree or from outside git share the default cursor, so an
@@ -141,22 +136,42 @@ impl Server {
                 };
                 // Not deliveries: the human's actions (the viewer's), reading the log, and
                 // polls (they deliver themselves).
-                let attach = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
-                let r = self.handle_session(&name, &key, cmd, target.token.as_deref(), stream);
-                return if attach { r.map(|r| self.attach(&name, Some(&key), r)) } else { r };
+                let delivers = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
+                // The human's chains aren't the agent's: no delivery key.
+                let wait_key = (!matches!(cmd, Command::Human { .. })).then(|| key.clone());
+                match self.handle_session(&name, &key, cmd, target.token.as_deref()) {
+                    Reply::Now(r) => {
+                        let r = if delivers { self.attach(&name, Some(&key), r) } else { r };
+                        self.out.send(stream, &r);
+                    }
+                    Reply::Later(w) => self.later(name, wait_key, stream, w),
+                    Reply::Then(r, w) => {
+                        self.out.send(stream, &r);
+                        self.later(name, wait_key, stream, w);
+                    }
+                }
+                return;
             }
         };
-        Some(r)
+        self.out.send(stream, &r);
     }
 
-    /// A command on session `name`. `None` = answered later.
-    fn handle_session(&mut self, name: &str, key: &str, cmd: Command, token: Option<&str>, stream: &UnixStream) -> Option<Response> {
+    /// Registers a request to answer later.
+    fn later(&mut self, session: String, key: Option<String>, stream: &UnixStream, wait: Wait) {
+        match stream.try_clone() {
+            Ok(stream) => self.add_pending(Pending { session, key, stream, wait }),
+            Err(e) => self.out.send(stream, &Response::err(format!("internal: clone stream: {e}"))),
+        }
+    }
+
+    /// A command on session `name`.
+    fn handle_session(&mut self, name: &str, key: &str, cmd: Command, token: Option<&str>) -> Reply {
         let slot = self.sessions.get_mut(name).unwrap();
         if matches!(cmd, Command::Lock { .. } | Command::Input { .. }) && slot.working.is_none() {
-            return Some(Response::err(NOT_WORKING));
+            return Reply::Now(Response::err(NOT_WORKING));
         }
         if let Err(e) = slot.lock.check(name, cmd.access(), token) {
-            return Some(Response::err(e));
+            return Reply::Now(Response::err(e));
         }
         slot.last_active = Instant::now();
         // Commands may move windows, change the output, focus...: render the next tick.
@@ -167,7 +182,6 @@ impl Server {
         if let Some(text) = cmd.log_text() {
             slot.session.log.push(EventData::Command { cmd: text }, Some(key));
         }
-        let clone = || stream.try_clone().map_err(|_| Box::new(Response::err("internal: clone stream")));
         let s = &mut slot.session;
         let r = match cmd {
             Command::End => Response::ok(self.end_session(name)),
@@ -195,27 +209,16 @@ impl Server {
             },
             Command::Input { actions } => {
                 if let Err(e) = s.check_chain(&actions) {
-                    return Some(Response::err(e));
+                    return Reply::Now(Response::err(e));
                 }
-                let stream = match clone() {
-                    Ok(s) => s,
-                    Err(e) => return Some(*e),
-                };
-                self.queue_input(name, Some(key), stream, Chain::new(actions, InputSource::Agent));
-                return None;
+                return Reply::Later(Wait::Input { chain: Chain::new(actions, InputSource::Agent), resume_at: Instant::now(), started: false });
             }
             Command::ClipGet => match s.clip_get() {
                 Ok(ClipRead::Text(t)) => Response::ok(t),
                 Ok(ClipRead::Pipe(fd)) => {
                     let pipe = std::fs::File::from(fd);
                     let _ = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK);
-                    let stream = match clone() {
-                        Ok(s) => s,
-                        Err(e) => return Some(*e),
-                    };
-                    let deadline = Instant::now() + CLIP_TIMEOUT;
-                    self.clips.push(ClipWait { session: name.to_string(), key: key.to_string(), stream, pipe, buf: Vec::new(), deadline });
-                    return None;
+                    return Reply::Later(Wait::Clip { pipe, buf: Vec::new(), deadline: Instant::now() + CLIP_TIMEOUT });
                 }
                 Err(e) => Response::err(e),
             },
@@ -232,16 +235,9 @@ impl Server {
             },
             Command::Kill { id } => match s.kill(id) {
                 Ok(killed) if killed.is_empty() => Response::ok(killed),
-                // Answered once they're gone (see check_kills), so `kill && run` doesn't race
+                // Answered once they're gone (a `Wait::Kill`), so `kill && run` doesn't race
                 // a single-instance app's old copy.
-                Ok(killed) => {
-                    let stream = match clone() {
-                        Ok(s) => s,
-                        Err(e) => return Some(*e),
-                    };
-                    self.kills.push(KillWait { session: name.to_string(), key: key.to_string(), stream, killed, deadline: Instant::now() + KILL_WAIT });
-                    return None;
-                }
+                Ok(killed) => return Reply::Later(Wait::Kill { killed, deadline: Instant::now() + KILL_WAIT }),
                 Err(e) => Response::err(format!("{e:#}")),
             },
             Command::Ps => Response::ok(s.ps()),
@@ -250,37 +246,31 @@ impl Server {
                 if (size.is_some() || scale.is_some())
                     && let Err(e) = set_output(s, size.map(|[w, h]| (w as i32, h as i32)), scale, Some(key))
                 {
-                    return Some(Response::err(format!("{e:#}")));
+                    return Reply::Now(Response::err(format!("{e:#}")));
                 }
                 Response::ok(s.output_info())
             }
             Command::Screenshot { path, settle, cursor, crop, max } => {
                 let crop = match crop.as_deref().map(guilab_image::format::parse_crop).transpose() {
                     Ok(c) => c.flatten(),
-                    Err(e) => return Some(Response::err(format!("--crop: {e}"))),
+                    Err(e) => return Reply::Now(Response::err(format!("--crop: {e}"))),
                 };
-                let stream = match clone() {
-                    Ok(s) => s,
-                    Err(e) => return Some(*e),
-                };
-                // Answered after the next frame (see check_waiters).
-                let start = Instant::now();
-                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, cursor, crop, max, start });
-                return None;
+                // Answered after the next frame at the earliest.
+                return Reply::Later(Wait::Shot { path, settle, cursor, crop, max, start: Instant::now() });
             }
             Command::Image { id, path, crop, max, marks, list, points } => {
                 let img = match self.images.get(&id) {
                     Ok(i) => i,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
                 if list {
-                    return Some(Response::ok(ImageInfo { id, listing: Some(self.images.listing(&img, points)), render: None }));
+                    return Reply::Now(Response::ok(ImageInfo { id, listing: Some(self.images.listing(&img, points)), render: None }));
                 }
                 let region = match crop.as_deref().map(guilab_image::format::parse_crop).transpose() {
                     Ok(None) => Region::ImageCrop,
                     Ok(Some(None)) => Region::Canvas,
                     Ok(Some(Some(r))) => Region::Rect(r),
-                    Err(e) => return Some(Response::err(format!("--crop: {e}"))),
+                    Err(e) => return Reply::Now(Response::err(format!("--crop: {e}"))),
                 };
                 match self.images.render_file(&img, &RenderOpts { region, max, marks }, &s.dir, path.as_deref()) {
                     Ok(r) => Response::ok(ImageInfo { id, listing: None, render: Some(r) }),
@@ -292,7 +282,7 @@ impl Server {
                 let made = self.images.make(&req, slot.group).and_then(|id| self.images.get(id.as_str()));
                 let img = match made {
                     Ok(i) => i,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
                 s.log.push(EventData::ImageMade { image: img.id.to_string() }, Some(key));
                 match self.images.render_file(&img, &RenderOpts::default(), &s.dir, None) {
@@ -302,53 +292,55 @@ impl Server {
             }
             Command::Poll { timeout_ms, follow, tiers } => {
                 if let Err(e) = tiers.check() {
-                    return Some(Response::err(e));
+                    return Reply::Now(Response::err(e));
                 }
                 let pending = s.log.has_wake(key, &tiers);
                 // Waiting for the human while marked working would leave them waiting too.
                 if !follow && !pending && timeout_ms != Some(0) && slot.working.is_some() {
-                    return Some(Response::err(
+                    return Reply::Now(Response::err(
                         "you're still marked working, so the human isn't expecting to answer. Run `guilab done \"...\"` \
                          first (tell them what you did or need), then poll",
                     ));
                 }
-                if pending {
-                    let d = s.log.deliver(key, &tiers, None, true);
+                let first = if pending {
+                    let d = slot.session.log.deliver(key, &tiers, None, true);
                     let mut r = Response::ok(PollInfo { timed_out: false });
                     read_messages(slot, key, &d);
                     r.events = Some(d);
-                    if !follow {
-                        return Some(r);
-                    }
-                    send(stream, &r);
+                    Some(r)
+                } else {
+                    None
+                };
+                if let Some(r) = &first
+                    && !follow
+                {
+                    return Reply::Now(r.clone());
                 }
                 let log = &mut slot.session.log;
                 // Motion going on now must not hide in an older event.
                 log.seal();
-                let stream = match clone() {
-                    Ok(s) => s,
-                    Err(e) => return Some(*e),
-                };
                 let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-                let watch_from = log.end();
-                self.polls.push(PollWait { session: name.to_string(), key: key.to_string(), stream, deadline, tiers, follow, watch_from });
-                return None;
+                let wait = Wait::Poll { deadline, tiers, follow, watch_from: log.end() };
+                return match first {
+                    Some(r) => Reply::Then(r, wait),
+                    None => Reply::Later(wait),
+                };
             }
             Command::Log { after, since, kinds, last } => {
                 let kinds = match guilab_proto::events::expand_kinds(&kinds) {
                     Ok(k) => k,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
-                return Some(Response::ok(s.log.query(after, since, &kinds, last)));
+                return Reply::Now(Response::ok(s.log.query(after, since, &kinds, last)));
             }
             Command::Work { status, message, images } => {
                 let status = status.trim().to_string();
                 if status.is_empty() {
-                    return Some(Response::err("say what you're doing: guilab work \"running the tests\""));
+                    return Reply::Now(Response::err("say what you're doing: guilab work \"running the tests\""));
                 }
                 let msg = match agent_message(&mut self.images, slot, message, &images) {
                     Ok(m) => m,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
                 if let Some(m) = msg {
                     slot.session.log.push(m, Some(key));
@@ -360,7 +352,7 @@ impl Server {
                 // Answering without reading what the human just said would ignore it.
                 if let Some(first) = s.log.unread().next() {
                     let at = guilab_proto::text::Fmt { tz: crate::tz_offset() }.clock(first.t);
-                    return Some(Response::err(format!(
+                    return Reply::Now(Response::err(format!(
                         "a human message arrived at {at} that you haven't read. Read it first: guilab poll (it returns at \
                          once), then finish with guilab done"
                     )));
@@ -370,11 +362,11 @@ impl Server {
                 // Everything fallible comes before any change.
                 let unlock = match slot.lock.may_release(name, token, token.is_none()) {
                     Ok(u) => u,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
                 let msg = match agent_message(&mut self.images, slot, message, &images) {
                     Ok(m) => m,
-                    Err(e) => return Some(Response::err(e)),
+                    Err(e) => return Reply::Now(Response::err(e)),
                 };
                 if let Some(m) = msg {
                     slot.session.log.push(m, Some(key));
@@ -400,17 +392,12 @@ impl Server {
                 }
                 HumanOp::Input { actions } => {
                     if slot.lock.is_locked() {
-                        return Some(Response::err("the session is locked: human input is blocked"));
+                        return Reply::Now(Response::err("the session is locked: human input is blocked"));
                     }
                     if let Err(e) = s.check_chain(&actions) {
-                        return Some(Response::err(e));
+                        return Reply::Now(Response::err(e));
                     }
-                    let stream = match clone() {
-                        Ok(s) => s,
-                        Err(e) => return Some(*e),
-                    };
-                    self.queue_input(name, None, stream, Chain::new(actions, InputSource::Human));
-                    return None;
+                    return Reply::Later(Wait::Input { chain: Chain::new(actions, InputSource::Human), resume_at: Instant::now(), started: false });
                 }
                 HumanOp::Revoke => match self.revoke_lock(name) {
                     Ok(()) => Response::ok(()),
@@ -419,56 +406,11 @@ impl Server {
             },
             Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => unreachable!(),
         };
-        Some(r)
+        Reply::Now(r)
     }
+}
 
-    /// Queues an input chain behind the session's running one, if any; else runs it now.
-    fn queue_input(&mut self, name: &str, key: Option<&str>, stream: UnixStream, chain: Chain) {
-        let now = Instant::now();
-        self.inputs.push(InputJob { session: name.to_string(), key: key.map(str::to_string), stream, chain, resume_at: now });
-        self.run_inputs(now);
-    }
-
-    /// Answers polls that got a wake event or timed out; drops those whose client left.
-    pub(crate) fn check_polls(&mut self, now: Instant) {
-        let mut i = 0;
-        while i < self.polls.len() {
-            let p = &mut self.polls[i];
-            if peer_gone(&mut p.stream) {
-                self.polls.remove(i);
-                continue;
-            }
-            let Some(slot) = self.sessions.get_mut(&p.session) else {
-                i += 1;
-                continue;
-            };
-            let log = &mut slot.session.log;
-            let (resp, done) = if let Some(w) = log.first_wake(&p.key, &p.tiers, p.watch_from) {
-                let mut r = Response::ok(PollInfo { timed_out: false });
-                let d = log.deliver(&p.key, &p.tiers, Some(w), true);
-                p.watch_from = log.end();
-                read_messages(slot, &p.key, &d);
-                r.events = Some(d);
-                (r, !p.follow)
-            } else if p.deadline.is_some_and(|d| now >= d) {
-                let mut r = Response::ok(PollInfo { timed_out: true });
-                let d = log.deliver(&p.key, &p.tiers, None, true);
-                read_messages(slot, &p.key, &d);
-                r.events = (!d.events.is_empty()).then_some(d);
-                (r, true)
-            } else {
-                i += 1;
-                continue;
-            };
-            send(&p.stream, &resp);
-            if done {
-                self.polls.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
+impl Server {
     fn new_session(
         &mut self,
         target: &Target,
@@ -526,184 +468,6 @@ impl Server {
         Ok(name)
     }
 
-    /// Answers `new -x` once the session's Xwayland is ready; ends the session if it failed.
-    pub(crate) fn check_news(&mut self, now: Instant) {
-        let mut i = 0;
-        while i < self.news.len() {
-            let n = &self.news[i];
-            let state = self.sessions.get(&n.session).map(|s| s.session.x_state().clone());
-            let failed = match state {
-                None => Some(format!("session {} ended", n.session)),
-                Some(XState::Ready(_)) => None,
-                Some(XState::Failed(e)) => Some(e),
-                Some(_) if now >= n.deadline => Some("Xwayland didn't start in time".into()),
-                Some(_) => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let n = self.news.remove(i);
-            let resp = match failed {
-                None => Response::ok(self.sessions[&n.session].info(&n.session)),
-                Some(e) => {
-                    self.end_session(&n.session);
-                    Response::err(e)
-                }
-            };
-            send(&n.stream, &resp);
-        }
-    }
-
-    /// Answers screenshot requests whose session settled or whose wait ran out.
-    pub(crate) fn check_waiters(&mut self, now: Instant) {
-        let mut i = 0;
-        while i < self.waiters.len() {
-            let w = &self.waiters[i];
-            let Some(slot) = self.sessions.get_mut(&w.session) else {
-                i += 1;
-                continue;
-            };
-            let s = &mut slot.session;
-            let waited = now.duration_since(w.start);
-            let state = s.settle_state(now);
-            let settled = match state {
-                Settle::Settled => Some(true),
-                Settle::Animating => Some(false),
-                // Nothing that could ever draw: don't wait.
-                Settle::NoWindow if s.running_apps() == 0 => Some(true),
-                Settle::NoWindow => (waited >= MAP_CAP).then_some(false),
-                Settle::Busy => (waited >= SETTLE_CAP).then_some(false),
-            };
-            let settled = if w.settle { settled } else { Some(state == Settle::Settled) };
-            let Some(settled) = settled else {
-                i += 1;
-                continue;
-            };
-            let w = self.waiters.remove(i);
-            let shot = self.images.capture(s, slot.group, w.cursor, true, w.crop).and_then(|id| {
-                let img = self.images.get(id.as_str())?;
-                let r = self.images.render_file(&img, &RenderOpts { max: w.max, ..Default::default() }, &s.dir, w.path.as_deref())?;
-                Ok((img, r))
-            });
-            let resp = match shot {
-                Ok((img, r)) => {
-                    s.log.push(EventData::Screenshot { image: img.id.to_string(), path: r.path.clone() }, Some(&w.key));
-                    let animating = state == Settle::Animating;
-                    let [cw, ch] = img.body.canvas;
-                    let cropped = cropped_windows(&s.tree(), cw as i32, ch as i32);
-                    let header = self.images.header(&img);
-                    let (path, width, height, shows, zoom) = (r.path, r.width, r.height, r.shows, r.zoom);
-                    Response::ok(ShotInfo { image: img.id.to_string(), header, path, width, height, shows, zoom, settled, animating, cropped })
-                }
-                Err(e) => Response::err(e),
-            };
-            let resp = self.attach(&w.session, Some(&w.key), resp);
-            send(&w.stream, &resp);
-        }
-    }
-}
-
-impl Server {
-    /// Runs due input chains; one chain per session at a time, in request order.
-    pub(crate) fn run_inputs(&mut self, now: Instant) {
-        let mut busy: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < self.inputs.len() {
-            let name = self.inputs[i].session.clone();
-            if busy.contains(&name) || self.inputs[i].resume_at > now {
-                busy.push(name);
-                i += 1;
-                continue;
-            }
-            let Some(slot) = self.sessions.get_mut(&name) else {
-                let j = self.inputs.remove(i);
-                send(&j.stream, &Response::err(format!("session {name} ended")));
-                continue;
-            };
-            slot.last_active = now;
-            let job = &mut self.inputs[i];
-            match slot.session.run_chain(&mut job.chain) {
-                Ok(Some(delay)) => {
-                    // From the scheduled time, so 16.7 ms glide steps don't stretch to two
-                    // 16 ms ticks each.
-                    job.resume_at = (job.resume_at + delay).max(now);
-                    busy.push(name);
-                    i += 1;
-                }
-                Ok(None) => {
-                    let j = self.inputs.remove(i);
-                    let r = Response::ok(slot.session.input_info(&j.chain));
-                    let r = self.attach(&name, j.key.as_deref(), r);
-                    send(&j.stream, &r);
-                }
-                Err(e) => {
-                    let j = self.inputs.remove(i);
-                    let r = self.attach(&name, j.key.as_deref(), Response::err(e));
-                    send(&j.stream, &r);
-                }
-            }
-        }
-    }
-
-    /// Answers `kill`s whose apps are gone (or that waited long enough).
-    pub(crate) fn check_kills(&mut self, now: Instant) {
-        let mut i = 0;
-        while i < self.kills.len() {
-            let k = &self.kills[i];
-            let running = self.sessions.get(&k.session).is_some_and(|slot| {
-                slot.session.ps().iter().any(|p| matches!(p.state, guilab_proto::ProcState::Running) && k.killed.iter().any(|q| q.id == p.id))
-            });
-            if running && now < k.deadline {
-                i += 1;
-                continue;
-            }
-            let k = self.kills.remove(i);
-            let r = self.attach(&k.session, Some(&k.key), Response::ok(&k.killed));
-            send(&k.stream, &r);
-        }
-    }
-
-    /// Reads clipboard pipes; answers at EOF or timeout.
-    pub(crate) fn check_clips(&mut self, now: Instant) {
-        use std::io::Read;
-        let mut i = 0;
-        while i < self.clips.len() {
-            let c = &mut self.clips[i];
-            let mut tmp = [0u8; 65536];
-            let done = loop {
-                match c.pipe.read(&mut tmp) {
-                    Ok(0) => break Some(Ok(())),
-                    Ok(n) => c.buf.extend_from_slice(&tmp[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break None,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(e) => break Some(Err(e.to_string())),
-                }
-            };
-            let done = done.or_else(|| (now >= c.deadline).then(|| Err("the app owning the clipboard didn't send it".to_string())));
-            match done {
-                None => i += 1,
-                Some(r) => {
-                    let c = self.clips.remove(i);
-                    let resp = match r {
-                        Ok(()) => Response::ok(String::from_utf8_lossy(&c.buf)),
-                        Err(e) => Response::err(e),
-                    };
-                    let resp = self.attach(&c.session, Some(&c.key), resp);
-                    send(&c.stream, &resp);
-                }
-            }
-        }
-    }
-}
-
-/// Whether the client of a waiting request hung up (it sends nothing after its request).
-fn peer_gone(stream: &mut UnixStream) -> bool {
-    use std::io::Read;
-    let mut b = [0u8; 64];
-    match stream.read(&mut b) {
-        Ok(n) => n == 0,
-        Err(e) => !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted),
-    }
 }
 
 /// An image attached to a human message.
@@ -747,19 +511,9 @@ pub(crate) fn human_message(images: &mut Images, slot: &mut Slot, text: String, 
     Ok(())
 }
 
-/// Toplevels that stick out of the output (screenshots crop them). One pixel of slack: at
-/// fractional scales a tiled window can round one pixel larger.
-fn cropped_windows(tree: &[guilab_proto::TreeNode], w: i32, h: i32) -> Vec<guilab_proto::WindowSize> {
-    tree.iter()
-        .filter(|n| matches!(n.kind, guilab_proto::NodeKind::Toplevel | guilab_proto::NodeKind::X11))
-        .filter(|n| n.x < -1 || n.y < -1 || n.x + n.width > w + 1 || n.y + n.height > h + 1)
-        .map(|n| guilab_proto::WindowSize { id: n.id, width: n.width, height: n.height })
-        .collect()
-}
-
 /// A poll showed the agent human messages: it's on them now (the human sees it was picked
 /// up, and the agent still ends with `done`).
-fn read_messages(slot: &mut Slot, key: &str, d: &Delivery) {
+pub(crate) fn read_messages(slot: &mut Slot, key: &str, d: &Delivery) {
     if !d.events.iter().any(|e| matches!(e.data, EventData::Message { .. })) {
         return;
     }

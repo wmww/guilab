@@ -5,7 +5,7 @@ Priority: medium. Touches `server/src/viewer.rs` `apply_viewer_actions`, which t
 ## What's wrong
 The human acts through two independent server paths with different rules:
 - Viewer: `viewer.rs` `apply_viewer_actions` (~496). Input is injected directly, dropped while `lock.is_locked()` except releases, bumps `last_active`, adds `TouchFrame` after touches. Resize is refused while locked. Revoke ignores `revoke_lock`'s "not locked" error. Message → `requests::human_message` with `MsgImage::Drawing`. Freeze captures and holds a base image.
-- Tests (`guilab debug`, `Command::Human`): `requests.rs` ~412-450. Input is queued as an `InputJob` chain with `InputSource::Human` (so `unlock`/`revoke` abort the *human's* chains too, via `abort_inputs`), refused while locked, without the release exception. Revoke errors when not locked. Message → `human_message` with `Spec`/`Draw`. No resize, no freeze.
+- Tests (`guilab debug`, `Command::Human`): `requests.rs` ~412-450. Input is queued as a `Wait::Input` chain with `InputSource::Human` (so `unlock`/`revoke` abort the *human's* chains too, via `abort_inputs`), refused while locked, without the release exception. Revoke errors when not locked. Message → `human_message` with `Spec`/`Draw`. No resize, no freeze.
 
 So integration tests exercise rules the viewer doesn't use, and a rule change has to be made twice. `human_message` itself also lives in `requests.rs` as a free function taking `&mut Images, &mut Slot`, and holds images one by one: if image 2 fails, image 1 stays held for the session's life.
 

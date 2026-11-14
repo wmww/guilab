@@ -1,5 +1,5 @@
 //! Event log and delivery: tiers, coalescing, events on the next command, poll/follow,
-//! say, timeouts. Human actions go through the hidden `guilab debug` (the viewer's stand-in).
+//! timeouts. Human actions go through the hidden `guilab debug` (the viewer's stand-in).
 
 use std::{
     io::{BufRead, BufReader},
@@ -206,6 +206,28 @@ fn poll_blocks_and_follows() {
     lab.run(&["end"]);
     let out = p.wait_with_output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("ended"));
+}
+
+/// A `poll --follow` reader that stops reading (piped into a paused process) must not
+/// stall the server: its replies wait in the server, not in a blocking write.
+#[test]
+fn stalled_follower_doesnt_block() {
+    let lab = Lab::new();
+    lab.run(&["new"]);
+    let mut follow = lab.cmd(&["poll", "--follow"]).stdout(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = follow.id().to_string();
+    assert!(std::process::Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
+    // Enough to fill the socket buffers several times over.
+    let big = "x".repeat(60_000);
+    let t = Instant::now();
+    for _ in 0..12 {
+        lab.run(&["debug", "message", &big]);
+    }
+    let took = t.elapsed();
+    follow.kill().unwrap();
+    let _ = follow.wait();
+    assert!(took < Duration::from_secs(5), "{took:?}");
 }
 
 /// The lost-message bug: a human message must survive an agent dropping a command's

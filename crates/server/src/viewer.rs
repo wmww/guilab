@@ -29,7 +29,6 @@ use crate::{
     Server,
     images::Images,
     requests::{MsgImage, human_message},
-    send,
 };
 
 /// Feed items loaded when the viewer first shows a session.
@@ -297,15 +296,15 @@ impl Server {
             return;
         }
         let ViewerState::Connecting { display, waiters, deadline, .. } = std::mem::take(&mut self.viewer) else { unreachable!() };
-        let fail = |waiters: Vec<UnixStream>, e: String| {
+        let fail = |out: &mut crate::out::Outbox, waiters: Vec<UnixStream>, e: String| {
             tracing::warn!("viewer: {e}");
             for w in waiters {
-                send(&w, &Response::err(format!("showing the viewer: {e}")));
+                out.send(&w, &Response::err(format!("showing the viewer: {e}")));
             }
         };
         let c = match res {
             Ok(c) => c,
-            Err(e) => return fail(waiters, e),
+            Err(e) => return fail(&mut self.out, waiters, e),
         };
         let force_shm = std::env::var_os("GUILAB_VIEWER_SHM").is_some_and(|v| v == "1");
         // Sessions on pixman: the viewer draws with its own software GLES (llvmpipe).
@@ -327,7 +326,7 @@ impl Server {
         };
         let mut viewer = match viewer {
             Ok(v) => v,
-            Err(e) => return fail(waiters, format!("{e:#}")),
+            Err(e) => return fail(&mut self.out, waiters, format!("{e:#}")),
         };
         viewer.set_prefs(self.viewer_prefs);
         let source = HostSource::new(c.conn, c.queue);
@@ -348,7 +347,7 @@ impl Server {
             Ok(t) => t,
             Err(e) => {
                 with_renderer(&self.gpu, soft.as_deref_mut(), |r| viewer.destroy(r));
-                return fail(waiters, e.error.to_string());
+                return fail(&mut self.out, waiters, e.error.to_string());
             }
         };
         let shown_on = display.display().to_string();
@@ -362,7 +361,7 @@ impl Server {
             ViewerState::Hidden => {}
             ViewerState::Connecting { waiters, .. } => {
                 for w in waiters {
-                    send(&w, &Response::err(why.unwrap_or("hidden before it was shown")));
+                    self.out.send(&w, &Response::err(why.unwrap_or("hidden before it was shown")));
                 }
             }
             ViewerState::Shown(mut s) => {
@@ -376,7 +375,7 @@ impl Server {
                     self.handle.remove(t);
                 }
                 for w in s.waiters.drain(..) {
-                    send(&w, &Response::err(why.unwrap_or("hidden before it was shown")));
+                    self.out.send(&w, &Response::err(why.unwrap_or("hidden before it was shown")));
                 }
                 let Shown { viewer, mut soft, .. } = *s;
                 with_renderer(&self.gpu, soft.as_deref_mut(), |r| viewer.destroy(r));
@@ -484,7 +483,7 @@ impl Server {
                 if !waiters.is_empty() {
                     let r = Response::ok(self.viewer_info());
                     for w in waiters {
-                        send(&w, &r);
+                        self.out.send(&w, &r);
                     }
                 }
                 self.apply_viewer_actions(actions);

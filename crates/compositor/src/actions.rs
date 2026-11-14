@@ -78,6 +78,10 @@ impl Chain {
         let steps = actions.into_iter().enumerate().map(|(i, a)| Step::Act(i, a)).collect();
         Chain { steps, origin: None, menu_wait: Duration::ZERO, source, pressed_on: None }
     }
+
+    pub fn source(&self) -> InputSource {
+        self.source
+    }
 }
 
 impl Session {
