@@ -300,6 +300,9 @@ pub enum HumanOp {
     /// Input as the human (blocked while the session is locked).
     Input { actions: Vec<Action> },
     Revoke,
+    /// File > Insert image in the viewer, with this file picked (absolute path). Needs the
+    /// viewer shown.
+    Insert { path: String },
 }
 
 /// What a command may do to a session, for the lock check.
@@ -459,6 +462,9 @@ pub struct ViewerInfo {
     /// dropped because the session was locked.
     #[serde(default)]
     pub dropped: u64,
+    /// The shown session's unsent drafts: each one's element count, in composer order.
+    #[serde(default)]
+    pub drafts: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

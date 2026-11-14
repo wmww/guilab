@@ -339,3 +339,26 @@ fn window_events() {
     assert!(err.contains("window") && err.contains("closed ("), "{err}\nkill took {:?}; log:\n{}", t.elapsed(), lab.run(&["log"]));
     assert!(kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap"));
 }
+
+/// The human's input chains (`debug input`, like the viewer's input) follow the human
+/// rules: an agent's lock stops a running one, and the agent's own lock changes don't
+/// abort them otherwise.
+#[test]
+fn human_chains_and_the_lock() {
+    let lab = Lab::new();
+    lab.run(&["new"]);
+    // An agent locks while the human's chain sleeps: the rest of it is blocked.
+    let chain = lab.cmd(&["debug", "input", "move", "10", "10", "sleep", "1500", "click"]).stderr(Stdio::piped()).spawn().unwrap();
+    wait_until("the human's chain to run", 10, || if lab.info().pending.inputs == 1 { Ok(()) } else { Err("not yet".into()) });
+    let t = lab.lock();
+    let out = chain.wait_with_output().unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("human input is blocked"), "{out:?}");
+    // A lock that ends before the chain's next step doesn't stop it.
+    lab.run(&["-t", &t, "unlock"]);
+    let chain = lab.cmd(&["debug", "input", "sleep", "300", "click"]).stderr(Stdio::piped()).spawn().unwrap();
+    wait_until("the human's chain to run", 10, || if lab.info().pending.inputs == 1 { Ok(()) } else { Err("not yet".into()) });
+    let t = lab.lock();
+    lab.run(&["-t", &t, "unlock"]);
+    let out = chain.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+}

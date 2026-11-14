@@ -318,6 +318,8 @@ enum DebugOp {
     },
     /// Revoke the agent's lock.
     Revoke,
+    /// Insert a picture file in the viewer (as File > Insert image does).
+    Insert { path: PathBuf },
 }
 
 const IMAGE_HELP: &str = "\
@@ -476,6 +478,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
                 }
                 DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
                 DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
+                DebugOp::Insert { path } => guilab_proto::HumanOp::Insert { path: abs(path).display().to_string() },
             },
         }.into(),
         Cmd::Clip { op: ClipOp::Get } => SessionCmd::ClipGet.into(),

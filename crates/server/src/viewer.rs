@@ -236,6 +236,7 @@ impl Server {
                 frames: s.viewer.frames,
                 window: s.viewer.host.size.map_or([0, 0], |(w, h)| [w, h]),
                 dropped: s.dropped + self.viewer_ui.blocked_tries,
+                drafts: self.viewer_ui.drafts(),
             }),
             _ => None,
         }
@@ -556,7 +557,7 @@ impl Server {
                     };
                     save_dialog(session, png, self.viewer_ui.notices());
                 }
-                Action::Insert { session } => open_dialog(session, self.viewer_picks.clone()),
+                Action::Insert { session } => open_dialog(session, self.viewer_picks.clone()), // -> human_insert
             }
         }
     }

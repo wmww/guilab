@@ -57,6 +57,14 @@ impl Server {
         crate::requests::set_output(&mut slot.session, size, scale, None).map_err(|e| format!("{e:#}"))
     }
 
+    /// A picture file the human picked to insert in the viewer's editor (File > Insert
+    /// image). The viewer's tick loads it.
+    pub(crate) fn human_insert(&mut self, session: &str, path: std::path::PathBuf) {
+        if let Ok(mut p) = self.viewer_picks.lock() {
+            p.push((session.to_string(), path));
+        }
+    }
+
     /// The human's Stop: drops the agent's lock. Err if it isn't locked.
     pub(crate) fn human_revoke(&mut self, session: &str) -> Result<(), String> {
         self.revoke_lock(session)

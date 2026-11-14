@@ -408,6 +408,13 @@ impl Server {
                     }
                     return Reply::Later(Wait::Input { chain: Chain::new(actions, InputSource::Human), resume_at: Instant::now(), started: false });
                 }
+                HumanOp::Insert { path } => match self.viewer_info() {
+                    Some(_) => {
+                        self.human_insert(name, path.into());
+                        Response::ok(())
+                    }
+                    None => Response::err("the viewer isn't shown"),
+                },
                 HumanOp::Revoke => match self.human_revoke(name) {
                     Ok(()) => Response::ok(()),
                     Err(e) => Response::err(e),

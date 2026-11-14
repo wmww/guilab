@@ -390,9 +390,11 @@ impl Workspace {
     }
 
     /// Opens the draft an undo step changes, so a change never happens out of sight.
+    /// (Not for a step that makes or unmakes the draft: that shows in the composer.)
     fn reveal(&mut self, ops: &[Op], session_zoom: Zoom) {
         let Some(key) = ops.iter().find_map(|o| if let Op::Edit(k, _) = o { Some(*k) } else { None }) else { return };
-        if matches!(self.open, Open::Draft(k) if k == key) || !self.pending.iter().any(|d| d.key == key) {
+        let makes = ops.iter().any(|o| matches!(o, Op::Create { key: k, .. } | Op::Copy { key: k, .. } if *k == key));
+        if makes || matches!(self.open, Open::Draft(k) if k == key) || !self.pending.iter().any(|d| d.key == key) {
             return;
         }
         self.close(session_zoom);

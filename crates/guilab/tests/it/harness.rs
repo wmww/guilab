@@ -303,3 +303,11 @@ pub fn rect(n: &Value) -> (i64, i64, i64, i64) {
     let g = |k: &str| n[k].as_i64().unwrap();
     (g("x"), g("y"), g("width"), g("height"))
 }
+
+/// A flat gray RGB PNG (an outside picture, not a guilab rendering).
+pub fn write_png(path: &str, w: u32, h: u32) {
+    let f = std::fs::File::create(path).unwrap();
+    let mut e = png::Encoder::new(f, w, h);
+    e.set_color(png::ColorType::Rgb);
+    e.write_header().unwrap().write_image_data(&vec![200u8; (w * h * 3) as usize]).unwrap();
+}

@@ -76,9 +76,3 @@ fn screenshot_render_and_make() {
     assert!(img["listing"].as_str().unwrap().contains("1 raster r") && img["listing"].as_str().unwrap().contains("(from pic.png)"), "{img}");
 }
 
-fn write_png(path: &str, w: u32, h: u32) {
-    let f = std::fs::File::create(path).unwrap();
-    let mut e = png::Encoder::new(f, w, h);
-    e.set_color(png::ColorType::Rgb);
-    e.write_header().unwrap().write_image_data(&vec![200u8; (w * h * 3) as usize]).unwrap();
-}

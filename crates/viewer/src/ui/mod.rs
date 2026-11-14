@@ -333,6 +333,11 @@ impl ViewerUi {
         self.touch_area = None;
     }
 
+    /// The current session's drafts: each one's element count (for tests).
+    pub fn drafts(&self) -> Vec<usize> {
+        self.current.as_deref().and_then(|c| self.sessions.get(c)).map_or(Vec::new(), |p| p.ws.pending.iter().map(|d| d.doc.body().elements.len()).collect())
+    }
+
     /// The selected session (last frame).
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
@@ -598,6 +603,11 @@ impl ViewerUi {
             }
         });
         self.host_keys(ui.ctx(), &mut p, store);
+        // "Use the app" closes the editor (also when a drawing's screenshot arrived after it
+        // was picked).
+        if p.ws.editor.tool == Tool::Interact && p.ws.image_open() {
+            p.ws.close(p.zoom);
+        }
         for r in p.ws.requests.drain(..) {
             match r {
                 Request::Capture { ticket } => out.push(Action::Capture { session: s.name.to_string(), ticket }),

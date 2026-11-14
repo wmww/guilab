@@ -205,10 +205,13 @@ fn show_refuses_own_session() {
 }
 
 /// Drawing and chat, end to end: the agent's message reaches the feed; the human draws a box
-/// and a text note, types a message and sends it; `poll` lists the drawing (the frozen
-/// screenshot plus both marks) and the image renders with the box in it.
-/// Positions are the viewer's layout in a 1200x800 window (toolbar at the left, message
-/// box at the bottom, the 800x600 session fitted in between).
+/// and a text note on the live app (a draft, kept while the viewer is hidden), types a
+/// message and sends it; `poll` lists the drawing (the screenshot plus both marks) and the
+/// image renders with the box in it. Then the agent sends an image; the human opens it from
+/// the feed (a message sent meanwhile names it as open), draws on it (a copy) and sends that.
+/// Positions are the viewer's layout in a 1200x800 window: tools at x=19 (box y=140, arrow
+/// y=236, text y=268), the message box at y=768, the newest feed image at 100,645 (above
+/// its one-line text and the "done" line), the session fitted in between.
 #[test]
 fn draw_and_send() {
     let Some((h, sock, t)) = host() else { return };
@@ -223,12 +226,17 @@ fn draw_and_send() {
     let step = |actions: &[&str]| {
         h.input(&t, actions);
     };
-    step(&["move", "19", "133", "click"]); // box tool
+    step(&["move", "19", "140", "click"]); // box tool
     step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
-    step(&["move", "19", "262", "click"]); // text tool
+    step(&["move", "19", "268", "click"]); // text tool
     step(&["move", "520", "330", "click"]);
     step(&["type", "label", "key", "Return"]);
-    step(&["move", "600", "777", "click"]); // message box
+    // Hiding the viewer keeps the draft.
+    v.wait_drafts(&[3]);
+    v.run(&["hide"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    step(&["move", "600", "768", "click"]); // message box
     step(&["type", "fix it", "key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     assert!(out.contains("human message: \"fix it\""), "{out}{err}");
@@ -243,6 +251,37 @@ fn draw_and_send() {
     assert_eq!((w, hh), (800, 600));
     let red = px.chunks(ch).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count();
     assert!(red > 300, "the box isn't in the image ({red} red pixels)");
+
+    // The agent sends an image (white, so the test sees it arrive in the feed).
+    let made = v.json(&["image", "make", "--canvas", "400x300", "--color", "white", "red box 50,50 100x80"])["id"].as_str().unwrap().to_string();
+    v.run(&["done", "like this?", "--image", &made]);
+    let host_shot = h.path("feed.png");
+    wait_until("the agent's image in the feed", 10, || {
+        h.run(&["screenshot", "--no-settle", "-o", &host_shot]);
+        let (w, _, px, ch) = read_png(&host_shot);
+        let p = &px[(645 * w as usize + 100) * ch..][..3];
+        if p.iter().all(|c| *c > 230) { Ok(()) } else { Err(format!("{p:?}")) }
+    });
+    // Open it; a message sent now names it (not attached).
+    step(&["move", "100", "645", "click"]);
+    step(&["move", "600", "768", "click"]);
+    step(&["type", "this one?", "key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    assert!(out.contains(&format!("(they had image {made} open in their editor, not attached")), "{out}{err}");
+    v.run(&["done", "yes"]);
+    // Drawing on it makes a copy, which goes with the next message. The 400x300 image is
+    // shown 1:1 at 419,142.
+    step(&["move", "19", "236", "click"]); // arrow tool
+    step(&["move", "500", "200", "down", "move", "600", "300", "100", "up"]);
+    step(&["move", "600", "768", "click"]);
+    step(&["type", "and here", "key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    assert!(out.contains(&format!(", parent {made}")), "{out}{err}");
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    assert!(lines.iter().any(|l| l.starts_with("1 red box 50,50 100x80")), "{out}");
+    assert!(lines.iter().any(|l| l.starts_with("2 red arrow 81,58 to 181,158")), "{out}");
+    assert!(v.run(&["image", &made, "--list"]).lines().count() == 2, "the agent's image is unchanged");
+
     assert!(v.info().viewer.is_some(), "the viewer survived");
     // `ls` says which tab the viewer shows; `-S NAME show` switches it.
     assert!(v.run(&["ls"]).contains("app 800x600 apps=0 windows=0 expires=30m (shown in the viewer)"));
@@ -255,6 +294,30 @@ fn draw_and_send() {
     });
 }
 
+/// File > Insert image (`debug insert` picks the file): on the live app it makes a draft on
+/// a screenshot with the picture in it; a guilab rendering is refused.
+#[test]
+fn insert_image() {
+    let Some((h, sock, t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let pic = v.path("pic.png");
+    write_png(&pic, 40, 20);
+    // The rendering goes first, so once the picture is in, the rendering was handled.
+    let rendering = v.json(&["screenshot", "--no-settle"])["path"].as_str().unwrap().to_string();
+    v.run(&["debug", "insert", &rendering]);
+    v.run(&["debug", "insert", &pic]);
+    v.wait_drafts(&[2]);
+    h.input(&t, &["move", "600", "768", "click", "type", "with a picture", "key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    assert!(lines.iter().any(|l| l.starts_with("1 raster r") && l.contains("(screenshot")), "{out}{err}");
+    assert!(lines.iter().any(|l| l.starts_with("2 raster r") && l.contains("380,290 40x20 (from pic.png)")), "{out}");
+    assert!(!lines.iter().any(|l| l.starts_with("3 ")), "the rendering was refused: {out}");
+}
+
 /// A key the human holds repeats in the viewer's text boxes (the host session turns client
 /// key repeat on for human keys; the viewer repeats keys for egui itself).
 #[test]
@@ -265,7 +328,7 @@ fn held_key_repeats() {
     v.run(&["new", "app", "-s", "800x600"]);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
-    h.run(&["debug", "input", "move", "600", "777", "sleep", "100", "click"]); // message box
+    h.run(&["debug", "input", "move", "600", "768", "sleep", "100", "click"]); // message box
     h.run(&["debug", "input", "keydown", "x", "sleep", "1200", "keyup", "x", "key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     let n = out.lines().find_map(|l| l.split("human message: \"").nth(1)).map(|m| m.chars().take_while(|c| *c == 'x').count());
@@ -329,7 +392,7 @@ fn click_then_type() {
     v.run(&["new", "app", "-s", "800x600"]);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
-    h.run(&["debug", "input", "move", "600", "777", "click", "type", "hello", "key", "Return"]);
+    h.run(&["debug", "input", "move", "600", "768", "click", "type", "hello", "key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     assert!(out.contains("human message: \"hello\""), "{out}{err}");
 }
@@ -343,6 +406,15 @@ impl Lab {
             let (w, h) = (o["width"].as_u64().unwrap(), o["height"].as_u64().unwrap());
             if pred(w, h) { Ok((w, h)) } else { Err(format!("{w}x{h}")) }
         })
+    }
+
+    /// Waits until the viewer's drafts have these element counts.
+    #[track_caller]
+    fn wait_drafts(&self, want: &[usize]) {
+        wait_until(&format!("drafts {want:?}"), 10, || {
+            let d = self.info().viewer.map(|v| v.drafts);
+            if d.as_deref() == Some(want) { Ok(()) } else { Err(format!("{d:?}")) }
+        });
     }
 
     /// Waits until the viewer's host window has this size.
