@@ -1,6 +1,6 @@
 # Screenshot editor ↔ chat integration
 
-Queued feature spec from the user. Do it together with or after `image-pull.md` (the image store) and `annotation-marks.md`, since all three share one image model.
+Queued feature spec from the user. Do it together with or after `image-system.md`, which defines the image model this relies on.
 
 ## Mental model
 A screenshot is one physical object. While you edit it, it's **already attached** to your next message. You can delete it, but there's no "queue or discard" step. Past images (sent ones, the agent's) are never edited. Editing one implicitly makes a pending copy, and the copy is what you edit.
@@ -9,7 +9,7 @@ A screenshot is one physical object. While you edit it, it's **already attached*
 - An image is: an unbaked base (pixels exactly as captured), a crop rect (optional), and a list of marks. Renderings (PNG with marks baked in, cropped, shrunk) are outputs only.
 - **The editor only ever opens image objects, never rendered files.** Opening any image shows its base with its marks as editable items: text can be edited, items moved, and so on. Invariant: there must be no path inside guilab by which a baked-in annotation becomes part of an editable base. Only out-of-band tools (a system screenshot, an agent running GIMP) could do that.
 - Crops carry through. If the agent pulled a cropped version, opening it in the editor shows the same crop of the unbaked base, with its marks.
-- Images the agent attaches (`done`/`work -m --image`, see `agent-status.md`) should be image ids, or paths of guilab renderings. guilab records every rendering it makes (by path and content hash) so it can map them back to their source object. Unknown external files open as a plain base with no marks.
+- Images the agent attaches are always image ids (see `image-system.md`), so there is no path from a rendering back into the editor.
 
 ## Composer (bottom chat box)
 - Pending images appear as thumbnails **inside the text box, above the text**, the same size and look as in the chat log. This replaces the current "drawing attached" text that shifts the box.
