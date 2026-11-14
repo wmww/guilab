@@ -169,6 +169,29 @@ impl Viewer {
         self.ui.release_all()
     }
 
+    /// With client-side decorations: a press on the window's border starts a resize (and
+    /// goes nowhere else).
+    fn border_presses(&mut self, inputs: Vec<HostInput>) -> Vec<HostInput> {
+        if !self.host.csd || self.host.maximized {
+            return inputs;
+        }
+        let (w, h) = self.host.size.unwrap_or((1, 1));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
+        inputs
+            .into_iter()
+            .filter(|i| match i {
+                HostInput::Egui(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }) => match ui::window_edge(screen, *pos) {
+                    Some((x, y)) => {
+                        self.host.window_op(host::WindowOp::Resize(x, y));
+                        false
+                    }
+                    None => true,
+                },
+                _ => true,
+            })
+            .collect()
+    }
+
     /// Touches that start on the app's image go to the app (the UI forwards them); the
     /// first other one drives egui's pointer (buttons, menus), the rest are dropped.
     fn route_touches(&mut self, inputs: Vec<HostInput>) -> Vec<HostInput> {
@@ -210,6 +233,7 @@ impl Viewer {
     pub fn draw(&mut self, renderer: &mut GlesRenderer, sessions: &[SessionFrame], now: Instant) -> anyhow::Result<Vec<Action>> {
         let inputs = self.host.take_input();
         let inputs = self.route_touches(inputs);
+        let inputs = self.border_presses(inputs);
         let keyboard_left = std::mem::take(&mut self.host.keyboard_left);
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
@@ -267,6 +291,8 @@ impl Viewer {
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
         let mut actions = Vec::new();
         self.ui.gestures = self.host.has_gestures();
+        self.ui.csd = self.host.csd;
+        self.ui.maximized = self.host.maximized;
         let ui_state = &mut self.ui;
         let out = self.gfx.ctx.run_ui(raw, |ui| {
             // Input is consumed in the first pass only (egui may run several).
@@ -274,6 +300,9 @@ impl Viewer {
         });
         if self.ui.current().map(str::to_string) != cur || self.ui.nearest() != nearest {
             self.host.dirty = true; // the mirror is stale (new tab, or its filter changed)
+        }
+        for op in self.ui.take_window_ops() {
+            self.host.window_op(op);
         }
         let cursor = self.ui.host_cursor(out.platform_output.cursor_icon);
         self.host.set_cursor(cursor);

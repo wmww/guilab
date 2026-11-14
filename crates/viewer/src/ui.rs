@@ -22,7 +22,7 @@ use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, p
 use guilab_markup::{Annotated, Chat, FeedItem, Sketch, Tool};
 
 use crate::{
-    host::{CursorImage, Gesture, HostCursor, HostInput},
+    host::{CursorImage, Gesture, HostCursor, HostInput, WindowOp},
     sizing::{self, Resizing},
 };
 
@@ -234,6 +234,10 @@ pub struct ViewerUi {
     held_touches: Vec<i32>,
     /// Where touches go to the app as of the last frame: the image, with "Use the app".
     touch_area: Option<Rect>,
+    /// Client-side decorations: draw a title bar (set by the viewer from the host).
+    pub csd: bool,
+    pub maximized: bool,
+    window_ops: Vec<WindowOp>,
 }
 
 /// Where the chat panel goes (View menu).
@@ -504,6 +508,73 @@ impl ViewerUi {
         out
     }
 
+    /// Client-side decorations in the menu bar's free part: a drag area (move; double-click
+    /// maximizes) with the title, and minimize / maximize / close buttons at the right.
+    fn title_bar(&mut self, ui: &mut egui::Ui, free: Rect) {
+        let n = 3.0;
+        let buttons = Rect::from_min_max(pos2(free.max.x - n * WINDOW_BUTTON_W, free.min.y), free.max);
+        let drag = Rect::from_min_max(free.min, pos2(buttons.min.x, free.max.y));
+        let resp = ui.interact(drag, egui::Id::new("title-drag"), Sense::click_and_drag());
+        if resp.double_clicked() {
+            self.window_ops.push(WindowOp::ToggleMaximize);
+        } else if resp.drag_started() {
+            self.window_ops.push(WindowOp::Move);
+        }
+        let v = ui.visuals().clone();
+        let p = ui.painter();
+        p.text(free.center(), egui::Align2::CENTER_CENTER, "guilab", egui::FontId::proportional(14.0), v.weak_text_color());
+        let ops = [WindowOp::Minimize, WindowOp::ToggleMaximize, WindowOp::Close];
+        for (i, op) in ops.into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(buttons.min.x + i as f32 * WINDOW_BUTTON_W, free.min.y), vec2(WINDOW_BUTTON_W, free.height()));
+            let resp = ui.interact(r, egui::Id::new(("window-button", i)), Sense::click());
+            let close = op == WindowOp::Close;
+            let fill = match (resp.hovered(), resp.is_pointer_button_down_on(), close) {
+                (true, _, true) => CLOSE_HOVER,
+                (true, true, false) => v.widgets.active.weak_bg_fill,
+                (true, false, false) => v.widgets.hovered.weak_bg_fill,
+                _ => Color32::TRANSPARENT,
+            };
+            p.rect_filled(r, 0.0, fill);
+            let fg = if close && resp.hovered() { Color32::WHITE } else { v.text_color() };
+            let stroke = egui::Stroke::new(1.0, fg);
+            let c = r.center();
+            let h = 5.0;
+            match op {
+                WindowOp::Minimize => {
+                    p.line_segment([c + vec2(-h, h * 0.6), c + vec2(h, h * 0.6)], stroke);
+                }
+                WindowOp::ToggleMaximize if self.maximized => {
+                    // Restore: two overlapping squares.
+                    p.rect_stroke(Rect::from_center_size(c + vec2(-1.5, 1.5), vec2(2.0 * h - 2.0, 2.0 * h - 2.0)), 0.0, stroke, egui::StrokeKind::Middle);
+                    p.line_segment([c + vec2(-h + 2.5, -h), c + vec2(h, -h)], stroke);
+                    p.line_segment([c + vec2(h, -h), c + vec2(h, h - 2.5)], stroke);
+                }
+                WindowOp::ToggleMaximize => {
+                    p.rect_stroke(Rect::from_center_size(c, vec2(2.0 * h, 2.0 * h)), 0.0, stroke, egui::StrokeKind::Middle);
+                }
+                _ => {
+                    p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], stroke);
+                    p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], stroke);
+                }
+            }
+            if resp.clicked() {
+                self.window_ops.push(op);
+            }
+        }
+        // Resize borders around the window (not when maximized).
+        if !self.maximized
+            && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+            && let Some((x, y)) = window_edge(ui.ctx().content_rect(), pos)
+        {
+            ui.ctx().set_cursor_icon(crate::sizing::Edge { x, y }.cursor());
+        }
+    }
+
+    /// Window operations the UI asked for (client-side decorations); the viewer applies them.
+    pub fn take_window_ops(&mut self) -> Vec<WindowOp> {
+        std::mem::take(&mut self.window_ops)
+    }
+
     /// "Lock size to window": asks for the output size whose logical size fills the view,
     /// throttled. Not while an agent holds the lock (that freezes the size).
     fn follow_window(&self, s: &SessionView, sz: &mut Sizing, view: Rect, now: f64, out: &mut Vec<Action>, ctx: &egui::Context) {
@@ -532,7 +603,7 @@ impl ViewerUi {
         let last_view = self.last_view;
         let menu_open = guilab_markup::menu::MenuBar::is_open(ui.ctx(), "menubar");
         let p = sv.map(|s| self.per(s.name, s.key));
-        egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill)).show(ui, |ui| {
+        let free = egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill)).show(ui, |ui| {
             guilab_markup::menu::MenuBar::new("menubar").show(ui, |bar| {
                 let Some(p) = p else {
                     for m in ["File", "Edit", "View"] {
@@ -593,9 +664,12 @@ impl ViewerUi {
                         }
                     }
                 });
-            });
+            })
         });
         self.chat_place = chat_place;
+        if self.csd {
+            self.title_bar(ui, free.inner);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -997,6 +1071,20 @@ impl ViewerUi {
     }
 }
 
+
+/// Width of a title bar window button (client-side decorations).
+const WINDOW_BUTTON_W: f32 = 40.0;
+/// The close button's hover fill (a desktop-style deep red, readable under white).
+const CLOSE_HOVER: Color32 = Color32::from_rgb(196, 43, 28);
+/// Width of the resize border around the window (client-side decorations).
+const WINDOW_BORDER: f32 = 5.0;
+
+/// The window edge `p` is on, if within the resize border.
+pub fn window_edge(screen: Rect, p: Pos2) -> Option<(i8, i8)> {
+    let side = |v: f32, lo: f32, hi: f32| if v < lo + WINDOW_BORDER { -1 } else if v > hi - WINDOW_BORDER { 1 } else { 0 };
+    let e = (side(p.x, screen.min.x, screen.max.x), side(p.y, screen.min.y, screen.max.y));
+    (e != (0, 0)).then_some(e)
+}
 
 /// Scale presets in the View menu.
 const SCALES: [f64; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];

@@ -88,6 +88,17 @@ pub enum HostInput {
     Touch(Touch),
 }
 
+/// Window management the UI asks for (with client-side decorations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowOp {
+    Move,
+    /// Edges: -1 = left/top, 1 = right/bottom, 0 = neither.
+    Resize(i8, i8),
+    ToggleMaximize,
+    Minimize,
+    Close,
+}
+
 /// A touch point on the host (surface points).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Touch {
@@ -218,6 +229,14 @@ pub struct HostState {
     touches: Vec<(i32, egui::Pos2)>,
     /// Serial of the last pointer enter (`set_cursor` needs it).
     pointer_serial: u32,
+    /// Serial of the last button press (interactive move/resize need it) and its seat.
+    press_serial: u32,
+    seat: Option<WlSeat>,
+    /// The host doesn't decorate the window (no xdg-decoration, or it chose client side;
+    /// `GUILAB_VIEWER_CSD=1` forces it): the UI draws a title bar and resize borders.
+    pub csd: bool,
+    force_csd: bool,
+    pub maximized: bool,
     /// What the pointer should show (re-applied on enter).
     cursor: Option<HostCursor>,
     present: Option<Present>,
@@ -326,6 +345,11 @@ impl HostState {
             touch: None,
             touches: Vec::new(),
             pointer_serial: 0,
+            press_serial: 0,
+            seat: None,
+            csd: false,
+            force_csd: std::env::var_os("GUILAB_VIEWER_CSD").is_some_and(|v| v == "1"),
+            maximized: false,
             cursor: None,
             present: None,
             feedback: None,
@@ -456,6 +480,39 @@ impl HostState {
         c.surface.commit();
         c.buffer = Some(buf);
         Ok((c.surface.clone(), (img.hotspot.0 as f64 / k).round() as i32, (img.hotspot.1 as f64 / k).round() as i32))
+    }
+
+    /// Window title bar and border actions (client-side decorations).
+    pub fn window_op(&mut self, op: WindowOp) {
+        use wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as E;
+        let seat = self.seat.clone();
+        match op {
+            WindowOp::Move => {
+                if let Some(seat) = &seat {
+                    self.window.move_(seat, self.press_serial);
+                }
+            }
+            WindowOp::Resize(x, y) => {
+                let edge = match (x, y) {
+                    (-1, -1) => E::TopLeft,
+                    (0, -1) => E::Top,
+                    (1, -1) => E::TopRight,
+                    (-1, 0) => E::Left,
+                    (1, 0) => E::Right,
+                    (-1, 1) => E::BottomLeft,
+                    (0, 1) => E::Bottom,
+                    (1, 1) => E::BottomRight,
+                    _ => return,
+                };
+                if let Some(seat) = &seat {
+                    self.window.resize(seat, self.press_serial, edge);
+                }
+            }
+            WindowOp::ToggleMaximize if self.maximized => self.window.unset_maximized(),
+            WindowOp::ToggleMaximize => self.window.set_maximized(),
+            WindowOp::Minimize => self.window.set_minimized(),
+            WindowOp::Close => self.closed = true,
+        }
     }
 
     /// Picks dmabuf or shm once the host's dmabuf feedback is in (or can't come) and, for
@@ -777,6 +834,8 @@ impl WindowHandler for HostState {
         let (w, h) = self.size.unwrap_or((1280, 800));
         let size = (cfg.new_size.0.map_or(w, |v| v.get()), cfg.new_size.1.map_or(h, |v| v.get()));
         self.size = Some(size);
+        self.csd = self.force_csd || cfg.decoration_mode == sctk::shell::xdg::window::DecorationMode::Client;
+        self.maximized = cfg.is_maximized();
         self.dirty = true;
         // A configure wants a new buffer even if we're waiting for a frame callback.
         self.frame_pending = false;
@@ -789,6 +848,7 @@ impl SeatHandler for HostState {
     }
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: WlSeat, cap: Capability) {
+        self.seat.get_or_insert_with(|| seat.clone());
         if cap == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
         }
@@ -929,6 +989,9 @@ impl PointerHandler for HostState {
                     self.events.push(HostInput::Egui(egui::Event::PointerMoved(pos)));
                 }
                 PointerEventKind::Press { button, .. } | PointerEventKind::Release { button, .. } => {
+                    if let PointerEventKind::Press { serial, .. } = ev.kind {
+                        self.press_serial = serial;
+                    }
                     let pressed = matches!(ev.kind, PointerEventKind::Press { .. });
                     if let Some(button) = egui_button(button) {
                         self.events.push(HostInput::Egui(egui::Event::PointerButton { pos, button, pressed, modifiers: self.modifiers }));

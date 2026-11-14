@@ -33,6 +33,8 @@ pub struct Bar<'a> {
     state: State,
     /// Screen areas that count as "inside" (titles and the open popup).
     inside: Vec<Rect>,
+    /// Right end of the last title.
+    end: f32,
 }
 
 impl MenuBar {
@@ -45,15 +47,16 @@ impl MenuBar {
         ctx.data(|d| d.get_temp::<State>(id.into())).is_some_and(|s| s.open.is_some())
     }
 
-    /// Lays out a full-width bar in `ui` (e.g. a top panel with no margins).
-    pub fn show(self, ui: &mut Ui, add: impl FnOnce(&mut Bar)) {
+    /// Lays out a full-width bar in `ui` (e.g. a top panel with no margins). Returns the
+    /// bar's free part right of the titles (e.g. for a window title or controls).
+    pub fn show(self, ui: &mut Ui, add: impl FnOnce(&mut Bar)) -> Rect {
         let state = ui.data(|d| d.get_temp::<State>(self.id)).unwrap_or_default();
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.spacing_mut().item_spacing = Vec2::ZERO;
-        let mut bar = Bar { ui: &mut child, id: self.id, state, inside: Vec::new() };
+        let mut bar = Bar { ui: &mut child, id: self.id, state, inside: Vec::new(), end: rect.min.x };
         add(&mut bar);
-        let Bar { mut state, inside, .. } = bar;
+        let Bar { mut state, inside, end, .. } = bar;
         if state.open.is_some() {
             let (pressed, pos, esc) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
             if esc || (pressed && pos.is_some_and(|p| !inside.iter().any(|r| r.contains(p)))) {
@@ -61,6 +64,7 @@ impl MenuBar {
             }
         }
         ui.data_mut(|d| d.insert_temp(self.id, state));
+        Rect::from_min_max(pos2(end, rect.min.y), rect.max)
     }
 }
 
@@ -77,6 +81,7 @@ impl Bar<'_> {
         let size = vec2(galley.size().x + 2.0 * TITLE_PAD, BAR_H);
         let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
         self.inside.push(rect);
+        self.end = rect.max.x;
         let is_open = self.state.open.as_deref() == Some(title);
         if enabled {
             if resp.clicked() {
