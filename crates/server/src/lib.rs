@@ -35,6 +35,8 @@ pub struct Options {
     pub idle_exit: Option<Duration>,
     /// Open the viewer on this Wayland display (socket path) at startup.
     pub show: Option<PathBuf>,
+    /// The binary's build id (`ServerInfo::build`).
+    pub build: String,
 }
 
 /// Default idle TTL of a session, in seconds.
@@ -49,7 +51,17 @@ pub(crate) struct Slot {
     pub lock: lock::LockState,
     /// `last_active` when the expiry warning was logged (once per idle stretch).
     pub warned: Option<Instant>,
+    /// The agent's status while it works (`guilab work`); None while it waits for the human.
+    pub working: Option<Working>,
+    /// The agent's last command (the viewer shows how long it's been quiet).
+    pub last_agent: Instant,
     token: RegistrationToken,
+}
+
+pub(crate) struct Working {
+    pub status: String,
+    /// When this stretch of work began (the first `work` after `done`).
+    pub since: Instant,
 }
 
 /// An input chain paused at a sleep (or queued behind another chain of its session).
@@ -81,6 +93,15 @@ pub(crate) struct ShotWait {
     pub settle: bool,
     pub cursor: bool,
     pub start: Instant,
+}
+
+/// A `kill` waiting for its apps to exit.
+pub(crate) struct KillWait {
+    pub session: String,
+    pub key: String,
+    pub stream: UnixStream,
+    pub killed: Vec<guilab_proto::ProcInfo>,
+    pub deadline: Instant,
 }
 
 /// A `new -x` waiting for Xwayland to start.
@@ -119,6 +140,7 @@ pub struct Server {
     pub(crate) clips: Vec<ClipWait>,
     pub(crate) news: Vec<NewWait>,
     pub(crate) polls: Vec<PollWait>,
+    pub(crate) kills: Vec<KillWait>,
     graveyard: Vec<Grave>,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) info: ServerInfo,
@@ -127,6 +149,8 @@ pub struct Server {
     idle_since: Instant,
     pub(crate) viewer: viewer::ViewerState,
     pub(crate) viewer_gen: u64,
+    /// A tab for the viewer to switch to (`-S NAME show`).
+    pub(crate) viewer_tab: Option<String>,
     pub(crate) viewer_tx: calloop::channel::Sender<viewer::ConnectResult>,
     last_slow_tick: Instant,
 }
@@ -158,7 +182,15 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let info = ServerInfo { pid: std::process::id(), exe, exe_mtime, renderer: gpu.name.clone(), viewer: None };
+    let info = ServerInfo {
+        proto: guilab_proto::PROTO,
+        build: opts.build.clone(),
+        pid: std::process::id(),
+        exe,
+        exe_mtime,
+        renderer: gpu.name.clone(),
+        viewer: None,
+    };
 
     let mut event_loop: EventLoop<'static, Server> = EventLoop::try_new()?;
     let handle = event_loop.handle();
@@ -202,6 +234,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         clips: Vec::new(),
         news: Vec::new(),
         polls: Vec::new(),
+        kills: Vec::new(),
         graveyard: Vec::new(),
         sessions_dir,
         info,
@@ -211,6 +244,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         last_slow_tick: now,
         viewer: Default::default(),
         viewer_gen: 0,
+        viewer_tab: None,
         viewer_tx,
     };
     if let Some(display) = opts.show
@@ -280,7 +314,24 @@ impl Server {
     }
 
     fn handle_line(&mut self, line: &[u8], stream: &UnixStream) -> Option<Response> {
-        match serde_json::from_slice::<guilab_proto::Request>(line) {
+        let v: serde_json::Value = match serde_json::from_slice(line) {
+            Ok(v) => v,
+            Err(e) => return Some(Response::err(format!("bad request: {e}"))),
+        };
+        // ping and shutdown work across versions (the CLI checks the version with ping,
+        // and `server --stop` must reach an old server).
+        let proto = v.get("proto").and_then(|p| p.as_u64()).unwrap_or(0);
+        let basic = matches!(v.get("cmd").and_then(|c| c.as_str()), Some("ping" | "shutdown"));
+        if proto != guilab_proto::PROTO as u64 && !basic {
+            return Some(Response::err(format!(
+                "this guilab CLI speaks protocol {proto}, the server (pid {}, {}) speaks {}. Restart the server with \
+                 `guilab server --stop` (ends its sessions), or use the guilab binary it runs",
+                self.info.pid,
+                self.info.exe.display(),
+                guilab_proto::PROTO
+            )));
+        }
+        match serde_json::from_value::<guilab_proto::Request>(v) {
             Ok(req) => self.handle(req, stream),
             Err(e) => Some(Response::err(format!("bad request: {e}"))),
         }
@@ -297,6 +348,7 @@ impl Server {
         self.check_news(now);
         self.check_waiters(now);
         self.check_polls(now);
+        self.check_kills(now);
         self.viewer_tick(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
@@ -357,6 +409,9 @@ impl Server {
         for p in self.polls.extract_if(.., |p| p.session == name) {
             send(&p.stream, &ended);
         }
+        for k in self.kills.extract_if(.., |k| k.session == name) {
+            send(&k.stream, &Response::ok(&k.killed));
+        }
         Some(info)
     }
 
@@ -374,8 +429,8 @@ impl Server {
         if let Some(key) = key
             && let Some(slot) = self.sessions.get_mut(session)
         {
-            let d = slot.session.log.deliver(key, &Default::default(), None);
-            if !d.events.is_empty() {
+            let d = slot.session.log.deliver(key, &Default::default(), None, false);
+            if !d.is_empty() {
                 resp.events = Some(d);
             }
         }
@@ -445,7 +500,9 @@ impl Server {
             })
             .map_err(|e| e.error)?;
         let _ = fs::set_permissions(&session.dir, fs::Permissions::from_mode(0o700));
-        self.sessions.insert(name, Slot { session, root, ttl, last_active: Instant::now(), lock: Default::default(), warned: None, token });
+        let now = Instant::now();
+        let slot = Slot { session, root, ttl, last_active: now, lock: Default::default(), warned: None, working: None, last_agent: now, token };
+        self.sessions.insert(name, slot);
         Ok(())
     }
 }

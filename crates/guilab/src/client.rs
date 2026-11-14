@@ -16,13 +16,23 @@ pub struct Conn {
     client: Client,
 }
 
+/// Set to 1 to never autostart a server (e.g. driving a nested guilab that's restarting).
+const NO_AUTOSTART_VAR: &str = "GUILAB_NO_AUTOSTART";
+
 /// Connects to the server, starting it if it isn't running.
 pub fn connect() -> Result<Conn, String> {
     let path = guilab_proto::socket_path().map_err(|e| e.to_string())?;
     if let Ok(client) = Client::connect(&path) {
         let mut c = Conn { client };
-        c.warn_if_stale();
+        c.check_server()?;
         return Ok(c);
+    }
+    if std::env::var(NO_AUTOSTART_VAR).is_ok_and(|v| !v.is_empty() && v != "0") {
+        return Err(format!(
+            "no guilab server at {} ({NO_AUTOSTART_VAR} is set, so none was started). Start one with `guilab server`, \
+             or wait for one with `guilab server --wait`",
+            path.display()
+        ));
     }
     autostart(&path)?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -76,7 +86,7 @@ impl Conn {
     /// Sends a request; the reply may be an error (`ok: false`) carrying events.
     pub fn request(&mut self, mut target: Target, cmd: Command) -> Result<Response, String> {
         target.root = worktree_root();
-        let req = Request { target, cmd };
+        let req = Request { proto: guilab_proto::PROTO, target, cmd };
         self.client.call(&req).map_err(|e| e.to_string())
     }
 
@@ -85,31 +95,71 @@ impl Conn {
         self.client.read_reply().map_err(|e| e.to_string())
     }
 
-    /// A server started from an older build keeps running old code; say so.
-    fn warn_if_stale(&mut self) {
-        let Ok(info) = self.client.call_as::<ServerInfo>(&Request { target: Target::default(), cmd: Command::Ping }) else {
-            return;
-        };
-        let me = std::env::current_exe().ok();
-        let mtime = me
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        if me.as_deref() == Some(info.exe.as_path()) && mtime.is_some_and(|m| m > info.exe_mtime) {
-            eprintln!("guilab: warning: the server runs an older build; restart it with `guilab server --stop`");
+    /// A server from another build: an error if it speaks another protocol, else a warning
+    /// (it keeps running its old code until restarted).
+    fn check_server(&mut self) -> Result<(), String> {
+        let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping };
+        let Ok(info) = self.client.call_as::<ServerInfo>(&ping) else { return Ok(()) };
+        if info.proto != guilab_proto::PROTO {
+            return Err(format!(
+                "the running guilab server (pid {}, {}) is an incompatible build (protocol {}, this CLI {}). Restart it \
+                 with `guilab server --stop` (ends its sessions), or use the guilab binary it runs",
+                info.pid,
+                info.exe.display(),
+                info.proto,
+                guilab_proto::PROTO
+            ));
         }
+        let mine = crate::build_id::build_id();
+        let differs = if !mine.is_empty() && !info.build.is_empty() {
+            mine != info.build
+        } else {
+            // No build ids: an older binary at the same path means a rebuild.
+            let me = std::env::current_exe().ok();
+            let mtime = me
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            me.as_deref() == Some(info.exe.as_path()) && mtime.is_some_and(|m| m > info.exe_mtime)
+        };
+        if differs {
+            eprintln!(
+                "guilab: note: the server (pid {}) runs another build of guilab than this CLI; restart it to use this one: \
+                 guilab server --stop (ends its sessions)",
+                info.pid
+            );
+        }
+        Ok(())
     }
 }
 
-pub fn run_server(idle_exit: u64, show: Option<PathBuf>) -> Result<(), String> {
+pub fn run_server(idle_exit: u64, show: Option<PathBuf>, build: String) -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("GUILAB_LOG").unwrap_or_else(|_| "warn,guilab_server=info,guilab_compositor=info,guilab_viewer=info".into()))
         .with_writer(std::io::stderr)
         .init();
-    let opts = guilab_server::Options { idle_exit: (idle_exit > 0).then(|| Duration::from_secs(idle_exit)), show };
+    let opts = guilab_server::Options { idle_exit: (idle_exit > 0).then(|| Duration::from_secs(idle_exit)), show, build };
     guilab_server::run(opts).map_err(|e| format!("{e:#}"))
+}
+
+/// `server --wait`: returns once a server answers (up to 30 s).
+pub fn wait_server() -> Result<(), String> {
+    let path = guilab_proto::socket_path().map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping };
+    loop {
+        if let Ok(mut c) = Client::connect(&path)
+            && c.call_as::<ServerInfo>(&ping).is_ok()
+        {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(format!("no guilab server answered at {} within 30 s", path.display()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub fn stop_server() -> Result<(), String> {
@@ -117,8 +167,9 @@ pub fn stop_server() -> Result<(), String> {
     let Ok(mut client) = Client::connect(&path) else {
         return Err("no server running".into());
     };
-    let info: ServerInfo = client.call_as(&Request { target: Target::default(), cmd: Command::Ping })?;
-    client.call_as::<serde_json::Value>(&Request { target: Target::default(), cmd: Command::Shutdown })?;
+    let req = |cmd| Request { proto: guilab_proto::PROTO, target: Target::default(), cmd };
+    let info: ServerInfo = client.call_as(&req(Command::Ping))?;
+    client.call_as::<serde_json::Value>(&req(Command::Shutdown))?;
     // Wait for it to finish cleaning up, so a following command gets a fresh server.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && Path::new(&format!("/proc/{}", info.pid)).exists() {

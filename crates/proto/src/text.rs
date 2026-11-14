@@ -2,7 +2,7 @@
 //! attached to command replies, `poll --follow` lines and `log`. Human input runs are
 //! summarized ("clicked at 640,410; typed "hello"; pressed Return").
 
-use crate::events::{Annotation, Delivery, Event, EventData, Tier};
+use crate::events::{Annotation, Delivery, Event, EventData, Tier, Unread};
 
 /// Formats times in a fixed UTC offset (the CLI passes the local one).
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,6 +95,74 @@ fn annotation(a: &Annotation) -> String {
     format!("{s}: {}", quote(&a.text))
 }
 
+/// A phrase of a human input run, before formatting. Moves and scrolls stay structured so
+/// [`collapse`] can merge them.
+enum Phrase {
+    /// Pointer motion: from, to, ms (None once several runs merged).
+    Move((i32, i32), (i32, i32), Option<i64>),
+    Scroll { dx: f64, dy: f64, x: i32, y: i32, smooth: bool },
+    Text(String),
+}
+
+impl Phrase {
+    fn text(self) -> String {
+        match self {
+            Phrase::Move(a, b, ms) if a == b || ms == Some(0) => format!("moved pointer to {},{}", b.0, b.1),
+            Phrase::Move(a, b, Some(ms)) => format!("moved pointer {},{} → {},{} ({})", a.0, a.1, b.0, b.1, secs(ms)),
+            Phrase::Move(a, b, None) => format!("moved pointer {},{} → {},{}", a.0, a.1, b.0, b.1),
+            Phrase::Scroll { dx, dy, x, y, smooth } => {
+                let unit = if smooth { "px" } else { " notches" };
+                let mut parts = Vec::new();
+                if dy != 0.0 {
+                    parts.push(format!("{} {}{unit}", if dy > 0.0 { "down" } else { "up" }, num(dy.abs())));
+                }
+                if dx != 0.0 {
+                    parts.push(format!("{} {}{unit}", if dx > 0.0 { "right" } else { "left" }, num(dx.abs())));
+                }
+                if parts.is_empty() {
+                    parts.push(format!("0{unit}"));
+                }
+                format!("scrolled {} at {x},{y}", parts.join(" "))
+            }
+            Phrase::Text(t) => t,
+        }
+    }
+}
+
+/// Drops pointer noise: a move is only kept where the pointer comes to rest at the end of
+/// the run (clicks, drags and scrolls carry their own positions), and scrolls with only
+/// moves between them add up.
+fn collapse(phrases: Vec<Phrase>) -> Vec<Phrase> {
+    let mut out: Vec<Phrase> = Vec::new();
+    let mut tail: Option<Phrase> = None;
+    for p in phrases {
+        match p {
+            Phrase::Move(a, b, ms) => {
+                tail = Some(match tail.take() {
+                    Some(Phrase::Move(a0, _, _)) => Phrase::Move(a0, b, None),
+                    _ => Phrase::Move(a, b, ms),
+                });
+            }
+            Phrase::Scroll { dx, dy, x, y, smooth } => {
+                tail = None;
+                if let Some(Phrase::Scroll { dx: pdx, dy: pdy, x: px, y: py, smooth: ps }) = out.last_mut()
+                    && *ps == smooth
+                {
+                    (*pdx, *pdy, *px, *py) = (*pdx + dx, *pdy + dy, x, y);
+                    continue;
+                }
+                out.push(Phrase::Scroll { dx, dy, x, y, smooth });
+            }
+            p => {
+                tail = None;
+                out.push(p);
+            }
+        }
+    }
+    out.extend(tail);
+    out
+}
+
 /// Summarizes a run of human input events into phrases.
 fn input_phrases(events: &[&Event]) -> Vec<String> {
     struct Press {
@@ -104,15 +172,17 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
         window: Option<u32>,
         to: Option<(i32, i32)>,
     }
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Phrase> = Vec::new();
     let mut typed = String::new();
     let mut mods: Vec<String> = Vec::new();
     let mut press: Option<Press> = None;
     // Last click: (button, x, y, t, count, index in out), to merge double clicks.
     let mut last_click: Option<(String, i32, i32, u64, u32, usize)> = None;
-    let flush = |typed: &mut String, out: &mut Vec<String>| {
+    // Fingers down: finger -> (x, y, index in out), to merge down + up into one phrase.
+    let mut fingers: Vec<(u32, i32, i32, usize)> = Vec::new();
+    let flush = |typed: &mut String, out: &mut Vec<Phrase>| {
         if !typed.is_empty() {
-            out.push(format!("typed {}", quote(typed)));
+            out.push(Phrase::Text(format!("typed {}", quote(typed))));
             typed.clear();
         }
     };
@@ -125,11 +195,7 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
                     continue;
                 }
                 flush(&mut typed, &mut out);
-                if path.len() == 1 {
-                    out.push(format!("moved pointer to {},{}", b[0], b[1]));
-                } else {
-                    out.push(format!("moved pointer {},{} → {},{} ({})", a[0], a[1], b[0], b[1], secs((b[2] - a[2]) as i64)));
-                }
+                out.push(Phrase::Move((a[0], a[1]), (b[0], b[1]), Some((b[2] - a[2]) as i64)));
             }
             EventData::Button { button, pressed: true, x, y, window } => {
                 flush(&mut typed, &mut out);
@@ -142,23 +208,27 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
                         let (ex, ey) = p.to.unwrap_or((p.x, p.y));
                         if (ex - p.x).abs() + (ey - p.y).abs() > 4 {
                             let b = if button == "left" { String::new() } else { format!(" ({button} button)") };
-                            out.push(format!("dragged from {},{} to {},{}{b}", p.x, p.y, ex, ey));
+                            out.push(Phrase::Text(format!("dragged from {},{} to {},{}{b}", p.x, p.y, ex, ey)));
                             last_click = None;
                             continue;
                         }
+                        // Moves between the clicks of a double click don't separate them.
                         let n = match &last_click {
                             Some((b, lx, ly, lt, n, i))
-                                if b == button && *i + 1 == out.len() && e.t.saturating_sub(*lt) < 500 && (lx - p.x).abs() + (ly - p.y).abs() <= 4 =>
+                                if b == button
+                                    && out[*i + 1..].iter().all(|p| matches!(p, Phrase::Move(..)))
+                                    && e.t.saturating_sub(*lt) < 500
+                                    && (lx - p.x).abs() + (ly - p.y).abs() <= 4 =>
                             {
-                                out.pop();
+                                out.truncate(*i);
                                 n + 1
                             }
                             _ => 1,
                         };
-                        out.push(format!("{} {}", clicked(button, n), at(p.x, p.y, p.window)));
+                        out.push(Phrase::Text(format!("{} {}", clicked(button, n), at(p.x, p.y, p.window))));
                         last_click = Some((button.clone(), p.x, p.y, e.t, n, out.len() - 1));
                     }
-                    _ => out.push(format!("released {button} button {}", at(*x, *y, *window))),
+                    _ => out.push(Phrase::Text(format!("released {button} button {}", at(*x, *y, *window)))),
                 }
             }
             EventData::Key { key, pressed, text } => {
@@ -183,35 +253,44 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
                         flush(&mut typed, &mut out);
                         let mut c: Vec<&str> = mods.iter().map(String::as_str).collect();
                         c.push(key);
-                        out.push(format!("pressed {}", c.join("+")));
+                        out.push(Phrase::Text(format!("pressed {}", c.join("+"))));
                     }
                 }
                 last_click = None;
             }
             EventData::Scroll { dx, dy, x, y, smooth } => {
                 flush(&mut typed, &mut out);
-                let unit = if *smooth { "px" } else { " notches" };
-                let mut parts = Vec::new();
-                if *dy != 0.0 {
-                    parts.push(format!("{} {}{unit}", if *dy > 0.0 { "down" } else { "up" }, num(dy.abs())));
-                }
-                if *dx != 0.0 {
-                    parts.push(format!("{} {}{unit}", if *dx > 0.0 { "right" } else { "left" }, num(dx.abs())));
-                }
-                out.push(format!("scrolled {} at {x},{y}", parts.join(" ")));
+                out.push(Phrase::Scroll { dx: *dx, dy: *dy, x: *x, y: *y, smooth: *smooth });
             }
-            EventData::Touch { finger, down, x, y } => {
+            EventData::Touch { finger, down: true, x, y } => {
                 flush(&mut typed, &mut out);
-                out.push(format!("finger {finger} {} at {x},{y}", if *down { "down" } else { "up" }));
+                fingers.retain(|f| f.0 != *finger);
+                fingers.push((*finger, *x, *y, out.len()));
+                out.push(Phrase::Text(format!("finger {finger} down at {x},{y} (still down)")));
             }
-            EventData::Gesture { gesture, fingers } => {
+            EventData::Touch { finger, down: false, x, y } => {
                 flush(&mut typed, &mut out);
-                out.push(format!("{fingers}-finger {gesture}"));
+                match fingers.iter().position(|f| f.0 == *finger) {
+                    Some(i) => {
+                        let (_, x0, y0, at) = fingers.remove(i);
+                        out[at] = Phrase::Text(if (x - x0).abs() + (y - y0).abs() <= 4 {
+                            format!("tapped at {x0},{y0}")
+                        } else {
+                            format!("dragged finger {finger} from {x0},{y0} to {x},{y}")
+                        });
+                    }
+                    None => out.push(Phrase::Text(format!("finger {finger} up at {x},{y}"))),
+                }
+            }
+            EventData::Gesture { .. } => {
+                flush(&mut typed, &mut out);
+                out.push(Phrase::Text(gesture(&e.data)));
             }
             _ => {}
         }
     }
     flush(&mut typed, &mut out);
+    let mut out: Vec<String> = collapse(out).into_iter().map(Phrase::text).collect();
     if let Some(p) = press {
         out.push(format!("pressed {} button {} (still held)", p.button, at(p.x, p.y, p.window)));
     }
@@ -225,6 +304,13 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
     out
 }
 
+fn gesture(d: &EventData) -> String {
+    match d {
+        EventData::Gesture { gesture, fingers } => format!("{fingers}-finger {gesture}"),
+        _ => String::new(),
+    }
+}
+
 impl Fmt {
     /// `HH:MM:SS` in the configured offset.
     pub fn clock(&self, t: u64) -> String {
@@ -236,7 +322,9 @@ impl Fmt {
     pub fn describe(&self, e: &Event) -> String {
         match &e.data {
             EventData::Command { cmd } => format!("agent ran: guilab {cmd}"),
-            EventData::Say { text, images } => {
+            EventData::Work { status } => format!("agent is working: {status}"),
+            EventData::Done => "agent is done, waiting for the human".into(),
+            EventData::AgentMessage { text, images } => {
                 let mut s = format!("agent said: {}", quote(text));
                 for (i, p) in images.iter().enumerate() {
                     s += &format!(" [image {}: {}]", i + 1, p.display());
@@ -275,9 +363,8 @@ impl Fmt {
                 };
                 format!("human key {key} {}{t}", if *pressed { "down" } else { "up" })
             }
-            EventData::Touch { .. } | EventData::Gesture { .. } | EventData::Scroll { .. } => {
-                format!("human {}", input_phrases(&[e]).join("; "))
-            }
+            EventData::Touch { finger, down, x, y } => format!("human finger {finger} {} at {x},{y}", if *down { "down" } else { "up" }),
+            EventData::Gesture { .. } | EventData::Scroll { .. } => format!("human {}", input_phrases(&[e]).join("; ")),
             EventData::AppStart { id, argv } => format!("app {id} started: {}", argv.join(" ")),
             EventData::AppExit { id, argv, code, signal, killed, log } => {
                 let name = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).unwrap_or("?");
@@ -373,11 +460,17 @@ impl Fmt {
                 if annotations.iter().any(|a| a.color.is_some()) {
                     v.push("  (text annotations aren't drawn in the image; the pixel is the text's top-left, where the human typed it, usually next to the mark it's about)".into());
                 }
-                v.push("  (reply with: guilab say \"...\")".into());
+                v.push("  (you're marked working on it; reply when finished with: guilab done \"...\")".into());
                 v
             }
             _ => vec![format!("{} {}", self.clock(e.t), self.describe(e))],
         }
+    }
+
+    /// The notice on command replies while human messages are unread.
+    pub fn unread(&self, u: &Unread) -> String {
+        let what = if u.count == 1 { "a human message".to_string() } else { format!("{} human messages", u.count) };
+        format!("[guilab: {what} waiting since {}; read it now: guilab poll]", self.clock(u.first))
     }
 
     /// "since your previous guilab command (HH:MM:SS)".
@@ -464,7 +557,6 @@ mod tests {
         assert_eq!(
             input_phrases(&refs),
             [
-                "moved pointer 1,2 → 30,40 (0.8s)",
                 "double-clicked at 30,5 in window 3",
                 "typed \"hI\"",
                 "pressed Return",
@@ -473,6 +565,31 @@ mod tests {
                 "holding ctrl",
             ]
         );
+    }
+
+    #[test]
+    fn pointer_noise_collapses() {
+        let mv = |t, a: i32, b: i32| ev(t, EventData::Motion { path: vec![[a, a, 0], [b, b, 300]] });
+        let sc = |t, dy| ev(t, EventData::Scroll { dx: 0.0, dy, x: 7, y: 8, smooth: false });
+        let evs = [
+            mv(0, 1, 2),
+            sc(1000, 1.0),
+            mv(2000, 3, 4),
+            sc(3000, 2.0),
+            mv(4000, 5, 6),
+            ev(5000, EventData::Touch { finger: 1, down: true, x: 10, y: 10 }),
+            ev(5100, EventData::Touch { finger: 1, down: false, x: 11, y: 10 }),
+            ev(6000, EventData::Touch { finger: 2, down: true, x: 10, y: 10 }),
+            ev(6100, EventData::Touch { finger: 2, down: false, x: 90, y: 10 }),
+            mv(7000, 7, 8),
+            mv(8000, 9, 10),
+        ];
+        let refs: Vec<&Event> = evs.iter().collect();
+        assert_eq!(
+            input_phrases(&refs),
+            ["scrolled down 3 notches at 7,8", "tapped at 10,10", "dragged finger 2 from 10,10 to 90,10", "moved pointer 7,7 → 10,10"]
+        );
+        assert_eq!(input_phrases(&refs[..1]), ["moved pointer 1,1 → 2,2 (0.3s)"]);
     }
 
     #[test]
@@ -490,6 +607,7 @@ mod tests {
         let d = Delivery {
             since: Some(3_600_000),
             events: vec![ev(3_700_000, EventData::Title { id: 4, title: Some("Hi".into()) }), msg],
+            unread: None,
         };
         assert_eq!(
             f.delivery(&d),
@@ -498,7 +616,7 @@ mod tests {
                 "03:00:00 human message: \"fix this\"",
                 "  image 1: /s/msg-1.png",
                 "  annotation on image 1 at pixel 5,6: \"here\"",
-                "  (reply with: guilab say \"...\")",
+                "  (you're marked working on it; reply when finished with: guilab done \"...\")",
             ]
         );
         assert_eq!(

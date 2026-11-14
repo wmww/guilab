@@ -1,17 +1,25 @@
-//! The per-session event log store: append-only, with motion/scroll coalescing and a
-//! delivery cursor per client key.
+//! The per-session event log store: append-only, with motion/scroll coalescing, a
+//! delivery cursor per client key, and the unread mark for human messages.
 //!
-//! Delivery keys: a client's lock token, or [`ANON`] for clients without one, so every
-//! token-less client of a session shares one cursor. A delivery hands a client every
-//! non-log event after its cursor (minus events its own commands caused) and moves the
-//! cursor to the end. Several pollers on one key: each wake event reaches all of them
-//! (see `deliver`'s `from`); passive events go to whichever delivery comes first.
+//! Delivery keys: the client's git worktree root (one agent per worktree), or [`ANON`]
+//! outside git. A delivery hands a client every non-log event after its cursor (minus
+//! events its own commands caused) and moves the cursor to the end. Several pollers on one
+//! key: each wake event reaches all of them (see `deliver`'s `from`); passive events go to
+//! whichever delivery comes first.
+//!
+//! Human messages are never consumed by a command reply (agents trim and drop stderr):
+//! replies only count them as unread, and they stay unread for the whole session until a
+//! poll prints them. So a message can't be lost, and is shown in full exactly once.
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::events::{Delivery, Event, EventData, LogInfo, Tier, Tiers, now_ms};
+use crate::events::{Delivery, Event, EventData, LogInfo, Tier, Tiers, Unread, now_ms};
 
-/// Delivery key of clients without a lock token.
+fn is_message(e: &Event) -> bool {
+    matches!(e.data, EventData::Message { .. })
+}
+
+/// Delivery key of clients outside a git worktree.
 pub const ANON: &str = "";
 
 /// Events kept in memory; older ones are dropped.
@@ -39,6 +47,8 @@ pub struct EventLog {
     open: bool,
     cursors: HashMap<String, Cursor>,
     uses: u64,
+    /// Human messages from this seq on haven't been shown by a poll.
+    read: u64,
 }
 
 impl EventLog {
@@ -97,13 +107,6 @@ impl EventLog {
         self.cursors.get(key).or_else(|| self.cursors.get(ANON)).map_or(0, |c| c.seq)
     }
 
-    /// Starts a key's cursor at the end (a new lock token: it has seen everything so far).
-    pub fn start_key(&mut self, key: &str) {
-        self.uses += 1;
-        self.cursors.insert(key.to_string(), Cursor { seq: self.next, last: Some(now_ms()), used: self.uses });
-        self.evict();
-    }
-
     fn evict(&mut self) {
         while self.cursors.len() > MAX_KEYS {
             let Some(k) = self.cursors.iter().filter(|(k, _)| k.as_str() != ANON).min_by_key(|(_, c)| c.used).map(|(k, _)| k.clone()) else {
@@ -113,41 +116,59 @@ impl EventLog {
         }
     }
 
-    fn deliverable<'a>(&'a self, key: &'a str, tiers: &'a Tiers, from: u64) -> impl Iterator<Item = (&'a Event, Tier)> + 'a {
-        let first = self.next - self.events.len() as u64;
-        self.events
-            .iter()
-            .skip(from.saturating_sub(first) as usize)
+    /// Non-log events from seq `from` on that `key`'s own commands didn't cause.
+    fn visible<'a>(&'a self, key: &'a str, tiers: &'a Tiers, from: u64) -> impl Iterator<Item = (&'a Event, Tier)> + 'a {
+        self.from_seq(from)
             .filter(move |e| e.by.as_deref() != Some(key))
             .map(move |e| (e, tiers.tier(&e.data)))
             .filter(|(_, t)| *t != Tier::Log)
     }
 
-    /// First wake event for `key` at or after `from`.
-    pub fn first_wake(&self, key: &str, tiers: &Tiers, from: u64) -> Option<u64> {
-        self.deliverable(key, tiers, from).find(|(_, t)| *t == Tier::Wake).map(|(e, _)| e.seq)
+    /// Human messages no poll has shown yet.
+    pub fn unread(&self) -> impl Iterator<Item = &Event> {
+        self.from_seq(self.read).filter(|e| is_message(e))
     }
 
-    /// Whether `key` has an undelivered wake event.
+    /// First wake event for `key` at or after `from` (read or not: a sibling poller may
+    /// have just shown it).
+    pub fn first_wake(&self, key: &str, tiers: &Tiers, from: u64) -> Option<u64> {
+        self.visible(key, tiers, from).find(|(_, t)| *t == Tier::Wake).map(|(e, _)| e.seq)
+    }
+
+    /// Whether a poll by `key` would return at once: an unread message, or another wake
+    /// event after its cursor.
     pub fn has_wake(&self, key: &str, tiers: &Tiers) -> bool {
-        self.first_wake(key, tiers, self.cursor(key)).is_some()
+        self.unread().any(|e| tiers.tier(&e.data) == Tier::Wake)
+            || self.visible(key, tiers, self.cursor(key)).any(|(e, t)| t == Tier::Wake && !is_message(e))
     }
 
     /// Everything `key` hasn't seen (from its cursor, or from `from` if earlier: a wake
     /// event another poller of the same key already got), and moves its cursor to the end.
-    pub fn deliver(&mut self, key: &str, tiers: &Tiers, from: Option<u64>) -> Delivery {
+    /// A `poll` delivery also includes every unread message and marks them read; a command
+    /// reply leaves messages out and only reports them as [`Delivery::unread`].
+    pub fn deliver(&mut self, key: &str, tiers: &Tiers, from: Option<u64>, poll: bool) -> Delivery {
         let c = self.cursor(key);
         let start = from.map_or(c, |f| f.min(c));
-        let events = self
-            .deliverable(key, tiers, start)
+        let msgs_from = from.map_or(self.read, |f| f.min(self.read));
+        let mut events: Vec<Event> = self
+            .visible(key, tiers, start.min(if poll { msgs_from } else { u64::MAX }))
+            .filter(|(e, _)| if is_message(e) { poll && e.seq >= msgs_from } else { e.seq >= start })
             .map(|(e, t)| Event { tier: Some(t), ..e.clone() })
             .collect();
+        let unread = if poll {
+            self.read = self.next;
+            None
+        } else {
+            events.retain(|e| !is_message(e));
+            let mut u = self.unread();
+            u.next().map(|first| Unread { count: 1 + u.count(), first: first.t })
+        };
         let since = self.cursors.get(key).or_else(|| self.cursors.get(ANON)).and_then(|c| c.last);
         self.uses += 1;
         self.cursors.insert(key.to_string(), Cursor { seq: self.next, last: Some(now_ms()), used: self.uses });
         self.evict();
         self.open = false;
-        Delivery { since, events }
+        Delivery { since, events, unread }
     }
 
     /// Events with seq >= `from`, oldest first (cheap: binary search).
@@ -157,7 +178,8 @@ impl EventLog {
     }
 
     /// `guilab log`: events after seq `after` and/or since time `since`, of the given
-    /// kinds (all if empty), at most the `last` newest (0 = all).
+    /// kinds (all if empty), at most the `last` newest (0 = all). Pointer motion doesn't
+    /// count toward `last` (a human moving the mouse would push everything else out).
     pub fn query(&self, after: Option<u64>, since: Option<u64>, kinds: &[&str], last: usize) -> LogInfo {
         let mut v: Vec<Event> = self
             .events
@@ -166,7 +188,19 @@ impl EventLog {
             .filter(|e| kinds.is_empty() || kinds.contains(&e.data.kind()))
             .cloned()
             .collect();
-        let omitted = if last > 0 && v.len() > last { v.len() - last } else { 0 };
+        let mut omitted = 0;
+        if last > 0 {
+            let mut n = 0;
+            for (i, e) in v.iter().enumerate().rev() {
+                if !matches!(e.data, EventData::Motion { .. }) {
+                    n += 1;
+                    if n > last {
+                        omitted = i + 1;
+                        break;
+                    }
+                }
+            }
+        }
         v.drain(..omitted);
         LogInfo { events: v, omitted, dropped: self.dropped }
     }
@@ -214,27 +248,50 @@ mod tests {
         l.push(EventData::Title { id: 3, title: None }, None);
         assert!(!l.has_wake(ANON, &t));
         // Own commands and their effects aren't echoed; log-tier events never delivered.
-        let d = l.deliver(ANON, &t, None);
+        let d = l.deliver(ANON, &t, None, false);
         assert_eq!(d.events.len(), 1);
         assert_eq!(d.events[0].tier, Some(Tier::Passive));
-        assert!(l.deliver(ANON, &t, None).events.is_empty());
+        assert!(l.deliver(ANON, &t, None, false).is_empty());
         // Another key sees the app start, and starts at the anon cursor.
         l.push(EventData::AppStart { id: 2, argv: vec!["b".into()] }, Some(ANON));
-        assert_eq!(l.deliver("tok", &t, None).events.len(), 1);
-        let w = l.push(msg(), None);
-        assert!(l.has_wake("tok", &t) && l.has_wake(ANON, &t));
-        // Both pollers of one key get the wake event.
-        assert_eq!(l.first_wake("tok", &t, w), Some(w));
-        assert_eq!(l.deliver("tok", &t, Some(w)).events.len(), 1);
-        assert!(!l.has_wake("tok", &t));
-        assert_eq!(l.deliver("tok", &t, Some(w)).events.len(), 1);
-        // A fresh lock token starts at the end.
-        l.start_key("new");
-        assert!(!l.has_wake("new", &t));
+        assert_eq!(l.deliver("/wt", &t, None, false).events.len(), 1);
         // Overrides.
-        let wake_input = Tiers { wake: vec!["window".into()], ..Default::default() };
+        let wake_window = Tiers { wake: vec!["window".into()], ..Default::default() };
         l.push(EventData::Title { id: 3, title: None }, None);
-        assert!(l.has_wake("new", &wake_input) && !l.has_wake("new", &t));
+        assert!(l.has_wake("/wt", &wake_window) && !l.has_wake("/wt", &t));
+    }
+
+    #[test]
+    fn messages_stay_unread_until_polled() {
+        let mut l = EventLog::default();
+        let t = Tiers::default();
+        let w = l.push(msg(), None);
+        l.push(EventData::Title { id: 3, title: None }, None);
+        // A command reply only counts it; the passive event is consumed.
+        let d = l.deliver(ANON, &t, None, false);
+        assert_eq!(d.events.len(), 1);
+        assert_eq!(d.unread, Some(Unread { count: 1, first: d.unread.unwrap().first }));
+        assert!(l.deliver(ANON, &t, None, false).unread.is_some());
+        // Any key's poll returns it at once, with nothing already delivered, and reads it.
+        assert!(l.has_wake("/wt", &t) && l.has_wake(ANON, &t));
+        let d = l.deliver(ANON, &t, None, true);
+        assert_eq!(d.events.len(), 1);
+        assert_eq!((d.events[0].seq, d.events[0].tier), (w, Some(Tier::Wake)));
+        assert!(!l.has_wake(ANON, &t) && !l.has_wake("/wt", &t));
+        assert!(l.deliver("/wt", &t, None, false).unread.is_none());
+        // Two pollers waiting on one key both get the next one.
+        let from = l.end();
+        let w = l.push(msg(), None);
+        assert_eq!(l.first_wake(ANON, &t, from), Some(w));
+        assert_eq!(l.deliver(ANON, &t, Some(w), true).events.len(), 1);
+        assert_eq!(l.first_wake(ANON, &t, from), Some(w));
+        assert_eq!(l.deliver(ANON, &t, Some(w), true).events.len(), 1);
+        // --passive message: no wake, but a poll still shows (and reads) it.
+        l.push(msg(), None);
+        let p = Tiers { passive: vec!["message".into()], ..Default::default() };
+        assert!(!l.has_wake(ANON, &p));
+        assert_eq!(l.deliver(ANON, &p, None, true).events[0].tier, Some(Tier::Passive));
+        assert!(l.unread().next().is_none());
     }
 
     #[test]
@@ -248,5 +305,10 @@ mod tests {
         let r = l.query(None, Some(3000), &[], 3);
         assert_eq!((r.events.len(), r.omitted), (3, 1));
         assert_eq!(l.query(Some(7), None, &[], 0).events.len(), 2);
+        // Motion doesn't count toward the limit.
+        l.push_at(9000, motion(1), None);
+        let r = l.query(None, None, &[], 2);
+        assert_eq!((r.events.len(), r.omitted), (3, 8));
+
     }
 }

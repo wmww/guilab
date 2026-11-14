@@ -27,6 +27,12 @@ fn session(s: &SessionInfo) -> String {
     if let Some(r) = &s.root {
         line += &format!(" root={}", r.display());
     }
+    if s.in_viewer {
+        line += " (shown in the viewer)";
+    }
+    if let Some(w) = &s.working {
+        line += &format!(" working={w:?}");
+    }
     line
 }
 
@@ -73,10 +79,14 @@ fn tree(nodes: &[TreeNode], depth: usize, out: &mut String) {
 /// Events attached to a command reply, as printed on stderr.
 pub fn events_block(fmt: &Fmt, d: &Delivery) -> Option<String> {
     let lines = fmt.delivery(d);
-    if lines.is_empty() {
-        return None;
+    let mut out = Vec::new();
+    if !lines.is_empty() {
+        out.push(format!("[guilab events {}; not errors]\n{}", fmt.since(d), lines.join("\n")));
     }
-    Some(format!("[guilab events {}; not errors]\n{}", fmt.since(d), lines.join("\n")))
+    if let Some(u) = &d.unread {
+        out.push(fmt.unread(u));
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
 }
 
 /// Prints one poll reply. Returns whether it timed out.
@@ -178,7 +188,22 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             return Ok(());
         }
-        Command::Say { .. } => "sent to the viewer's chat".into(),
+        Command::Work { status, message, images } => {
+            let posted = if message.is_some() || !images.is_empty() { "; message posted" } else { "" };
+            format!("working: {status}{posted}")
+        }
+        Command::Done { message, images } => {
+            let info: guilab_proto::DoneInfo = get(v)?;
+            let mut lines = Vec::new();
+            if message.is_some() || !images.is_empty() {
+                lines.push("message posted".to_string());
+            }
+            if info.unlocked {
+                lines.push("released your lock".into());
+            }
+            lines.push("marked done: the human sees you're waiting for them. Wait for their reply with: guilab poll --timeout 600".into());
+            lines.join("\n")
+        }
         Command::ClipSet { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),
         Command::Log { .. } => {
             let l: LogInfo = get(v)?;
@@ -186,10 +211,15 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             if l.dropped > 0 {
                 out.push(format!("({} oldest events were dropped)", l.dropped));
             }
+            let omitted = format!("({} earlier events not shown; -n 0 shows all)", l.omitted);
             if l.omitted > 0 {
-                out.push(format!("({} earlier events not shown; -n 0 shows all)", l.omitted));
+                out.push(omitted.clone());
             }
             out.extend(l.events.iter().map(|e| fmt.log_line(e)));
+            // Also at the end, where `| tail` sees it.
+            if l.omitted > 0 && l.events.len() > 20 {
+                out.push(omitted);
+            }
             if out.is_empty() { "no events".into() } else { out.join("\n") }
         }
         Command::Show { .. } => {

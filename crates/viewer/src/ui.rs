@@ -40,6 +40,8 @@ pub struct SessionView<'a> {
     /// Input that reached the apps (current session only).
     pub viz: Option<&'a guilab_proto::viz::VizLog>,
     pub under_pointer: Option<[u8; 3]>,
+    /// What the agent is working on (None while it waits for the human).
+    pub agent: Option<guilab_markup::Status>,
 }
 
 impl SessionView<'_> {
@@ -236,6 +238,11 @@ impl ViewerUi {
         self.current.as_deref()
     }
 
+    /// Shows a session's tab (from the next frame; ignored if there's no such session then).
+    pub fn select(&mut self, name: &str) {
+        self.current = Some(name.to_string());
+    }
+
     /// Whether the current session's texture should be sampled with NEAREST (zoomed in).
     pub fn nearest(&self) -> bool {
         self.pixel_ratio >= 2.0
@@ -373,6 +380,7 @@ impl ViewerUi {
             ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(360.0).size_range(220.0..=1200.0)),
         };
         if let Some(panel) = panel {
+            p.chat.set_status(s.agent.clone());
             panel.resizable(true).show(ui, |ui| {
                 if let Some(m) = p.chat.show(ui, &mut p.sketch) {
                     out.push(Action::Message { session: s.name.to_string(), text: m.text, images: m.images });

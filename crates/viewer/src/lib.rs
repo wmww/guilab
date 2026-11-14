@@ -27,7 +27,7 @@ use smithay::backend::{
 };
 
 pub use egui;
-pub use guilab_markup::{self as markup, Annotated, FeedItem, Who};
+pub use guilab_markup::{self as markup, Annotated, FeedItem, Status, Who};
 pub use host::{BufferKind, Connected, CursorImage, HostCursor, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
 pub use ui::{Action, Input};
@@ -50,6 +50,8 @@ pub struct SessionFrame<'a> {
     pub viz: &'a guilab_proto::viz::VizLog,
     /// Average color around the pointer in the session's frame.
     pub under_pointer: Option<[u8; 3]>,
+    /// What the agent is working on (None while it waits for the human).
+    pub agent: Option<guilab_markup::Status>,
 }
 
 pub struct Viewer {
@@ -102,6 +104,7 @@ impl Viewer {
                 HostCursor::Icon(i) => (*i as u8 as u64).hash(&mut h),
                 HostCursor::Image(img) => (img.id | 1 << 63).hash(&mut h),
             }
+            s.agent.as_ref().map(|a| &a.text).hash(&mut h);
             if Some(s.name) == cur || cur.is_none() {
                 s.seq.hash(&mut h);
                 s.viz.end().hash(&mut h);
@@ -119,6 +122,17 @@ impl Viewer {
         }
         let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
         (self.host.can_draw() && changed) || self.host.has_input()
+    }
+
+    /// The session tab shown (as of the last frame).
+    pub fn current(&self) -> Option<&str> {
+        self.ui.current()
+    }
+
+    /// Switches to a session's tab.
+    pub fn select(&mut self, name: &str) {
+        self.ui.select(name);
+        self.host.dirty = true;
     }
 
     /// The next event seq the session's feed wants (0 = nothing shown yet).
@@ -191,6 +205,7 @@ impl Viewer {
                 cursor: s.cursor.clone(),
                 viz: (Some(s.name) == cur.as_deref()).then_some(s.viz),
                 under_pointer: s.under_pointer,
+                agent: s.agent.clone(),
             })
             .collect();
 

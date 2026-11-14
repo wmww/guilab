@@ -1,6 +1,7 @@
 //! The conversation panel: a feed (human messages, agent messages, activity lines) above
-//! a message box with the queued drawings. The host pushes [`FeedItem`]s in and gets
-//! [`Outgoing`] messages back; it decides what happens to them.
+//! a message box with the queued drawings. The host pushes [`FeedItem`]s in, sets the
+//! agent's [`Status`] while it works, and gets [`Outgoing`] messages back; it decides what
+//! happens to them.
 
 use std::{collections::VecDeque, sync::Arc};
 
@@ -29,6 +30,24 @@ pub struct FeedItem {
     pub images: Vec<Arc<ColorImage>>,
 }
 
+/// What the agent is busy with, shown at the bottom of the feed (animated dots, the text,
+/// how long it's been at it). None while it waits for the human.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub text: String,
+    /// Seconds since it started working.
+    pub elapsed: u64,
+    /// Seconds since its last sign of activity (a hint shows after [`QUIET_HINT`]).
+    pub quiet: u64,
+}
+
+/// Quiet for this long (seconds), the status line says so. Long compiles are normal, so
+/// it's only a dim hint; the status stays.
+pub const QUIET_HINT: u64 = 120;
+
+const HUMAN_COLOR: Color32 = Color32::from_rgb(110, 170, 255);
+const AGENT_COLOR: Color32 = Color32::from_rgb(120, 210, 140);
+
 /// A message the human sent: text plus the queued drawings (and the open one).
 pub struct Outgoing {
     pub text: String,
@@ -50,11 +69,12 @@ pub struct Chat {
     scroll_to_end: bool,
     /// The feed was scrolled to the end last frame (new items then keep it there).
     at_end: bool,
+    status: Option<Status>,
 }
 
 impl Chat {
     pub fn new(id: impl Into<Id>) -> Chat {
-        Chat { id: id.into(), items: VecDeque::new(), draft: String::new(), max_items: 2000, scroll_to_end: true, at_end: true }
+        Chat { id: id.into(), items: VecDeque::new(), draft: String::new(), max_items: 2000, scroll_to_end: true, at_end: true, status: None }
     }
 
     pub fn push(&mut self, feed: FeedItem) {
@@ -64,6 +84,14 @@ impl Chat {
         while self.items.len() > self.max_items {
             self.items.pop_front();
         }
+    }
+
+    /// Sets the agent's status (call every frame; it's cheap when unchanged).
+    pub fn set_status(&mut self, status: Option<Status>) {
+        if status.is_some() && self.status.is_none() {
+            self.scroll_to_end |= self.at_end;
+        }
+        self.status = status;
     }
 
     pub fn len(&self) -> usize {
@@ -140,6 +168,7 @@ impl Chat {
         });
 
         let id = self.id;
+        let scroll = std::mem::take(&mut self.scroll_to_end);
         let out = egui::ScrollArea::vertical().id_salt(id.with("feed")).auto_shrink(false).show(ui, |ui| {
             if self.items.is_empty() {
                 ui.weak("Messages, and what the agent does, show up here.");
@@ -147,11 +176,15 @@ impl Chat {
             for item in self.items.iter_mut() {
                 show_item(ui, item);
             }
-            if std::mem::take(&mut self.scroll_to_end) {
+            if let Some(st) = &self.status {
+                show_status(ui, st);
+            }
+            if scroll {
                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
             }
         });
-        self.at_end = out.state.offset.y + out.inner_rect.height() >= out.content_size.y - 8.0;
+        // A scroll to the end lands next frame; until then the offset still looks short.
+        self.at_end = scroll || out.state.offset.y + out.inner_rect.height() >= out.content_size.y - 8.0;
         sent
     }
 }
@@ -171,8 +204,8 @@ fn show_item(ui: &mut Ui, item: &mut Item) {
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 let (name, color) = match f.who {
-                    Who::Human => ("You", Color32::from_rgb(110, 170, 255)),
-                    _ => ("Agent", Color32::from_rgb(120, 210, 140)),
+                    Who::Human => ("You", HUMAN_COLOR),
+                    _ => ("Agent", AGENT_COLOR),
                 };
                 ui.label(RichText::new(name).strong().color(color));
                 ui.label(RichText::new(&f.time).small().weak());
@@ -203,6 +236,40 @@ fn show_item(ui: &mut Ui, item: &mut Item) {
             ui.add_space(2.0);
         }
     }
+}
+
+/// "1m 05s"-style duration.
+fn duration(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// The agent's status line: three pulsing dots, the status, the time it's been working.
+fn show_status(ui: &mut Ui, st: &Status) {
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(26.0, 14.0), Sense::hover());
+        let t = ui.input(|i| i.time);
+        for i in 0..3 {
+            // A wave passing left to right, about once a second.
+            let phase = (t * 1.2 - i as f64 * 0.18).rem_euclid(1.0);
+            let k = (1.0 - (phase * 2.0 - 0.5).abs().min(1.0) * 2.0).max(0.0) as f32;
+            let c = egui::pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y - k * 2.0);
+            ui.painter().circle_filled(c, 3.0, AGENT_COLOR.gamma_multiply(0.35 + 0.65 * k));
+        }
+        ui.label(RichText::new(&st.text).color(AGENT_COLOR));
+        ui.label(RichText::new(duration(st.elapsed)).small().weak()).on_hover_text("Time the agent has been working");
+        if st.quiet >= QUIET_HINT {
+            ui.label(RichText::new(format!("no guilab activity for {}m", st.quiet / 60)).small().weak().italics());
+        }
+    });
+    ui.add_space(2.0);
+    // Stepped, not every frame: enough for the dots and the clock, cheap while it works for hours.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
 }
 
 /// A round button with an up arrow: accent-filled when there's something to send.

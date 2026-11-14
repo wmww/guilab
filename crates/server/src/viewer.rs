@@ -14,7 +14,7 @@ use calloop::{RegistrationToken, channel};
 use guilab_compositor::{AppCursor, InputEvent, InputSource, Session, render::Renderer};
 use guilab_proto::{Annotation, EventData, Response, ViewerInfo, text::Fmt};
 use guilab_viewer::{
-    Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Viewer, Who,
+    Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Status, Viewer, Who,
     CursorImage, HostCursor,
     egui::{ColorImage, CursorIcon as EguiCursor},
     markup,
@@ -163,6 +163,14 @@ impl Server {
                 .into(),
                 frames: s.viewer.frames,
             }),
+            _ => None,
+        }
+    }
+
+    /// The session tab the viewer shows, if it's up.
+    pub(crate) fn viewer_current(&self) -> Option<String> {
+        match &self.viewer {
+            ViewerState::Shown(s) => s.viewer.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned()),
             _ => None,
         }
     }
@@ -316,6 +324,9 @@ impl Server {
                 if s.viewer.frames == 0 && now >= s.deadline {
                     return self.hide_viewer(Some("timed out waiting for the host to show the window"));
                 }
+                if let Some(tab) = self.viewer_tab.take() {
+                    s.viewer.select(&tab);
+                }
                 for (name, slot) in &self.sessions {
                     let log = &slot.session.log;
                     let next = s.viewer.feed_next(name, &slot.session.tag);
@@ -346,6 +357,11 @@ impl Server {
                             cursor: HostCursor::Icon(EguiCursor::Default),
                             viz: &slot.session.viz,
                             under_pointer: None,
+                            agent: slot.working.as_ref().map(|w| Status {
+                                text: w.status.clone(),
+                                elapsed: w.since.elapsed().as_secs(),
+                                quiet: slot.last_agent.elapsed().as_secs(),
+                            }),
                         }
                     })
                     .zip(under.into_iter().zip(cursors))
@@ -480,11 +496,13 @@ fn tz_offset() -> i64 {
     }
 }
 
-/// Feed items for the log's messages, `say`s and agent commands from seq `next` on (the
-/// newest [`FEED_BACKLOG`] when the feed is new).
+/// Feed items for the log's messages (both ways), agent commands and status changes from
+/// seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
 fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
     let fmt = Fmt { tz: tz_offset() };
-    let wanted = |e: &&guilab_proto::Event| matches!(e.data, EventData::Message { .. } | EventData::Say { .. } | EventData::Command { .. });
+    let wanted = |e: &&guilab_proto::Event| {
+        matches!(e.data, EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::Command { .. } | EventData::Work { .. } | EventData::Done)
+    };
     let mut events: Vec<&guilab_proto::Event> = if next == 0 {
         log.from_seq(0).rev().filter(wanted).take(FEED_BACKLOG).collect()
     } else {
@@ -499,8 +517,10 @@ fn feed_items(log: &guilab_proto::log::EventLog, next: u64) -> Vec<FeedItem> {
             let time = fmt.clock(e.t);
             match &e.data {
                 EventData::Message { text, images, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images) },
-                EventData::Say { text, images } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images) },
+                EventData::AgentMessage { text, images } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images) },
                 EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: cmd.clone(), images: Vec::new() },
+                EventData::Work { status } => FeedItem { who: Who::Log, time, text: format!("working: {status}"), images: Vec::new() },
+                EventData::Done => FeedItem { who: Who::Log, time, text: "done".into(), images: Vec::new() },
                 _ => unreachable!("filtered"),
             }
         })

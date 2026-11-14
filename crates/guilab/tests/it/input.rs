@@ -43,7 +43,9 @@ pub fn center(log: &str, name: &str, scale: f64) -> (String, String) {
 }
 
 impl Lab {
+    /// `guilab work`, then `guilab lock`; returns the token.
     pub fn lock(&self) -> String {
+        self.run(&["work", "testing"]);
         self.json(&["lock"])["token"].as_str().unwrap().to_string()
     }
 
@@ -59,7 +61,13 @@ impl Lab {
 fn lock_rules() {
     let lab = Lab::new();
     lab.run(&["new"]);
-    // Input always needs the lock; other changes only while locked.
+    // Input and lock need the working state; input always needs the lock; other changes
+    // only while locked.
+    for cmd in [&["input", "move", "1", "1"][..], &["lock"]] {
+        let (ok, _, err) = lab.try_run(cmd);
+        assert!(!ok && err.contains("guilab work \"what you're doing\""), "{err}");
+    }
+    lab.run(&["work", "testing locks"]);
     let (ok, _, err) = lab.try_run(&["input", "move", "1", "1"]);
     assert!(!ok && err.contains("guilab lock"), "{err}");
     lab.run(&["run", "--", "true"]);

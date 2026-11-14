@@ -14,7 +14,7 @@ use crate::{
 impl Lab {
     fn info(&self) -> ServerInfo {
         let mut c = Client::connect(&self.rt.join("guilab/control.sock")).unwrap();
-        c.call_as(&Request { target: Target::default(), cmd: Command::Ping }).unwrap()
+        c.call_as(&Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping }).unwrap()
     }
 
     /// `guilab show` on `host`'s session socket.
@@ -219,7 +219,7 @@ fn draw_and_send() {
     assert!(ok, "{err}");
     let shot = v.path("shot.png");
     v.run(&["screenshot", "--no-settle", "-o", &shot]);
-    v.run(&["say", "here's the app", "--image", &shot]);
+    v.run(&["done", "here's the app", "--image", &shot]);
 
     let step = |actions: &[&str]| {
         h.input(&t, actions);
@@ -241,6 +241,14 @@ fn draw_and_send() {
     let red = px.chunks(ch).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count();
     assert!(red > 300, "the box isn't in the image ({red} red pixels)");
     assert!(v.info().viewer.is_some(), "the viewer survived");
+    // `ls` says which tab the viewer shows; `-S NAME show` switches it.
+    assert!(v.run(&["ls"]).contains("app 800x600 apps=0 windows=0 expires=30m (shown in the viewer)"));
+    v.run(&["new", "other"]);
+    let (ok, _, err) = v.try_run_env(&[("WAYLAND_DISPLAY", &sock)], &["-S", "other", "show"]);
+    assert!(ok, "{err}");
+    std::thread::sleep(Duration::from_millis(100));
+    let ls = v.run(&["ls"]);
+    assert!(ls.lines().any(|l| l.starts_with("other ") && l.ends_with("(shown in the viewer)")), "{ls}");
 }
 
 /// A key the human holds repeats in the viewer's text boxes (the host session turns client

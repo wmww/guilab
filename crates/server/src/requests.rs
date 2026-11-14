@@ -7,12 +7,17 @@ use std::{
 };
 
 use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle, XState};
-use guilab_proto::{Command, EventData, HumanOp, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo};
+use guilab_proto::{
+    Command, Delivery, DoneInfo, EventData, HumanOp, LockInfo, Request, Response, SessionInfo, ShotInfo, Target, events::PollInfo, log::ANON,
+};
 
-use crate::{ClipWait, DEFAULT_TTL, InputJob, NewWait, PollWait, Server, ShotWait, Slot, send};
+use crate::{ClipWait, DEFAULT_TTL, InputJob, KillWait, NewWait, PollWait, Server, ShotWait, Slot, Working, send};
 
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long `kill` waits for the apps to exit (they get SIGKILL after 2 s).
+const KILL_WAIT: Duration = Duration::from_secs(3);
 
 /// How long `new -x` waits for Xwayland.
 const XWAYLAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,8 +41,16 @@ pub(crate) fn session_info(name: &str, slot: &Slot) -> SessionInfo {
         windows: s.windows(),
         ttl: slot.ttl,
         expires_in: (slot.ttl > 0).then(|| slot.ttl.saturating_sub(slot.last_active.elapsed().as_secs())),
+        working: slot.working.as_ref().map(|w| w.status.clone()),
+        in_viewer: false,
     }
 }
+
+/// Status set when a poll hands the agent a human message.
+const READ_STATUS: &str = "read your message";
+
+const NOT_WORKING: &str = "not marked working; run `guilab work \"what you're doing\"` first (the human sees it), \
+     and `guilab done \"...\"` when you're finished";
 
 fn valid_name(n: &str) -> bool {
     !n.is_empty()
@@ -81,7 +94,7 @@ impl Server {
 
     /// Handles a request. `None` means the reply is sent later (screenshot settle wait).
     pub(crate) fn handle(&mut self, req: Request, stream: &UnixStream) -> Option<Response> {
-        let Request { target, cmd } = req;
+        let Request { target, cmd, .. } = req;
         let r = match cmd {
             Command::Ping => {
                 let mut info = self.info.clone();
@@ -89,6 +102,13 @@ impl Server {
                 Response::ok(info)
             }
             Command::Show { display } => {
+                // `-S NAME show` also picks the tab.
+                if let Some(n) = &target.name {
+                    if !self.sessions.contains_key(n) {
+                        return Some(Response::err(format!("no session '{n}' (see guilab ls)")));
+                    }
+                    self.viewer_tab = Some(n.clone());
+                }
                 let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
                 return self.show(display, Some(stream));
             }
@@ -100,7 +120,12 @@ impl Server {
                 self.stop = true;
                 Response::ok(())
             }
-            Command::Ls => Response::ok(self.sessions.iter().map(|(n, s)| session_info(n, s)).collect::<Vec<_>>()),
+            Command::Ls => {
+                let shown = self.viewer_current();
+                let mut list: Vec<SessionInfo> = self.sessions.iter().map(|(n, s)| session_info(n, s)).collect();
+                list.iter_mut().for_each(|i| i.in_viewer = shown.as_deref() == Some(i.name.as_str()));
+                Response::ok(list)
+            }
             Command::New { name, size, scale, ttl, xwayland } => match self.new_session(&target, name, size, scale, ttl, xwayland) {
                 // Answered once Xwayland is up (see check_news).
                 Ok(name) if xwayland => {
@@ -116,7 +141,8 @@ impl Server {
                     Ok(n) => n,
                     Err(e) => return Some(Response::err(e)),
                 };
-                let key = target.token.clone().unwrap_or_default();
+                // One delivery cursor per worktree (one agent each); see guilab_proto::log.
+                let key = target.root.as_ref().map_or(ANON.to_string(), |r| r.display().to_string());
                 // Not deliveries: the human's actions (the viewer's), reading the log, and
                 // polls (they deliver themselves).
                 let attach = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
@@ -130,14 +156,20 @@ impl Server {
     /// A command on session `name`. `None` = answered later.
     fn handle_session(&mut self, name: &str, key: &str, cmd: Command, token: Option<&str>, stream: &UnixStream) -> Option<Response> {
         let slot = self.sessions.get_mut(name).unwrap();
+        if matches!(cmd, Command::Lock { .. } | Command::Input { .. }) && slot.working.is_none() {
+            return Some(Response::err(NOT_WORKING));
+        }
         if let Err(e) = slot.lock.check(name, cmd.access(), token) {
             return Some(Response::err(e));
         }
         slot.last_active = Instant::now();
+        if !matches!(cmd, Command::Human { .. }) {
+            slot.last_agent = Instant::now();
+        }
         if let Some(text) = cmd.log_text() {
             slot.session.log.push(EventData::Command { cmd: text }, Some(key));
         }
-        let clone = || stream.try_clone().map_err(|_| Response::err("internal: clone stream"));
+        let clone = || stream.try_clone().map_err(|_| Box::new(Response::err("internal: clone stream")));
         let s = &mut slot.session;
         let r = match cmd {
             Command::End => Response::ok(self.end_session(name)),
@@ -147,8 +179,6 @@ impl Server {
                     Ok(token) => {
                         if had.as_deref() != Some(token.as_str()) {
                             s.log.push(EventData::Lock { forced: had.is_some() }, Some(key));
-                            // The new token has seen everything so far.
-                            s.log.start_key(&token);
                         }
                         // Taking over: the old holder's chains stop.
                         if force {
@@ -176,7 +206,7 @@ impl Server {
                 }
                 let stream = match clone() {
                     Ok(s) => s,
-                    Err(e) => return Some(e),
+                    Err(e) => return Some(*e),
                 };
                 self.queue_input(name, Some(key), stream, Chain::new(actions, InputSource::Agent));
                 return None;
@@ -188,7 +218,7 @@ impl Server {
                     let _ = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK);
                     let stream = match clone() {
                         Ok(s) => s,
-                        Err(e) => return Some(e),
+                        Err(e) => return Some(*e),
                     };
                     let deadline = Instant::now() + CLIP_TIMEOUT;
                     self.clips.push(ClipWait { session: name.to_string(), key: key.to_string(), stream, pipe, buf: Vec::new(), deadline });
@@ -207,7 +237,20 @@ impl Server {
                 }
                 Err(e) => Response::err(format!("{e:#}")),
             },
-            Command::Kill { id } => result(s.kill(id)),
+            Command::Kill { id } => match s.kill(id) {
+                Ok(killed) if killed.is_empty() => Response::ok(killed),
+                // Answered once they're gone (see check_kills), so `kill && run` doesn't race
+                // a single-instance app's old copy.
+                Ok(killed) => {
+                    let stream = match clone() {
+                        Ok(s) => s,
+                        Err(e) => return Some(*e),
+                    };
+                    self.kills.push(KillWait { session: name.to_string(), key: key.to_string(), stream, killed, deadline: Instant::now() + KILL_WAIT });
+                    return None;
+                }
+                Err(e) => Response::err(format!("{e:#}")),
+            },
             Command::Ps => Response::ok(s.ps()),
             Command::Tree => Response::ok(s.tree()),
             Command::Output { size, scale } => {
@@ -232,7 +275,7 @@ impl Server {
                 };
                 let stream = match clone() {
                     Ok(s) => s,
-                    Err(e) => return Some(e),
+                    Err(e) => return Some(*e),
                 };
                 // Answered after the next frame (see check_waiters).
                 self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, cursor, start: Instant::now() });
@@ -242,21 +285,30 @@ impl Server {
                 if let Err(e) = tiers.check() {
                     return Some(Response::err(e));
                 }
-                let log = &mut s.log;
-                if log.has_wake(key, &tiers) {
-                    let d = log.deliver(key, &tiers, None);
+                let pending = s.log.has_wake(key, &tiers);
+                // Waiting for the human while marked working would leave them waiting too.
+                if !follow && !pending && timeout_ms != Some(0) && slot.working.is_some() {
+                    return Some(Response::err(
+                        "you're still marked working, so the human isn't expecting to answer. Run `guilab done \"...\"` \
+                         first (tell them what you did or need), then poll",
+                    ));
+                }
+                if pending {
+                    let d = s.log.deliver(key, &tiers, None, true);
                     let mut r = Response::ok(PollInfo { timed_out: false });
+                    read_messages(slot, key, &d);
                     r.events = Some(d);
                     if !follow {
                         return Some(r);
                     }
                     send(stream, &r);
                 }
+                let log = &mut slot.session.log;
                 // Motion going on now must not hide in an older event.
                 log.seal();
                 let stream = match clone() {
                     Ok(s) => s,
-                    Err(e) => return Some(e),
+                    Err(e) => return Some(*e),
                 };
                 let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
                 let watch_from = log.end();
@@ -270,13 +322,46 @@ impl Server {
                 };
                 return Some(Response::ok(s.log.query(after, since, &kinds, last)));
             }
-            Command::Say { text, images } => match copy_images(&s.dir, "say", s.log.end(), &images) {
-                Ok(images) => {
-                    s.log.push(EventData::Say { text, images }, Some(key));
-                    Response::ok(())
+            Command::Work { status, message, images } => {
+                let status = status.trim().to_string();
+                if status.is_empty() {
+                    return Some(Response::err("say what you're doing: guilab work \"running the tests\""));
                 }
-                Err(e) => Response::err(e),
-            },
+                if let Err(e) = agent_message(s, key, message, &images) {
+                    return Some(Response::err(e));
+                }
+                s.log.push(EventData::Work { status: status.clone() }, Some(key));
+                match &mut slot.working {
+                    Some(w) => w.status = status,
+                    None => slot.working = Some(Working { status, since: Instant::now() }),
+                }
+                Response::ok(())
+            }
+            Command::Done { message, images } => {
+                // Done means hands off: release the lock, with or without the token (a
+                // wrong token is still an error, so a stale holder learns it lost the lock).
+                let unlocked = if slot.lock.current.is_some() {
+                    match slot.lock.release(name, token, token.is_none()) {
+                        Ok(was) => was,
+                        Err(e) => return Some(Response::err(e)),
+                    }
+                } else {
+                    false
+                };
+                if let Err(e) = agent_message(s, key, message, &images) {
+                    return Some(Response::err(e));
+                }
+                if unlocked {
+                    s.log.push(EventData::Unlock, Some(key));
+                    s.release_all(InputSource::Agent);
+                }
+                s.log.push(EventData::Done, Some(key));
+                slot.working = None;
+                if unlocked {
+                    self.abort_inputs(name, &Response::err("the lock was released (guilab done); input stopped"));
+                }
+                Response::ok(DoneInfo { unlocked })
+            }
             Command::Human { op } => match op {
                 HumanOp::Message { text, images, annotations } => {
                     match human_message(s, text, images.into_iter().map(MsgImage::File).collect(), annotations) {
@@ -293,7 +378,7 @@ impl Server {
                     }
                     let stream = match clone() {
                         Ok(s) => s,
-                        Err(e) => return Some(e),
+                        Err(e) => return Some(*e),
                     };
                     self.queue_input(name, None, stream, Chain::new(actions, InputSource::Human));
                     return None;
@@ -341,12 +426,15 @@ impl Server {
             let log = &mut slot.session.log;
             let (resp, done) = if let Some(w) = log.first_wake(&p.key, &p.tiers, p.watch_from) {
                 let mut r = Response::ok(PollInfo { timed_out: false });
-                r.events = Some(log.deliver(&p.key, &p.tiers, Some(w)));
+                let d = log.deliver(&p.key, &p.tiers, Some(w), true);
                 p.watch_from = log.end();
+                read_messages(slot, &p.key, &d);
+                r.events = Some(d);
                 (r, !p.follow)
             } else if p.deadline.is_some_and(|d| now >= d) {
                 let mut r = Response::ok(PollInfo { timed_out: true });
-                let d = log.deliver(&p.key, &p.tiers, None);
+                let d = log.deliver(&p.key, &p.tiers, None, true);
+                read_messages(slot, &p.key, &d);
                 r.events = (!d.events.is_empty()).then_some(d);
                 (r, true)
             } else {
@@ -527,6 +615,24 @@ impl Server {
         }
     }
 
+    /// Answers `kill`s whose apps are gone (or that waited long enough).
+    pub(crate) fn check_kills(&mut self, now: Instant) {
+        let mut i = 0;
+        while i < self.kills.len() {
+            let k = &self.kills[i];
+            let running = self.sessions.get(&k.session).is_some_and(|slot| {
+                slot.session.ps().iter().any(|p| matches!(p.state, guilab_proto::ProcState::Running) && k.killed.iter().any(|q| q.id == p.id))
+            });
+            if running && now < k.deadline {
+                i += 1;
+                continue;
+            }
+            let k = self.kills.remove(i);
+            let r = self.attach(&k.session, Some(&k.key), Response::ok(&k.killed));
+            send(&k.stream, &r);
+        }
+    }
+
     /// Reads clipboard pipes; answers at EOF or timeout.
     pub(crate) fn check_clips(&mut self, now: Instant) {
         use std::io::Read;
@@ -604,6 +710,30 @@ pub(crate) fn human_message(s: &mut Session, text: String, images: Vec<MsgImage>
     Ok(())
 }
 
+/// A poll showed the agent human messages: it's on them now (the human sees it was picked
+/// up, and the agent still ends with `done`).
+fn read_messages(slot: &mut Slot, key: &str, d: &Delivery) {
+    if !d.events.iter().any(|e| matches!(e.data, EventData::Message { .. })) {
+        return;
+    }
+    slot.session.log.push(EventData::Work { status: READ_STATUS.into() }, Some(key));
+    match &mut slot.working {
+        Some(w) => w.status = READ_STATUS.into(),
+        None => slot.working = Some(Working { status: READ_STATUS.into(), since: Instant::now() }),
+    }
+}
+
+/// Logs an agent message (`work -m`, `done MSG`), images copied as `agent-SEQ-N.EXT`.
+fn agent_message(s: &mut Session, key: &str, text: Option<String>, images: &[std::path::PathBuf]) -> Result<(), String> {
+    let text = text.map(|t| t.trim().to_string()).unwrap_or_default();
+    if text.is_empty() && images.is_empty() {
+        return Ok(());
+    }
+    let images = copy_images(&s.dir, "agent", s.log.end(), images)?;
+    s.log.push(EventData::AgentMessage { text, images }, Some(key));
+    Ok(())
+}
+
 /// Copies message attachments into the session dir as `PREFIX-SEQ-N.EXT`.
 fn copy_images(dir: &Path, prefix: &str, seq: u64, images: &[std::path::PathBuf]) -> Result<Vec<std::path::PathBuf>, String> {
     let mut out = Vec::new();
@@ -616,9 +746,3 @@ fn copy_images(dir: &Path, prefix: &str, seq: u64, images: &[std::path::PathBuf]
     Ok(out)
 }
 
-fn result<T: serde::Serialize>(r: anyhow::Result<T>) -> Response {
-    match r {
-        Ok(v) => Response::ok(v),
-        Err(e) => Response::err(format!("{e:#}")),
-    }
-}

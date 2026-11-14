@@ -3,7 +3,9 @@
 //! Every event has a delivery tier (see notes/design.md "Event log"):
 //! - `wake`: ends a blocking `poll` / emits a `poll --follow` line;
 //! - `passive`: rides along with the next delivery (poll result or any command's reply);
-//! - `log`: only in `guilab log` (the agent's own commands, `say`, screenshots).
+//! - `log`: only in `guilab log` (the agent's own commands, messages, status, screenshots).
+//!
+//! Human messages are special: they stay unread until a poll shows them (see `log.rs`).
 //!
 //! Defaults come from [`default_tier`]; `poll --wake/--passive` override them by kind or
 //! group name ([`KINDS`], [`GROUPS`]).
@@ -61,12 +63,16 @@ pub struct Annotation {
 pub enum EventData {
     /// An agent command, in CLI form without `guilab` (e.g. `input move 10 20 click`).
     Command { cmd: String },
-    /// Agent -> human message (`guilab say`).
-    Say {
+    /// Agent -> human message (`guilab work -m` / `guilab done MSG`).
+    AgentMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<PathBuf>,
     },
+    /// The agent is working (`guilab work`, or a poll handed it a human message).
+    Work { status: String },
+    /// The agent finished and waits for the human (`guilab done`).
+    Done,
     /// Human -> agent message. Images are files in the session dir.
     Message {
         text: String,
@@ -144,7 +150,7 @@ pub enum EventData {
 
 /// Every kind name, as used by `--wake`, `--passive` and `log --kind`.
 pub const KINDS: &[&str] = &[
-    "command", "say", "message", "motion", "button", "key", "scroll", "touch", "gesture", "app_start", "app_exit",
+    "command", "agent_message", "work", "done", "message", "motion", "button", "key", "scroll", "touch", "gesture", "app_start", "app_exit",
     "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "share", "screenshot", "expiring",
 ];
 
@@ -153,6 +159,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ("input", &["motion", "button", "key", "scroll", "touch", "gesture"]),
     ("window", &["window_map", "window_unmap", "title"]),
     ("app", &["app_start", "app_exit"]),
+    ("agent", &["command", "agent_message", "work", "done", "screenshot"]),
     ("all", KINDS),
 ];
 
@@ -160,7 +167,9 @@ impl EventData {
     pub fn kind(&self) -> &'static str {
         match self {
             EventData::Command { .. } => "command",
-            EventData::Say { .. } => "say",
+            EventData::AgentMessage { .. } => "agent_message",
+            EventData::Work { .. } => "work",
+            EventData::Done => "done",
             EventData::Message { .. } => "message",
             EventData::Motion { .. } => "motion",
             EventData::Button { .. } => "button",
@@ -208,7 +217,11 @@ pub fn default_tier(d: &EventData) -> Tier {
                 Tier::Wake
             }
         }
-        EventData::Command { .. } | EventData::Say { .. } | EventData::Screenshot { .. } => Tier::Log,
+        EventData::Command { .. }
+        | EventData::AgentMessage { .. }
+        | EventData::Work { .. }
+        | EventData::Done
+        | EventData::Screenshot { .. } => Tier::Log,
         _ => Tier::Passive,
     }
 }
@@ -268,6 +281,22 @@ pub struct Delivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
     pub events: Vec<Event>,
+    /// Human messages no poll has shown yet (command replies only; polls include them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<Unread>,
+}
+
+impl Delivery {
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.unread.is_none()
+    }
+}
+
+/// Unread human messages: how many, and when the first arrived (unix ms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unread {
+    pub count: usize,
+    pub first: u64,
 }
 
 /// `poll` reply data; the events come in `Response::events`.

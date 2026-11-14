@@ -1,6 +1,7 @@
 //! `guilab` CLI. Every command except `server` talks to the server over the control
 //! socket, starting it first if needed.
 
+mod build_id;
 mod client;
 mod format;
 
@@ -15,11 +16,11 @@ Quick start:
   guilab run -- gtk4-demo          start an app in it (its log: guilab ps)
   guilab screenshot                save a PNG (waits for apps to finish drawing), prints its path
   guilab tree                      windows and popups: ids, pixel geometry, app ids, titles
+  guilab work \"testing the menu\"   tell the human what you're doing (needed for lock/input)
   guilab lock                      take the session's lock; prints a TOKEN
   guilab -t TOKEN input move 100 200 click     send input (guilab input --help)
-  guilab -t TOKEN unlock
-  guilab poll --timeout 600        wait for the human (a message, ...); prints what happened
-  guilab say \"Done, have a look\" message the human
+  guilab done \"Fixed, have a look\" message the human, release the lock, wait for them
+  guilab poll --timeout 600        wait for the human's reply; prints it
   guilab end                       end the session and kill its apps
 
 Coordinates everywhere are screenshot pixels, at any scale. Sessions end after 30 idle
@@ -32,8 +33,13 @@ and end need the token too; read-only commands never do. Pass the token with -t 
 every command: shells don't keep variables between calls) or $GUILAB_TOKEN.
 
 Every command also prints, on stderr, what happened in the session since your previous
-command (human input, windows, apps exiting), so you see what changed under you.
-`guilab log` shows the full history.";
+command (human input, windows, apps exiting), so you see what changed under you, and
+says when a human message is waiting. Messages are only shown by `guilab poll`.
+`guilab log` shows the full history.
+
+Testing guilab itself: run the inner server as an app with its own directory
+(`guilab run -- env GUILAB_DIR=/run/user/$UID/gl-inner guilab server --show`), then drive it
+with `GUILAB_DIR=/run/user/$UID/gl-inner GUILAB_NO_AUTOSTART=1 guilab ...`.";
 
 #[derive(Parser)]
 #[command(name = "guilab", version, about = "Headless GUI sessions for humans and agents", disable_help_subcommand = true, after_help = AFTER_HELP)]
@@ -64,6 +70,9 @@ enum Cmd {
         /// Open the viewer window on this shell's Wayland display.
         #[arg(long)]
         show: bool,
+        /// Don't run a server: wait (up to 30 s) until one answers, e.g. one being restarted.
+        #[arg(long, conflicts_with_all = ["stop", "show"])]
+        wait: bool,
     },
     /// Open the viewer window (on this shell's Wayland display) to watch and use sessions.
     Show,
@@ -122,7 +131,7 @@ enum Cmd {
         #[arg(long)]
         scale: Option<f64>,
     },
-    /// Take the session's lock (needed for input). Prints a token to pass with -t.
+    /// Take the session's lock (needed for input; run `work` first). Prints a token to pass with -t.
     Lock {
         /// Take it from another holder (only if they're gone).
         #[arg(long)]
@@ -148,7 +157,8 @@ enum Cmd {
     },
     /// Wait for the human: blocks until a wake event (by default: a human message, your
     /// lock revoked, an app exiting on its own, the session about to expire), prints it with
-    /// everything else that happened since your last command, and exits.
+    /// everything else that happened since your last command, and exits. Returns at once if
+    /// a human message is waiting. Blocking needs `guilab done` first.
     #[command(after_help = POLL_HELP)]
     Poll {
         /// Give up after SECS (exit code 2), still printing what happened meanwhile.
@@ -164,12 +174,32 @@ enum Cmd {
         #[arg(long, value_name = "KINDS")]
         passive: Vec<String>,
     },
-    /// Show a message to the human (in the viewer's chat), optionally with images.
-    Say {
-        text: String,
+    /// Tell the human what you're working on (shown live in the viewer's chat). Needed
+    /// before `lock` and `input`; run it again to update. End with `guilab done`.
+    Work {
+        /// What you're doing now, e.g. "rebuilding after the layout fix".
+        status: String,
+        /// Also post this message to the human's chat.
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        /// Attach an image to the message (repeatable).
+        #[arg(long, value_name = "PATH")]
+        image: Vec<PathBuf>,
+    },
+    /// You're finished: post MSG (what you did, or what you need) to the human's chat,
+    /// release the lock, and show them you're waiting. Then wait with `guilab poll`.
+    Done {
+        /// Message for the human.
+        message: Option<String>,
         /// Attach an image (repeatable).
         #[arg(long, value_name = "PATH")]
         image: Vec<PathBuf>,
+    },
+    /// Replaced by `work -m` and `done`.
+    #[command(hide = true)]
+    Say {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Show the session's event log (oldest first): commands, human input and messages,
     /// apps, windows, lock changes.
@@ -198,13 +228,15 @@ enum Cmd {
 const POLL_HELP: &str = "\
 Event kinds: message revoke app_exit expiring (wake by default); motion button key scroll
 touch gesture window_map window_unmap title output app_start lock unlock share (reported
-with the next wake or command); command say screenshot (your own actions, only in `log`).
-Groups: input (motion button key scroll touch gesture), window, app, all.
+with the next wake or command); command agent_message work done screenshot (your own
+actions, only in `log`).
+Groups: input (motion button key scroll touch gesture), window, app, agent, all.
 An app ended by `guilab kill` doesn't wake you.
 
-Every guilab command also reports, on stderr, what happened since your previous command,
-so you see what the human did. Clients without a token share one \"last seen\" position per
-session; with -t TOKEN each lock holder has its own.";
+Human messages stay unread until a poll prints them; other commands only say one is
+waiting. A poll that hands you a message marks you working (\"read your message\"), so end
+with `guilab done`. Every guilab command also reports, on stderr, what else happened since
+your previous command. Each git worktree has its own \"last seen\" position per session.";
 
 #[derive(Subcommand)]
 enum DebugOp {
@@ -304,9 +336,10 @@ fn main() {
 fn real_main(cli: Cli) -> Result<(), String> {
     let fmt = guilab_proto::text::Fmt { tz: tz_offset() };
     let cmd = match cli.cmd {
-        Cmd::Server { stop: false, idle_exit, show } => {
+        Cmd::Server { wait: true, .. } => return client::wait_server(),
+        Cmd::Server { stop: false, idle_exit, show, .. } => {
             let show = show.then(guilab_proto::own_wayland_socket).transpose()?;
-            return client::run_server(idle_exit, show);
+            return client::run_server(idle_exit, show, build_id::build_id());
         }
         Cmd::Show => Command::Show { display: guilab_proto::own_wayland_socket()? },
         Cmd::Hide => Command::Hide,
@@ -336,7 +369,13 @@ fn real_main(cli: Cli) -> Result<(), String> {
             tiers.check()?;
             Command::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }
         }
-        Cmd::Say { text, image } => Command::Say { text, images: image.into_iter().map(abs).collect() },
+        Cmd::Work { status, message, image } => Command::Work { status, message, images: image.into_iter().map(abs).collect() },
+        Cmd::Done { message, image } => Command::Done { message, images: image.into_iter().map(abs).collect() },
+        Cmd::Say { .. } => {
+            return Err("`guilab say` is gone. While you keep working: guilab work \"what you're doing\" -m \"MESSAGE\". \
+                        When you're finished: guilab done \"MESSAGE\" (then wait with guilab poll)"
+                .into());
+        }
         Cmd::Log { since, after, kind, last } => {
             guilab_proto::events::expand_kinds(&kind)?;
             Command::Log { after, since: since.map(|s| parse_since(&s, fmt.tz)).transpose()?, kinds: kind, last }
@@ -387,17 +426,10 @@ fn real_main(cli: Cli) -> Result<(), String> {
     }
     // Events go to stderr, so stdout stays parseable (`$(guilab screenshot)`).
     if let Some(d) = &reply.events {
-        if cli.json {
-            eprintln!("{}", serde_json::to_string(d).unwrap_or_default());
-        } else if let Some(b) = format::events_block(&fmt, d) {
-            eprintln!("{b}");
-        }
+        print_events(d, &fmt, cli.json);
     }
     if !reply.ok {
         return Err(reply.error.unwrap_or_else(|| "unknown error".into()));
-    }
-    if let Command::Kill { .. } = &cmd {
-        wait_killed(&mut c, &target, &reply, &fmt, cli.json);
     }
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&reply.data).unwrap_or_default());
@@ -406,26 +438,11 @@ fn real_main(cli: Cli) -> Result<(), String> {
     format::print(&cmd, reply.data, &fmt)
 }
 
-/// `kill` returns once the apps have exited (up to 3 s: the server SIGKILLs after 2),
-/// so `guilab kill && guilab run -- CMD` doesn't race a single-instance app's old copy.
-fn wait_killed(c: &mut client::Conn, target: &guilab_proto::Target, reply: &guilab_proto::Response, fmt: &guilab_proto::text::Fmt, json: bool) {
-    use guilab_proto::{ProcInfo, ProcState};
-    let Some(killed) = serde_json::from_value::<Vec<ProcInfo>>(reply.data.clone()).ok() else { return };
-    let ids: Vec<u32> = killed.iter().map(|p| p.id).collect();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while !ids.is_empty() && std::time::Instant::now() < deadline {
-        let Ok(r) = c.request(target.clone(), Command::Ps) else { return };
-        if let Some(d) = &r.events {
-            if json {
-                eprintln!("{}", serde_json::to_string(d).unwrap_or_default());
-            } else if let Some(b) = format::events_block(fmt, d) {
-                eprintln!("{b}");
-            }
-        }
-        let Some(ps) = serde_json::from_value::<Vec<ProcInfo>>(r.data).ok() else { return };
-        if !ps.iter().any(|p| ids.contains(&p.id) && matches!(p.state, ProcState::Running)) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+/// Events attached to a reply, on stderr.
+fn print_events(d: &guilab_proto::Delivery, fmt: &guilab_proto::text::Fmt, json: bool) {
+    if json {
+        eprintln!("{}", serde_json::to_string(d).unwrap_or_default());
+    } else if let Some(b) = format::events_block(fmt, d) {
+        eprintln!("{b}");
     }
 }

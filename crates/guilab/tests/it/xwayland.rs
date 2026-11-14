@@ -146,6 +146,7 @@ fn x11_parallel_sessions_and_cleanup() {
     assert!(x_files(&a).iter().all(|f| Path::new(f).exists()));
 
     // Input reaches only its session's app.
+    lab.run(&["-S", "a", "work", "testing input"]);
     let t = lab.json(&["-S", "a", "lock"])["token"].as_str().unwrap().to_string();
     let (ex, ey) = center(&la, "entry", 1.0);
     lab.run(&["-S", "a", "-t", &t, "input", "move", &ex, &ey, "click", "type", "only a"]);

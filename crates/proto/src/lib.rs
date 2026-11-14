@@ -22,8 +22,19 @@ pub mod viz;
 pub use events::{Annotation, Delivery, Event, EventData, Tier, Tiers};
 pub use input::{Action, Button};
 
-/// `$XDG_RUNTIME_DIR/guilab`.
+/// Protocol version. Bump it whenever a change to [`Request`] or the reply types would make
+/// an older server or CLI misread the other; mismatches then fail with "restart the server".
+pub const PROTO: u32 = 2;
+
+/// Env var naming the server's directory (control socket, sessions), overriding
+/// `$XDG_RUNTIME_DIR/guilab`: to run a second server, e.g. guilab nested in a guilab session.
+pub const DIR_VAR: &str = "GUILAB_DIR";
+
+/// The server's directory: `$GUILAB_DIR`, else `$XDG_RUNTIME_DIR/guilab`.
 pub fn runtime_dir() -> io::Result<PathBuf> {
+    if let Some(d) = std::env::var_os(DIR_VAR).filter(|d| !d.is_empty()) {
+        return std::path::absolute(d);
+    }
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) if !d.is_empty() => Ok(Path::new(&d).join("guilab")),
         _ => Err(io::Error::other("XDG_RUNTIME_DIR is not set")),
@@ -68,6 +79,9 @@ pub struct Target {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
+    /// The client's [`PROTO`]; 0 = an old client that didn't send one.
+    #[serde(default)]
+    pub proto: u32,
     #[serde(default)]
     pub target: Target,
     #[serde(flatten)]
@@ -160,9 +174,23 @@ pub enum Command {
         #[serde(default)]
         last: usize,
     },
-    /// Agent -> human message (for the viewer's feed). Images are copied into the session dir.
-    /// Reply: null.
-    Say { text: String, images: Vec<PathBuf> },
+    /// The agent is working on `status`; `message` (with images, copied into the session
+    /// dir) is posted to the viewer's feed. Reply: null.
+    Work {
+        status: String,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        images: Vec<PathBuf>,
+    },
+    /// The agent is done and waits for the human: posts `message`, releases the lock.
+    /// Reply: [`DoneInfo`].
+    Done {
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        images: Vec<PathBuf>,
+    },
     /// What the viewer does for the human (until it exists: `guilab debug`, for tests).
     Human { op: HumanOp },
 }
@@ -212,7 +240,8 @@ impl Command {
         let opt = |name: &str, v: Option<String>| v.map(|v| format!(" {name} {v}")).unwrap_or_default();
         Some(match self {
             Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => return None,
-            Command::Poll { .. } | Command::Log { .. } | Command::Say { .. } | Command::Human { .. } => return None,
+            Command::Poll { .. } | Command::Log { .. } | Command::Human { .. } => return None,
+            Command::Work { .. } | Command::Done { .. } => return None,
             Command::End => "end".into(),
             Command::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
             Command::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
@@ -263,6 +292,12 @@ impl Response {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
+    /// The server's [`PROTO`] (0 = older than the field).
+    #[serde(default)]
+    pub proto: u32,
+    /// GNU build id of the server binary (hex), if it has one.
+    #[serde(default)]
+    pub build: String,
     pub pid: u32,
     pub exe: PathBuf,
     /// Seconds since the epoch of the server binary's mtime when it started.
@@ -302,6 +337,12 @@ pub struct SessionInfo {
     pub ttl: u64,
     /// Seconds until the session ends from idleness; None if no TTL.
     pub expires_in: Option<u64>,
+    /// The agent's status while it's working (`guilab work`); None while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working: Option<String>,
+    /// The session the viewer window shows (its current tab).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_viewer: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -381,6 +422,12 @@ pub struct ShotInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoneInfo {
+    /// `done` released the session's lock.
+    pub unlocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockInfo {
     pub session: String,
     pub token: String,
@@ -443,11 +490,12 @@ mod tests {
     #[test]
     fn request_roundtrip() {
         let req = Request {
+            proto: PROTO,
             target: Target { name: Some("a".into()), ..Default::default() },
             cmd: Command::Screenshot { path: None, settle: true, cursor: false },
         };
         let s = serde_json::to_string(&req).unwrap();
-        assert_eq!(s, r#"{"target":{"name":"a"},"cmd":"screenshot","path":null,"settle":true}"#);
+        assert_eq!(s, format!(r#"{{"proto":{PROTO},"target":{{"name":"a"}},"cmd":"screenshot","path":null,"settle":true}}"#));
         let back: Request = serde_json::from_str(&s).unwrap();
         assert!(matches!(back.cmd, Command::Screenshot { settle: true, .. }));
         // target may be omitted

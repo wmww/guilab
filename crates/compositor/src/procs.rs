@@ -38,7 +38,8 @@ pub struct Procs {
     next_id: u32,
 }
 
-/// Env vars never passed from the CLI to apps: they would point at the wrong display or bus.
+/// Env vars never passed from the CLI to apps: they would point at the wrong display, bus
+/// or guilab server (an app that is itself guilab must get its own).
 const DROP_ENV: &[&str] = &[
     "WAYLAND_DISPLAY",
     "WAYLAND_SOCKET",
@@ -50,6 +51,9 @@ const DROP_ENV: &[&str] = &[
     "HYPRLAND_INSTANCE_SIGNATURE",
     "XDG_SESSION_TYPE",
     "GUILAB_SESSION",
+    "GUILAB_TOKEN",
+    "GUILAB_DIR",
+    "GUILAB_NO_AUTOSTART",
     TAG_VAR,
 ];
 
