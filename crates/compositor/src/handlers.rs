@@ -45,7 +45,10 @@ use smithay::{
     },
 };
 
-use crate::session::{ClientState, Session};
+use crate::{
+    focus::KbFocus,
+    session::{ClientState, Session},
+};
 
 /// Stable per-session surface id, stored in each surface's data map (shown by `tree`).
 pub struct SurfaceId(pub u32);
@@ -60,7 +63,9 @@ impl CompositorHandler for Session {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        // Xwayland's client will carry XWaylandClientData here once Xwayland lands.
+        if let Some(x) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &x.compositor_state;
+        }
         &client.get_data::<ClientState>().expect("unknown client data").compositor_state
     }
 
@@ -138,8 +143,7 @@ impl DmabufHandler for Session {
 impl OutputHandler for Session {}
 
 impl SeatHandler for Session {
-    // Xwayland will need an enum target here (X11Surface does its own SetInputFocus).
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = KbFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -147,8 +151,8 @@ impl SeatHandler for Session {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&WlSurface>) {
-        let client = target.and_then(|s| self.dh.get_client(s.id()).ok());
+    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&KbFocus>) {
+        let client = target.and_then(|t| t.wl_surface()).and_then(|s| self.dh.get_client(s.id()).ok());
         set_data_device_focus(&self.dh, seat, client.clone());
         set_primary_focus(&self.dh, seat, client);
     }
@@ -163,18 +167,38 @@ impl smithay::input::tablet::TabletSeatHandler for Session {
     type ToolFocus = WlSurface;
 }
 
-impl SelectionHandler for Session {
+/// Owner of a compositor-side selection.
+#[derive(Clone)]
+pub enum SelData {
     /// Text set by `clip set`.
-    type SelectionUserData = Arc<str>;
+    Text(Arc<str>),
+    /// An X client (bridged by the X11Wm).
+    X11,
+}
 
+impl SelectionHandler for Session {
+    type SelectionUserData = SelData;
+
+    // A Wayland client set a selection: X clients get it through the X11Wm.
     fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        let mimes = source.map(|s| s.mime_types());
         if ty == SelectionTarget::Clipboard {
-            self.clip_mimes = source.map(|s| s.mime_types());
+            self.clip_mimes = mimes.clone();
         }
+        crate::xwayland::announce_selection(self, ty, mimes);
     }
 
-    fn send_selection(&mut self, _: SelectionTarget, _mime: String, fd: OwnedFd, _: Seat<Self>, text: &Arc<str>) {
-        crate::clipboard::send_text(text.clone(), fd);
+    fn send_selection(&mut self, ty: SelectionTarget, mime: String, fd: OwnedFd, _: Seat<Self>, data: &SelData) {
+        match data {
+            SelData::Text(t) => crate::clipboard::send_text(t.clone(), fd),
+            SelData::X11 => {
+                if let Some(wm) = self.xw.wm.as_mut()
+                    && let Err(e) = wm.send_selection(ty, mime, fd)
+                {
+                    tracing::debug!("X selection to Wayland: {e}");
+                }
+            }
+        }
     }
 }
 impl DataDeviceHandler for Session {

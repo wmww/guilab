@@ -5,6 +5,7 @@
 
 mod actions;
 mod clipboard;
+mod focus;
 mod frame;
 mod handlers;
 mod input;
@@ -14,6 +15,7 @@ pub mod render;
 mod session;
 mod shell;
 mod tree;
+mod xwayland;
 
 pub use actions::Chain;
 pub use clipboard::ClipRead;
@@ -21,5 +23,6 @@ pub use input::{InputEvent, InputSource};
 pub use frame::{SETTLE_QUIET, Settle};
 pub use handlers::{SurfaceId, surface_id};
 pub use render::Gpu;
+pub use xwayland::XState;
 pub use session::{ClientState, SOCKET_NAME, Session, SessionConfig, SharedGpu};
 pub use smithay::reexports::calloop;

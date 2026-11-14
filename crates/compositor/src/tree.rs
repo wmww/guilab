@@ -22,6 +22,17 @@ impl Session {
         for w in self.space.elements().rev() {
             let Some(surface) = w.wl_surface().map(|s| s.into_owned()) else { continue };
             let Some(geo) = self.space.element_geometry(w) else { continue };
+            if let Some(x) = w.x11_surface() {
+                let kind = if x.is_override_redirect() { NodeKind::X11Popup } else { NodeKind::X11 };
+                let mut node = self.node(&surface, kind, geo, scale);
+                let nonempty = |s: String| (!s.is_empty()).then_some(s);
+                node.title = nonempty(x.title());
+                node.class = nonempty(x.class());
+                node.xid = Some(x.window_id());
+                node.pid = x.pid();
+                out.push(node);
+                continue;
+            }
             let (app_id, title) = toplevel_ids(&surface);
             let mut node = self.node(&surface, NodeKind::Toplevel, geo, scale);
             node.app_id = app_id;
@@ -67,6 +78,8 @@ impl Session {
             app_id: None,
             title: None,
             pid,
+            xid: None,
+            class: None,
             x: x0,
             y: y0,
             width: x1 - x0,

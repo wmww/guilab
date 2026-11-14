@@ -11,6 +11,7 @@ use smithay::{
     backend::input::AxisSource,
     input::keyboard::{Keycode, Keysym},
     utils::{Logical, Point},
+    wayland::seat::WaylandFocus,
 };
 
 use crate::{
@@ -24,6 +25,8 @@ use crate::{
 const STEP: Duration = Duration::from_millis(16);
 /// Longest wait for a clicked-away menu to close before keys (see `popup_may_close`).
 const MENU_WAIT: Duration = Duration::from_millis(500);
+/// Pause between keymap swaps when typing into an X client (see `type_text`).
+const X_KEYMAP_GAP: Duration = Duration::from_millis(100);
 /// Logical pixels per wheel notch (libinput's convention).
 const WHEEL_PX: f64 = 15.0;
 
@@ -31,6 +34,8 @@ enum Step {
     Act(usize, Action),
     Ev(InputEvent),
     Sleep(Duration),
+    /// Switch the seat keymap (text, extra keysyms placed on spare keycodes).
+    Keymap(String, Vec<(Keysym, Keycode)>),
 }
 
 pub struct Chain {
@@ -91,6 +96,12 @@ impl Session {
             match step {
                 Step::Sleep(d) => return Ok(Some(d)),
                 Step::Ev(ev) => self.inject(ev, InputSource::Agent),
+                Step::Keymap(text, placed) => {
+                    let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
+                    kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
+                    tracing::debug!(?placed, "typing keymap");
+                    self.extra_keys = placed;
+                }
                 Step::Act(i, a) => {
                     // Keys right after a click that may close a menu: give the app a moment
                     // to close it, or the keys go to the menu.
@@ -117,7 +128,7 @@ impl Session {
         let scale = self.output.current_scale().fractional_scale();
         let p = self.pointer_location();
         let under = self.surface_under(p).and_then(|(s, _)| surface_id(&s));
-        let focus = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|s| surface_id(&s));
+        let focus = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| f.wl_surface().and_then(|s| surface_id(&s)));
         let r = |v: f64| (v * scale * 10.0).round() / 10.0;
         InputInfo { pointer: [r(p.x), r(p.y)], under, focus }
     }
@@ -155,26 +166,18 @@ impl Session {
         self.inject(InputEvent::Key { code, pressed }, InputSource::Agent);
     }
 
-    /// Taps a key with its modifiers (modifiers already held aren't touched).
-    fn tap(&mut self, k: &KeyPos) {
-        let held = self.seat.get_keyboard().map(|kb| kb.pressed_keys()).unwrap_or_default();
-        let mods: Vec<Keycode> = k.mods.iter().copied().filter(|m| !held.contains(m)).collect();
-        for m in &mods {
-            self.key(*m, true);
-        }
-        self.key(k.code, true);
-        self.key(k.code, false);
-        for m in mods.iter().rev() {
-            self.key(*m, false);
-        }
-    }
-
-    fn type_text(&mut self, text: &str) -> Result<(), String> {
+    /// Plans typing `text`. Characters missing from the keymap are typed through a seat
+    /// keymap extended with them (keys.rs). The extended keymap stays active afterwards
+    /// (its other keys are unchanged): swapping straight back raced with X clients, which
+    /// can read the swap-back before looking up the keys typed just before it.
+    fn type_text(&mut self, text: &str, later: &mut Vec<Step>) -> Result<(), String> {
         self.need_focus()?;
         let syms: Vec<Keysym> = text.chars().map(|c| char_keysym(c).ok_or_else(|| format!("can't type {c:?}"))).collect::<Result<_, _>>()?;
+        let x11 = self.seat.get_keyboard().and_then(|k| k.current_focus()).is_some_and(|f| f.is_x11());
         let spare = self.keymap.spare_count();
-        let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
-        let mut swapped = false;
+        let held = self.seat.get_keyboard().map(|kb| kb.pressed_keys()).unwrap_or_default();
+        let mut active = self.extra_keys.clone();
+        let mut swaps = 0;
         let mut i = 0;
         while i < syms.len() {
             // The longest run whose missing keysyms fit on the spare keycodes.
@@ -182,7 +185,7 @@ impl Session {
             let mut j = i;
             while j < syms.len() {
                 let s = syms[j];
-                if self.keymap.find(s).is_none() && !extra.contains(&s) {
+                if self.keymap.find_typable(s).is_none() && !extra.contains(&s) {
                     if extra.len() == spare {
                         break;
                     }
@@ -193,25 +196,30 @@ impl Session {
             if j == i {
                 return Err("no spare keycodes to type non-keyboard characters".into());
             }
-            let mut placed = Vec::new();
-            if !extra.is_empty() {
-                let (text, p) = self.keymap.extended(&extra).ok_or("couldn't build a keymap for these characters")?;
-                kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
-                placed = p;
-                swapped = true;
+            if !extra.iter().all(|s| active.iter().any(|(a, _)| a == s)) {
+                let (text, placed) = self.keymap.extended(&extra).ok_or("couldn't build a keymap for these characters")?;
+                // Let X clients look up the previous run's keys before its keymap goes.
+                if swaps > 0 && x11 {
+                    later.push(Step::Sleep(X_KEYMAP_GAP));
+                }
+                later.push(Step::Keymap(text, placed.clone()));
+                active = placed;
+                swaps += 1;
             }
             for s in &syms[i..j] {
-                let k = match self.keymap.find(*s) {
+                let k = match self.keymap.find_typable(*s) {
                     Some(k) => k.clone(),
-                    None => KeyPos { code: placed.iter().find(|(p, _)| p == s).unwrap().1, mods: Vec::new() },
+                    None => KeyPos { code: active.iter().find(|(p, _)| p == s).unwrap().1, mods: Vec::new() },
                 };
-                self.tap(&k);
+                // Modifiers already held aren't touched.
+                let mods: Vec<Keycode> = k.mods.iter().copied().filter(|m| !held.contains(m)).collect();
+                let ev = |code, pressed| Step::Ev(InputEvent::Key { code, pressed });
+                later.extend(mods.iter().map(|m| ev(*m, true)));
+                later.push(ev(k.code, true));
+                later.push(ev(k.code, false));
+                later.extend(mods.iter().rev().map(|m| ev(*m, false)));
             }
             i = j;
-        }
-        if swapped {
-            let base = self.keymap.text.clone();
-            kb.set_keymap_from_string(self, base).map_err(|e| format!("restoring keymap: {e}"))?;
         }
         Ok(())
     }
@@ -294,7 +302,7 @@ impl Session {
                     self.key(*code, false);
                 }
             }
-            Action::Type { text } => self.type_text(text)?,
+            Action::Type { text } => self.type_text(text, later)?,
             Action::TouchDown { id, x, y } => {
                 if self.held.touches.contains_key(id) {
                     return Err(format!("finger {id} is already down"));

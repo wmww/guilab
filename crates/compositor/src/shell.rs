@@ -1,5 +1,7 @@
 //! xdg-shell: window policy, popups (constraints + grabs from anvil), decorations.
 //!
+//! X windows follow the same policy (see xwayland.rs); focus and stacking here cover both.
+//!
 //! Policy: a parentless toplevel fills the output (tiled, maximized, activated) if no other
 //! tiled toplevel exists. Dialogs (with a parent) and later toplevels float, centered on the
 //! output. Placement is decided at the initial configure, since `set_parent` arrives after
@@ -29,7 +31,7 @@ use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
 };
 
-use crate::session::Session;
+use crate::{focus::KbFocus, session::Session, xwayland::is_or};
 
 /// Per-window policy state, in `Window::user_data()`.
 #[derive(Default)]
@@ -41,7 +43,7 @@ pub fn is_tiled(w: &Window) -> bool {
     w.user_data().get::<WindowState>().is_some_and(|s| s.tiled.get())
 }
 
-fn has_buffer(surface: &WlSurface) -> bool {
+pub(crate) fn has_buffer(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |s| s.buffer().is_some()).unwrap_or(false)
 }
 
@@ -115,7 +117,7 @@ impl Session {
             return;
         }
 
-        let mapped = self.space.elements().find(|w| w.wl_surface().as_deref() == Some(surface)).cloned();
+        let mapped = self.space.elements().find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface)).cloned();
         if let Some(w) = mapped {
             if !has_buffer(surface) {
                 // Client unmapped (null buffer): back to the initial state.
@@ -124,9 +126,7 @@ impl Session {
                 self.focus_top();
             } else if !is_tiled(&w) {
                 let loc = self.centered(&w);
-                if self.space.element_location(&w) != Some(loc) {
-                    self.space.map_element(w, loc, false);
-                }
+                self.move_window(&w, loc);
             }
             return;
         }
@@ -138,20 +138,45 @@ impl Session {
         }
     }
 
+    /// Moves a window without changing the stacking order (`map_element` raises).
+    /// An unmapped window is mapped on top.
+    pub(crate) fn move_window(&mut self, w: &Window, loc: Point<i32, Logical>) {
+        if self.space.element_location(w) == Some(loc) {
+            return;
+        }
+        let above: Vec<Window> = self.space.elements().skip_while(|e| *e != w).skip(1).cloned().collect();
+        self.space.map_element(w.clone(), loc, false);
+        for e in above {
+            self.space.raise_element(&e, false);
+        }
+    }
+
+    /// The window `w` is a dialog/transient of, if any.
+    pub(crate) fn parent_window(&self, w: &Window) -> Option<Window> {
+        if let Some(x) = w.x11_surface() {
+            return self.x_parent(x);
+        }
+        self.window_for_surface(&w.toplevel()?.parent()?)
+    }
+
     /// Raise, activate and give keyboard focus to `w`.
     pub fn focus_window(&mut self, w: &Window) {
+        if is_or(w) {
+            return;
+        }
         self.space.raise_element(w, true);
         // Floating windows stay above tiled ones (else they'd be hidden for good), and
         // dialogs above their parents.
         let order: Vec<Window> = self.space.elements().cloned().collect();
-        let parent_of = |c: &Window| c.toplevel().and_then(|t| t.parent());
         let descends = |c: &Window| {
-            let mut p = parent_of(c);
-            while let Some(s) = p {
-                if w.wl_surface().as_deref() == Some(&s) {
-                    return true;
+            let mut p = self.parent_window(c);
+            // Bounded: X transient-for chains can have cycles.
+            for _ in 0..32 {
+                match p {
+                    Some(pw) if &pw == w => return true,
+                    Some(pw) => p = self.parent_window(&pw),
+                    None => return false,
                 }
-                p = self.window_for_surface(&s).and_then(|x| parent_of(&x));
             }
             false
         };
@@ -159,6 +184,7 @@ impl Session {
         for c in above {
             self.space.raise_element(c, false);
         }
+        self.raise_or();
         self.last_configure = Instant::now();
         for e in self.space.elements() {
             if let Some(tl) = e.toplevel()
@@ -167,15 +193,16 @@ impl Session {
                 tl.send_pending_configure();
             }
         }
-        let surface = w.wl_surface().map(|s| s.into_owned());
+        self.x_sync_stacking(w);
         if let Some(kb) = self.seat.get_keyboard() {
-            kb.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+            kb.set_focus(self, KbFocus::of(w), SERIAL_COUNTER.next_serial());
         }
     }
 
     /// Focus the topmost window, if any.
     pub fn focus_top(&mut self) {
-        if let Some(w) = self.space.elements().last().cloned() {
+        let top = self.space.elements().rev().find(|w| !is_or(w)).cloned();
+        if let Some(w) = top {
             self.focus_window(&w);
         } else if let Some(kb) = self.seat.get_keyboard() {
             kb.set_focus(self, None, SERIAL_COUNTER.next_serial());
@@ -189,6 +216,10 @@ impl Session {
         self.last_configure = Instant::now();
         let windows: Vec<Window> = self.space.elements().chain(self.unmapped.iter()).cloned().collect();
         for w in windows {
+            if w.x11_surface().is_some_and(|x| !x.is_override_redirect()) && self.space.element_location(&w).is_some() {
+                self.x_place(&w);
+                continue;
+            }
             let Some(tl) = w.toplevel() else { continue };
             tl.with_pending_state(|s| {
                 s.bounds = Some(area.size);
@@ -201,7 +232,7 @@ impl Session {
             }
             if self.space.element_location(&w).is_some() {
                 let loc = if is_tiled(&w) { area.loc } else { self.centered(&w) };
-                self.space.map_element(w, loc, false);
+                self.move_window(&w, loc);
             }
         }
     }
@@ -272,7 +303,7 @@ impl XdgShellHandler for Session {
             return;
         };
         let Some(root) = root.wl_surface().map(|s| s.into_owned()) else { return };
-        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else { return };
+        let Ok(mut grab) = self.popups.grab_popup(KbFocus::Wl(root), kind, &seat, serial) else { return };
         if let Some(kb) = seat.get_keyboard() {
             if kb.is_grabbed() && !(kb.has_grab(serial) || kb.has_grab(grab.previous_serial().unwrap_or(serial))) {
                 grab.ungrab(PopupUngrabStrategy::All);

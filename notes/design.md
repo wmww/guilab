@@ -2,7 +2,7 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Plan steps 1-3 (skeleton, headless compositor, input and locking) are built; see `plan.md` for what's next and `code-map.md` for the code.
+Plan steps 1-4 (skeleton, headless compositor, input and locking, Xwayland) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
@@ -10,7 +10,7 @@ Plan steps 1-3 (skeleton, headless compositor, input and locking) are built; see
 - Reuse existing code for tricky logic (popup placement/constraints, Xwayland WM, grabs) rather than writing our own: smithay helpers first, then anvil (MIT), then cosmic-comp/niri.
 - **egui** for the viewer, drawn with the same renderer as the compositor so the app's frames are just textures.
 - GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer always needs GL (egui has no software renderer); Mesa llvmpipe covers GPU-less machines.
-- Details and verified APIs: `smithay.md` (core compositor), `host-and-xwayland.md` (Xwayland, viewer window, egui).
+- Details and verified APIs: `smithay.md` (core compositor), `viewer.md` (viewer window, egui).
 - Public repo. MIT by default; switching to GPL is fine if borrowing from cosmic-comp/niri needs it.
 
 ## Server
@@ -20,7 +20,9 @@ Plan steps 1-3 (skeleton, headless compositor, input and locking) are built; see
 - Sessions end after an idle TTL (default 30 minutes without commands targeting them; `new --ttl SECS`, 0 = never). Ending a session kills everything spawned in it, including double-forked daemons.
 - Each session has its own dir, which is also its apps' `XDG_RUNTIME_DIR` (Wayland socket, app logs, screenshots). Apps don't see the user's D-Bus, audio or compositor.
 - **Multiple sessions per server.** Each session has its own Wayland display socket, output, seat, Xwayland and app processes. Clients see only their own session. Each session is its own smithay state type (`Display<Session>`, handlers on `Session`), not one shared state with lookups, and has its own calloop loop (data = the session) nested in the server's loop, which is what X11Wm and smithay's per-display getters need.
-- **Window policy:** the first toplevel fills the output (tiled states, no decorations). Dialogs (with a parent) and later toplevels float centered on top. X override-redirect windows (menus, tooltips) go in their own position.
+- **Window policy:** the first toplevel fills the output (tiled states, no decorations). Dialogs (with a parent) and later toplevels float centered on top. X windows follow the same rule (transient, modal or non-Normal window types float); X override-redirect windows (menus, tooltips) go where X puts them, above everything.
+- **Xwayland** (smithay's X11Wm) is opt-in per session: `new -x` starts it and replies once it's ready; apps then get `DISPLAY`. Not on by default: it costs startup time and memory, and with `DISPLAY` set, apps that support both may silently pick X11 when the agent meant to test Wayland. Not lazy (spawn on first X connection): smithay's `XWayland::spawn` owns the listening sockets, so that would mean reimplementing it. Display numbers come from `:100` up (smithay alone stops at `:32` machine-wide).
+- X apps render at scale 1 and are scaled up on HiDPI outputs (blurry, but the right size; core-X apps ignore XSETTINGS DPI anyway). X clients may always read the clipboard (no focus check): sessions are disposable and scripts like `xsel` have no window.
 - Key repeat is off by default, so a held key in an agent input chain doesn't auto-repeat.
 - Floating windows always stack above tiled ones, and dialogs above their parents; clicking a window focuses and raises it within that order.
 - **Session resolution:** `--session NAME` > `$GUILAB_SESSION` > the session created from the cwd's git worktree root > the only session, if there's exactly one. A new session defaults to the worktree's name. Goal: one agent per worktree, each with its own session, and no naming needed.
@@ -84,7 +86,7 @@ Drawing flow:
   - apps: `run -- CMD...`, `kill [ID]`, `ps` (with exit status). No restart or watch mode: `build && guilab kill && guilab run ...` is enough.
   - control: `lock`, `unlock`, `output [-s WxH] [--scale S]` (no args: show)
   - input chain: `input ACTION...`, grammar and docs in `guilab input --help` (`proto/src/input.rs` `HELP`): `move X Y [MS]` (MS = glide), `down/up [BTN]`, `click [BTN] [N]`, `scroll DX DY` (wheel notches), `scrollpx DX DY` (touchpad), `key CHORD`, `keydown/keyup KEY`, `type TEXT`, `touch down|move|up ID [X Y] [MS]`, `tap X Y`, `pinch SCALE [DEG]`, `swipe DX DY [FINGERS]`, `on ID|output` (surface-local pixels from the surface's `tree` origin; events still go to whatever is on top), `sleep MS`. Chains are parsed and key names checked before anything runs. Sleeps don't block the server; a session's chains run one at a time in order. Replies with the pointer position, surface under it and keyboard focus.
-  - inspect: `tree` (toplevels topmost first, with popups and subsurfaces nested, X windows: IDs, app_id/title, pid, geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir), `log`
+  - inspect: `tree` (toplevels topmost first, with popups and subsurfaces nested; X windows as `x11` / `x11_popup` with xid, class, title, `_NET_WM_PID`; all with ids and pixel geometry), `screenshot [-o PATH] [--surface ID] [--cursor] [--no-settle]` (default path: a new file in the session dir), `log`
   - clipboard: `clip get`, `clip set [TEXT]` (stdin without TEXT); text only, clipboard selection only (no primary)
   - messaging: `poll [--follow]`, `say TEXT [--image PATH]`
 

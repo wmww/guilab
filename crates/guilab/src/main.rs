@@ -21,7 +21,8 @@ Quick start:
   guilab end                       end the session and kill its apps
 
 Coordinates everywhere are screenshot pixels, at any scale. Sessions end after 30 idle
-minutes. Apps see only their session (own Wayland display and XDG_RUNTIME_DIR).
+minutes. Apps see only their session (own Wayland display and XDG_RUNTIME_DIR). For
+X11-only apps, start the session with `new -x` (Xwayland; apps get DISPLAY).
 
 Locking: `input` needs the lock, so one agent drives a session at a time and the human
 watching isn't fighting it. While a session is locked, run, kill, output changes, clip set
@@ -66,6 +67,9 @@ enum Cmd {
         /// End after this many idle seconds (0 = never; default 1800).
         #[arg(long)]
         ttl: Option<u64>,
+        /// Also run Xwayland, for X11-only apps (they get DISPLAY). Prefer Wayland otherwise.
+        #[arg(short = 'x', long)]
+        xwayland: bool,
     },
     /// End the session, killing everything in it.
     End,
@@ -147,7 +151,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
     let cmd = match cli.cmd {
         Cmd::Server { stop: false, idle_exit } => return client::run_server(idle_exit),
         Cmd::Server { stop: true, .. } => return client::stop_server(),
-        Cmd::New { name, size, scale, ttl } => Command::New { name, size, scale, ttl },
+        Cmd::New { name, size, scale, ttl, xwayland } => Command::New { name, size, scale, ttl, xwayland },
         Cmd::End => Command::End,
         Cmd::Ls => Command::Ls,
         Cmd::Run { cmd } => Command::Run {

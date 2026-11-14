@@ -66,6 +66,9 @@ pub enum Command {
         scale: Option<f64>,
         /// Idle seconds before the session ends; 0 = never.
         ttl: Option<u64>,
+        /// Start Xwayland (the reply comes once it's ready).
+        #[serde(default)]
+        xwayland: bool,
     },
     /// Reply: [`SessionInfo`] of the ended session.
     End,
@@ -159,6 +162,9 @@ pub struct SessionInfo {
     pub name: String,
     /// Absolute path of the session's Wayland socket (usable as `WAYLAND_DISPLAY`).
     pub wayland_display: PathBuf,
+    /// `DISPLAY` of the session's Xwayland (`:N`), if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_display: Option<String>,
     /// Per-session `XDG_RUNTIME_DIR` given to apps; also holds app logs and screenshots.
     pub dir: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +211,10 @@ pub enum NodeKind {
     Toplevel,
     Popup,
     Subsurface,
+    /// Managed X11 window (via Xwayland).
+    X11,
+    /// Override-redirect X11 window: menu, tooltip, drag icon.
+    X11Popup,
 }
 
 /// A surface in the session. Geometry is in output pixels (screenshot coordinates).
@@ -217,9 +227,15 @@ pub struct TreeNode {
     pub app_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Pid of the owning client, if known.
+    /// Pid of the owning client, if known (X11: `_NET_WM_PID`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// X11 window id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xid: Option<u32>,
+    /// X11 `WM_CLASS` class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
     pub x: i32,
     pub y: i32,
     pub width: i32,

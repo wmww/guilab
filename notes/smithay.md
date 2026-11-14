@@ -4,7 +4,7 @@ What's already built (rendering, sessions, xdg-shell, frame clock, settle) is de
 
 ## Reference code and licenses
 - smithay and anvil are MIT; copy freely. niri and cosmic-comp are GPL-3.0: ideas only.
-- anvil (`smithay/anvil/src/`): `input_handler.rs` (input), `cursor.rs` + `drawing.rs` (cursor render element for `screenshot --cursor`), `focus.rs` (enum focus targets, needed for Xwayland), `shell/x11.rs` (X11 WM glue), `state.rs` (`pre_repaint`/`post_repaint` if fifo/commit-timing get enabled).
+- anvil (`smithay/anvil/src/`): `input_handler.rs` (input), `cursor.rs` + `drawing.rs` (cursor render element for `screenshot --cursor`), `state.rs` (`pre_repaint`/`post_repaint` if fifo/commit-timing get enabled).
 - Since 2026-04 one `delegate_dispatch2!(Session);` replaces all `delegate_*!` macros; older examples use the old ones.
 - Smithay's `AI.md` asks contributors not to submit LLM-written code. Matters only if we upstream fixes.
 
@@ -17,5 +17,4 @@ Enabled per session (`Session::new`): compositor v6, subcompositor, shm, xdg-she
 Built (`input.rs`, `actions.rs`, `keys.rs`; behaviours in `code-map.md`). Still useful:
 - `InputTime::now()` for synthetic events. Gestures: `ptr.gesture_{swipe,pinch,hold}_*`, then `ptr.frame`. Touch focus is fixed at `down`.
 - Text-input-v3 only routes to an IME; smithay has no compositor-side `commit_string`, so it isn't a typing path.
-- Typing via keymap swap is racy for Xwayland clients (MappingNotify vs key events); check in step 4.
 - Not built: hold gestures, `screenshot --cursor` (anvil `cursor.rs` + `drawing.rs`), DnD icon `wl_surface.offset` (icon is drawn at the pointer).

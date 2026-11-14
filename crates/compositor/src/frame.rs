@@ -19,7 +19,7 @@ use smithay::{
 
 use crate::{
     session::Session,
-    shell::has_pending_configure,
+    shell::{has_buffer, has_pending_configure},
 };
 
 /// No commits for this long counts as "done drawing" (a blinking cursor still passes).
@@ -84,11 +84,20 @@ impl Session {
 
     pub fn settle_state(&self, now: Instant) -> Settle {
         let mapped: Vec<_> = self.space.elements().filter_map(|w| w.toplevel()).collect();
-        if mapped.is_empty() {
+        // A configured toplevel without a buffer is still drawing its first frame; so is
+        // a mapped X window without one.
+        let mut drawing = self.unmapped.iter().any(|w| w.toplevel().is_some_and(|t| t.is_initial_configure_sent()));
+        let mut x_windows = 0;
+        for x in self.space.elements().filter_map(|w| w.x11_surface()).filter(|x| !x.is_override_redirect()) {
+            if x.wl_surface().is_some_and(|s| has_buffer(&s)) {
+                x_windows += 1;
+            } else {
+                drawing = true;
+            }
+        }
+        if mapped.is_empty() && x_windows == 0 {
             return Settle::NoWindow;
         }
-        // A configured toplevel without a buffer is still drawing its first frame.
-        let drawing = self.unmapped.iter().any(|w| w.toplevel().is_some_and(|t| t.is_initial_configure_sent()));
         let acked = now.duration_since(self.last_configure) >= CONFIGURE_WAIT
             || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
         // Input counts as activity: the app hasn't necessarily reacted (committed) yet.

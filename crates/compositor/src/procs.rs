@@ -76,6 +76,9 @@ impl Session {
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out);
+        if let Some(d) = self.x_display() {
+            cmd.env("DISPLAY", d);
+        }
         // Qt and SDL default to X11 without these; don't override an explicit choice.
         if !env.iter().any(|(k, _)| k == "QT_QPA_PLATFORM") {
             cmd.env("QT_QPA_PLATFORM", "wayland");

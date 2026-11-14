@@ -9,7 +9,7 @@ pub fn alive(pid: u64) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "))
 }
 
-fn pgrep(pattern: &str) -> Vec<u64> {
+pub fn pgrep(pattern: &str) -> Vec<u64> {
     let out = std::process::Command::new("pgrep").args(["-f", pattern]).output().unwrap();
     String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect()
 }

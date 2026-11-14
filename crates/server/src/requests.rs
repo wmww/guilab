@@ -6,13 +6,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle};
+use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig, Settle, XState};
 use guilab_proto::{Command, LockInfo, Request, Response, SessionInfo, ShotInfo, Target};
 
-use crate::{ClipWait, DEFAULT_TTL, InputJob, Server, ShotWait, Slot, send};
+use crate::{ClipWait, DEFAULT_TTL, InputJob, NewWait, Server, ShotWait, Slot, send};
 
 /// How long the app owning the clipboard gets to send it.
 const CLIP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long `new -x` waits for Xwayland.
+const XWAYLAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Settle wait caps: once a window is up, and while waiting for the first window.
 const SETTLE_CAP: Duration = Duration::from_secs(3);
@@ -25,6 +28,7 @@ pub(crate) fn session_info(name: &str, slot: &Slot) -> SessionInfo {
     SessionInfo {
         name: name.to_string(),
         wayland_display: s.socket_path(),
+        x_display: s.x_display(),
         dir: s.dir.clone(),
         root: slot.root.clone(),
         output: s.output_info(),
@@ -85,8 +89,14 @@ impl Server {
                 Response::ok(())
             }
             Command::Ls => Response::ok(self.sessions.iter().map(|(n, s)| session_info(n, s)).collect::<Vec<_>>()),
-            Command::New { name, size, scale, ttl } => match self.new_session(&target, name, size, scale, ttl) {
-                Ok(info) => Response::ok(info),
+            Command::New { name, size, scale, ttl, xwayland } => match self.new_session(&target, name, size, scale, ttl, xwayland) {
+                // Answered once Xwayland is up (see check_news).
+                Ok(name) if xwayland => {
+                    let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
+                    self.news.push(NewWait { session: name, stream, deadline: Instant::now() + XWAYLAND_TIMEOUT });
+                    return None;
+                }
+                Ok(name) => Response::ok(session_info(&name, &self.sessions[&name])),
                 Err(e) => Response::err(e),
             },
             cmd => {
@@ -187,7 +197,8 @@ impl Server {
         size: Option<[u32; 2]>,
         scale: Option<f64>,
         ttl: Option<u64>,
-    ) -> Result<SessionInfo, String> {
+        xwayland: bool,
+    ) -> Result<String, String> {
         let root = target.root.clone();
         let name = match name {
             Some(n) if !valid_name(&n) => return Err(format!("bad session name '{n}': use letters, digits, - _ .")),
@@ -224,10 +235,44 @@ impl Server {
         let dir = self.sessions_dir.join(&name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        let cfg = SessionConfig { name: name.clone(), dir: dir.clone(), size: (w as i32, h as i32), scale };
-        let (session, el) = Session::new(cfg, self.gpu.clone()).map_err(|e| format!("{e:#}"))?;
+        let cfg = SessionConfig { name: name.clone(), dir: dir.clone(), size: (w as i32, h as i32), scale, xwayland };
+        let (session, el) = match Session::new(cfg, self.gpu.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(format!("{e:#}"));
+            }
+        };
         self.insert_session(session, el, root, ttl.unwrap_or(DEFAULT_TTL)).map_err(|e| format!("{e:#}"))?;
-        Ok(session_info(&name, &self.sessions[&name]))
+        Ok(name)
+    }
+
+    /// Answers `new -x` once the session's Xwayland is ready; ends the session if it failed.
+    pub(crate) fn check_news(&mut self, now: Instant) {
+        let mut i = 0;
+        while i < self.news.len() {
+            let n = &self.news[i];
+            let state = self.sessions.get(&n.session).map(|s| s.session.x_state().clone());
+            let failed = match state {
+                None => Some(format!("session {} ended", n.session)),
+                Some(XState::Ready(_)) => None,
+                Some(XState::Failed(e)) => Some(e),
+                Some(_) if now >= n.deadline => Some("Xwayland didn't start in time".into()),
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = self.news.remove(i);
+            let resp = match failed {
+                None => Response::ok(session_info(&n.session, &self.sessions[&n.session])),
+                Some(e) => {
+                    self.end_session(&n.session);
+                    Response::err(e)
+                }
+            };
+            send(&n.stream, &resp);
+        }
     }
 
     /// Answers screenshot requests whose session settled or whose wait ran out.

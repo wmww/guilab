@@ -6,6 +6,7 @@ mod apps;
 mod cleanup;
 mod input;
 mod sessions;
+mod xwayland;
 
 use std::{
     path::{Path, PathBuf},

@@ -129,7 +129,9 @@ impl Keymap {
                     })
                     .min_by_key(Vec::len);
                 if let Some(mods) = best {
-                    let better = by_sym.get(&sym.raw()).is_none_or(|old| old.mods.len() > mods.len());
+                    // Prefer keys X can use (codes <= 255), then fewer modifiers.
+                    let rank = |code: u32, mods: usize| (code > 255, mods);
+                    let better = by_sym.get(&sym.raw()).is_none_or(|old| rank(old.code.raw(), old.mods.len()) > rank(code, mods.len()));
                     if better {
                         by_sym.insert(sym.raw(), KeyPos { code: kc, mods });
                     }
@@ -145,6 +147,12 @@ impl Keymap {
 
     pub fn find(&self, sym: Keysym) -> Option<&KeyPos> {
         self.by_sym.get(&sym.raw())
+    }
+
+    /// Like `find`, but only keys X clients can receive (codes <= 255), for typing text.
+    /// The `us` keymap has e.g. EuroSign only on code 443.
+    pub fn find_typable(&self, sym: Keysym) -> Option<&KeyPos> {
+        self.find(sym).filter(|k| k.code.raw() <= 255)
     }
 
     /// Resolves a key name to a key, or explains why not.

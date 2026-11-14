@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::{Lab, app, have, nodes};
 
-fn has_python_module(check: &str) -> bool {
+pub fn has_python_module(check: &str) -> bool {
     let ok = std::process::Command::new("python3").args(["-c", check]).status().is_ok_and(|s| s.success());
     if !ok {
         eprintln!("skipping: python3 can't run `{check}`");
@@ -13,7 +13,7 @@ fn has_python_module(check: &str) -> bool {
     ok
 }
 
-fn gtk4() -> bool {
+pub fn gtk4() -> bool {
     has_python_module("import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk")
 }
 
@@ -22,7 +22,7 @@ fn qt6() -> bool {
 }
 
 /// An app's log, read until it contains `needle` (panics after `secs`).
-fn wait_log(log: &str, needle: &str, secs: u64) -> String {
+pub fn wait_log(log: &str, needle: &str, secs: u64) -> String {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         let s = std::fs::read_to_string(log).unwrap_or_default();
@@ -35,7 +35,7 @@ fn wait_log(log: &str, needle: &str, secs: u64) -> String {
 }
 
 /// Center of a widget from the app's `pos NAME X Y W H` line, in output pixels.
-fn center(log: &str, name: &str, scale: f64) -> (String, String) {
+pub fn center(log: &str, name: &str, scale: f64) -> (String, String) {
     let line = log.lines().find(|l| l.starts_with(&format!("pos {name} "))).unwrap_or_else(|| panic!("no pos for {name}"));
     let v: Vec<f64> = line.split(' ').skip(2).map(|x| x.parse().unwrap()).collect();
     let f = |c: f64| format!("{}", (c * scale).round());
@@ -43,12 +43,12 @@ fn center(log: &str, name: &str, scale: f64) -> (String, String) {
 }
 
 impl Lab {
-    fn lock(&self) -> String {
+    pub fn lock(&self) -> String {
         self.json(&["lock"])["token"].as_str().unwrap().to_string()
     }
 
     /// `guilab -t TOKEN input ACTIONS...`
-    fn input(&self, token: &str, actions: &[&str]) -> serde_json::Value {
+    pub fn input(&self, token: &str, actions: &[&str]) -> serde_json::Value {
         let mut a = vec!["-t", token, "input"];
         a.extend_from_slice(actions);
         self.json(&a)

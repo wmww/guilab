@@ -13,6 +13,9 @@ fn output(o: &OutputInfo) -> String {
 
 fn session(s: &SessionInfo) -> String {
     let mut line = format!("{} {} apps={} windows={}", s.name, output(&s.output), s.apps, s.windows);
+    if let Some(d) = &s.x_display {
+        line += &format!(" DISPLAY={d}");
+    }
     if let Some(e) = s.expires_in {
         line += &format!(" expires={}m", e.div_ceil(60));
     }
@@ -37,9 +40,17 @@ fn tree(nodes: &[TreeNode], depth: usize, out: &mut String) {
             NodeKind::Toplevel => "toplevel",
             NodeKind::Popup => "popup",
             NodeKind::Subsurface => "subsurface",
+            NodeKind::X11 => "x11",
+            NodeKind::X11Popup => "x11_popup",
         };
         out.push_str(&"  ".repeat(depth));
         out.push_str(&format!("{} {kind} {},{} {}x{}", n.id, n.x, n.y, n.width, n.height));
+        if let Some(x) = n.xid {
+            out.push_str(&format!(" xid={x:#x}"));
+        }
+        if let Some(c) = &n.class {
+            out.push_str(&format!(" class={c}"));
+        }
         if let Some(a) = &n.app_id {
             out.push_str(&format!(" app_id={a}"));
         }

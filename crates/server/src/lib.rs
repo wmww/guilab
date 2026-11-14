@@ -73,6 +73,13 @@ pub(crate) struct ShotWait {
     pub start: Instant,
 }
 
+/// A `new -x` waiting for Xwayland to start.
+pub(crate) struct NewWait {
+    pub session: String,
+    pub stream: UnixStream,
+    pub deadline: Instant,
+}
+
 /// Processes of an ended session, to SIGKILL after the grace period and reap.
 struct Grave {
     children: Vec<Child>,
@@ -88,6 +95,7 @@ pub struct Server {
     pub(crate) waiters: Vec<ShotWait>,
     pub(crate) inputs: Vec<InputJob>,
     pub(crate) clips: Vec<ClipWait>,
+    pub(crate) news: Vec<NewWait>,
     graveyard: Vec<Grave>,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) info: ServerInfo,
@@ -164,6 +172,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         waiters: Vec::new(),
         inputs: Vec::new(),
         clips: Vec::new(),
+        news: Vec::new(),
         graveyard: Vec::new(),
         sessions_dir,
         info,
@@ -247,6 +256,7 @@ impl Server {
         }
         self.run_inputs(now);
         self.check_clips(now);
+        self.check_news(now);
         self.check_waiters(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {

@@ -22,7 +22,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::session::Session;
+use crate::{focus::KbFocus, session::Session, xwayland::is_or};
 
 /// Who sent an event (for the event log and lock policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +86,11 @@ impl Session {
         if grabbed {
             return;
         }
-        let Some(w) = self.window_under(pos) else { return };
+        // Override-redirect X windows (menus) never take focus.
+        let Some(w) = self.window_under(pos).filter(|w| !is_or(w)) else { return };
         let focused = self.seat.get_keyboard().and_then(|k| k.current_focus());
-        let top = self.space.elements().last() == Some(&w);
-        if !top || focused.as_ref() != w.wl_surface().as_deref() {
+        let top = self.space.elements().rev().find(|w| !is_or(w)) == Some(&w);
+        if !top || focused != KbFocus::of(&w) {
             self.focus_window(&w);
         }
     }
@@ -125,13 +126,13 @@ impl Session {
         }
         self.popups.cleanup();
         let focus = kb.current_focus();
-        if focus.as_ref().is_some_and(|f| self.popups.find_popup(f).is_some()) {
+        if focus.and_then(|f| f.wl_surface().map(|s| s.into_owned())).is_some_and(|f| self.popups.find_popup(&f).is_some()) {
             return true;
         }
         // The grab ended: it accepts any focus now, and removes itself.
         self.click_in_grab = false;
-        let w = self.window_under(self.pointer_location()).or_else(|| self.space.elements().last().cloned());
-        kb.set_focus(self, w.and_then(|w| w.wl_surface().map(|s| s.into_owned())), SERIAL_COUNTER.next_serial());
+        let w = self.window_under(self.pointer_location()).filter(|w| !is_or(w)).or_else(|| self.space.elements().rev().find(|w| !is_or(w)).cloned());
+        kb.set_focus(self, w.and_then(|w| KbFocus::of(&w)), SERIAL_COUNTER.next_serial());
         false
     }
 

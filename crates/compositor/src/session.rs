@@ -20,7 +20,7 @@ use anyhow::Context;
 use smithay::{
     backend::renderer::element::RenderElementStates,
     desktop::{PopupManager, Space, Window},
-    input::{Seat, SeatState, keyboard::{XkbConfig, xkb}, pointer::CursorImageStatus},
+    input::{Seat, SeatState, keyboard::{Keycode, Keysym, XkbConfig, xkb}, pointer::CursorImageStatus},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{EventLoop, Interest, LoopHandle, Mode as CMode, PostAction, generic::Generic},
@@ -55,6 +55,7 @@ use smithay::{
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
         xdg_foreign::XdgForeignState,
+        xwayland_shell::XWaylandShellState,
     },
 };
 
@@ -63,6 +64,7 @@ use crate::{
     keys::Keymap,
     procs::Procs,
     render::{Frame, Gpu},
+    xwayland::Xw,
 };
 
 pub type SharedGpu = Rc<RefCell<Gpu>>;
@@ -74,6 +76,8 @@ pub struct SessionConfig {
     /// Output size in pixels.
     pub size: (i32, i32),
     pub scale: f64,
+    /// Start Xwayland (see xwayland.rs).
+    pub xwayland: bool,
 }
 
 #[derive(Default)]
@@ -113,6 +117,7 @@ pub struct Session {
     pub xdg_foreign_state: XdgForeignState,
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub presentation_state: PresentationState,
+    pub xwayland_shell_state: XWaylandShellState,
 
     pub seat: Seat<Session>,
     pub cursor_status: CursorImageStatus,
@@ -138,6 +143,8 @@ pub struct Session {
     pub last_input: Instant,
 
     pub keymap: Keymap,
+    /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
+    pub extra_keys: Vec<(Keysym, Keycode)>,
     pub held: Held,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
@@ -145,6 +152,7 @@ pub struct Session {
     pub clip_mimes: Option<Vec<String>>,
     /// Icon surface of an active drag.
     pub dnd_icon: Option<WlSurface>,
+    pub xw: Xw,
 }
 
 impl Session {
@@ -206,6 +214,7 @@ impl Session {
         TextInputManagerState::new::<Self>(&dh);
         IdleInhibitManagerState::new::<Self>(&dh);
         FixesState::new::<Self>(&dh);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
 
         let mut dmabuf_state = DmabufState::new();
         let mut dmabuf_global = None;
@@ -274,6 +283,7 @@ impl Session {
             xdg_foreign_state,
             keyboard_shortcuts_inhibit_state,
             presentation_state,
+            xwayland_shell_state,
             seat,
             cursor_status: CursorImageStatus::default_named(),
             output,
@@ -290,15 +300,20 @@ impl Session {
             last_configure: now,
             last_input: now,
             keymap,
+            extra_keys: Vec::new(),
             held: Held::default(),
             click_in_grab: false,
             clip_mimes: None,
             dnd_icon: None,
+            xw: Xw::default(),
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();
         let text = session.keymap.text.clone();
         kb.set_keymap_from_string(&mut session, text).context("setting keymap")?;
+        if cfg.xwayland {
+            session.start_xwayland()?;
+        }
         Ok((session, event_loop))
     }
 
@@ -317,8 +332,9 @@ impl Session {
         }
     }
 
+    /// Mapped windows (not counting X menus and tooltips).
     pub fn windows(&self) -> usize {
-        self.space.elements().count()
+        self.space.elements().filter(|w| !crate::xwayland::is_or(w)).count()
     }
 
     /// Frame interval of the output.
