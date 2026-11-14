@@ -154,7 +154,7 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             let s: ShotInfo = get(v)?;
             let mut line = format!("{} {}x{}", s.path.display(), s.width, s.height);
             if s.animating {
-                line += " (the app keeps animating; taken once input had time to land)";
+                line += " (the app keeps animating: this is one frame of it)";
             } else if !s.settled {
                 line += " (not settled: still drawing when the wait ran out)";
             }

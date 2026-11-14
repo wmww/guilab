@@ -57,7 +57,7 @@ The human runs `guilab show` to open the viewer. There they can watch, use the a
 
 - `guilab work "STATUS"` marks you working, with STATUS shown live (e.g. "rebuilding after the toolbar fix"). Run it again to update it. Add `-m "MSG"` (and `--image PATH`) to also post a message while you keep working. `lock` and `input` need it.
 - `guilab done "MSG"` posts MSG (what you did, or what you need from them), releases your lock and shows the human you're waiting for them. Then `guilab poll`. It refuses while a human message is unread. Not needed before `end`.
-- `guilab poll --timeout 600` waits for the next message, revoke, app exit or session expiry. It prints that plus everything else that happened. It exits 2 on timeout. A blocking poll needs `done` first. `poll --follow` prints one line per event, for tools that watch output (allowed while working).
+- `guilab poll --timeout 600` waits for the next message, revoke, app exit or session expiry. It prints that plus everything else that happened. It exits 2 on timeout; then just poll again. Keep the timeout below your shell tool's own time limit. A blocking poll needs `done` first. `poll --follow` prints one line per event, for tools that watch output (allowed while working).
 - When a human message arrives, every command says so on stderr (`[guilab: a human message waiting since ...; read it now: guilab poll]`), until you run `guilab poll`, which then returns it at once, even while working. Only `poll` shows messages. Reading one marks you working ("read your message"), so finish with `done`.
 - Messages may come with image files. Shapes (boxes, arrows) are drawn into the image. Text notes are **not** in the image; they arrive as lines like `red text annotation on image 1 at pixel 640,410: "too big"`. Match each note to the nearby mark of the same color.
 - Short messages refer to what the human is looking at: read the human input lines printed with them (where they clicked, where the pointer rests) and take a screenshot.
@@ -81,7 +81,7 @@ guilab screenshot                   # the outer session shows the inner viewer
 ## Troubleshooting
 
 - No window? Check the app's log (`guilab ps` gives the path), then `guilab tree`.
-- Screenshots wait up to 3 s for drawing to stop, and for the window of an app you just `run`. Apps that keep animating (spinners, video) are detected after about a second and shot once your input had 0.3 s to land ("the app keeps animating"). Use `--no-settle` when you don't need to wait.
+- Screenshots wait up to 3 s for drawing to stop, and for the window of an app you just `run`. Apps that keep animating (spinners, video) are detected after about a second and shot once your input had 0.3 s to land ("the app keeps animating: this is one frame of it"). Use `--no-settle` when you don't need to wait.
 - X11-only apps need a session started with `new -x`. Prefer Wayland otherwise; with `DISPLAY` set, some apps quietly pick X.
 - Each session has its own private D-Bus session bus with no services on it (no portals, notifications or accessibility). Apps logging that such a service "was not provided" is expected.
 - "incompatible build" errors: the server is from another guilab version. `guilab server --stop` (ends all sessions), then retry.
