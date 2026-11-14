@@ -1,8 +1,6 @@
-# UI code pass: what's left
+# UI: what's left after the foundations pass
 
-The toolkit and theming parts are done (`guilab-kit`: theme tokens light/dark following the XDG portal, View > Appearance, menus with keyboard navigation, shared widgets; the viewer, editor and chat use it). Left:
-- Go over the new editor and chat UI per design.md's "UI quality" rule (states, keyboard, focus, spacing, cursors, tooltips); build them on kit widgets and tokens only.
+The flat look, theme tokens (`notes/design.md` "Theming") and widget states are done; `ui_shots` (viewer-ui example) shows every state in both themes at 1x/2x. Left for the user's design pass or a decision:
 - Keyboard access to the menu bar itself (e.g. F10): keys go to the session app unless egui has focus, so there's no free key yet. Decide whether to reserve one.
-- Tooltips are egui's (placed below the pointer). Restyle if they look off next to the new UI.
-- Verify by using the viewer through guilab itself (screenshots + input), both themes.
-- Flat look (design.md): remove every thin border and separator line (kit widgets, egui's default widget/panel strokes in the theme, viewer, editor, chat); keep outlines only for state. Check by screenshot in both themes.
+- Without the image outline, a dark app on the dark view background has a faint edge (the resize handles mark it when there's room). Fine by the flat rule; revisit if it confuses.
+- The View menu's zoom/size/scale steppers are stock egui buttons and drag values (themed, flat). A kit stepper/segmented control would look more native.

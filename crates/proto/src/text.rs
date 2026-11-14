@@ -506,7 +506,7 @@ impl Fmt {
                     });
                 }
                 if let Some(id) = screen {
-                    v.push(format!("  (their screen as they sent it, with their pointer: image {id}; see it: guilab image {id})"));
+                    v.push(format!("  (their screen as they wrote it, with their pointer: image {id}; see it: guilab image {id})"));
                 }
                 if let Some(id) = viewing {
                     v.push(format!("  (they had image {id} open in their editor, not attached; see it: guilab image {id})"));

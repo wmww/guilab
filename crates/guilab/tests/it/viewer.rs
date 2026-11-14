@@ -479,7 +479,7 @@ fn screen_from_typing_start() {
     v.run(&["kill"]);
     h.input(&t, &["key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
-    let id = out.split("their screen as they sent it, with their pointer: image ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("{out}{err}")).to_string();
+    let id = out.split("their screen as they wrote it, with their pointer: image ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("{out}{err}")).to_string();
     let png = format!("{}/screen.png", v.rt.display());
     v.run(&["image", &id, "-o", &png]);
     // The app was still there (an empty session is black).
