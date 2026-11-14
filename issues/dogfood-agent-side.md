@@ -34,3 +34,9 @@ I grepped `guilab log` of the inner session for "message" and found nothing, the
 
 ## egui TextEdit: custom `.frame()` silently drops `.margin()`
 (Code-side, but bit me in viewer work.) In egui 0.35 a TextEdit with `.frame(...)` ignores `.margin(...)`; padding must go in the frame's `inner_margin`. The chat box looked misaligned and clicks on its lower half missed it until fixed.
+
+## Nested testing can't show fixes that need both levels updated
+The outer guilab runs the old build for the whole session (it must stay up). Key repeat needed changes in both the session (repeat info sent to clients) and the viewer. The inner viewer is a client of the old outer session, which tells it "repeat off", so the fix can't be seen in the inner viewer's text boxes while dogfooding. Similar for anything where the outer's behavior as a compositor matters. A way to swap the outer server binary without losing sessions doesn't exist; worth knowing up front.
+
+## The viewer can lose a click that arrives with the pointer's first move
+`debug input move X Y click` on a viewer that had never seen the pointer didn't focus the chat box; `move X Y sleep 100 click` did. Humans rarely do that, but scripted viewer tests must add a pause.
