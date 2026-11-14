@@ -82,9 +82,12 @@ pub enum SlotId {
 pub enum SlotState {
     #[default]
     Shown,
-    /// An empty slot: its image is elsewhere (open in an editor, or flying). `outlined`
-    /// marks the slot whose image is open.
+    /// An empty slot: its image is elsewhere (open in an editor). `outlined` marks the
+    /// slot whose image is open.
     Away { outlined: bool },
+    /// Like `Away`, and the host draws something over it (an image flying to or from it):
+    /// no remove badge, which fades back in after.
+    Covered { outlined: bool },
 }
 
 /// What the host supplies for attachments.
@@ -109,6 +112,8 @@ pub enum ChatEvent<K> {
     /// Enter or the send button, with text or pending attachments. The text box is already
     /// cleared; the host takes `pending` itself.
     Send { text: String },
+    /// The message box went from empty to having text: the human started a message.
+    Started,
     /// Undo/redo pressed in the text box while it has nothing of its own to undo (no edits
     /// since it got focus), so it's the host's (e.g. bring back a removed attachment).
     Undo,
@@ -164,6 +169,9 @@ pub struct Chat<K: Clone + Eq + Hash> {
     pub me_name: String,
     pub hint: String,
     pub empty_hint: String,
+    /// The send button's tooltips: enabled, and with nothing to send.
+    pub send_hint: String,
+    pub send_empty_hint: String,
     status: Option<Status>,
     draft: String,
     feed: feed::FeedState,
@@ -181,6 +189,8 @@ impl<K: Clone + Eq + Hash> Chat<K> {
             me_name: "You".into(),
             hint: "Message".into(),
             empty_hint: "No messages yet".into(),
+            send_hint: "Send (Enter)".into(),
+            send_empty_hint: "Type a message to send".into(),
             status: None,
             draft: String::new(),
             feed: feed::FeedState::default(),

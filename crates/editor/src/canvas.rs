@@ -277,6 +277,8 @@ impl Editor {
         };
         let (events, now, mods) = ui.input(|i| (i.events.clone(), i.time, i.modifiers));
         let keys_free = !ctx.egui_wants_keyboard_input();
+        // Double clicks as every other egui widget counts them.
+        let (double_secs, double_dist) = ctx.options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
 
         // Keys (not while a text field has focus).
         if takes && keys_free && self.typing.is_none() && (doc.is_some() || self.busy()) {
@@ -294,7 +296,7 @@ impl Editor {
                 out.edits.push(e);
             }
             if doc.is_some() && matches!(self.gesture, Gesture::Idle) {
-                for tool in Tool::ALL {
+                for tool in self.tools.clone() {
                     if let Some(k) = tool.key()
                         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, k))
                     {
@@ -314,7 +316,7 @@ impl Editor {
                     Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => {
                         self.pointer = Some(*pos);
                         if owns(*pos) {
-                            let double = self.last_press.is_some_and(|(t0, p0)| now - t0 < 0.35 && (p0 - *pos).length() < 6.0);
+                            let double = self.last_press.is_some_and(|(t0, p0)| now - t0 < double_secs && (p0 - *pos).length() < double_dist);
                             self.last_press = if double { None } else { Some((now, *pos)) };
                             self.press(*pos, double, doc.as_deref_mut(), canvas, scale, xf, region, &t, &mut out);
                         }
@@ -646,7 +648,7 @@ impl Editor {
         let mut pc = Ctx { xf, assets, textures: &mut self.textures, ctx: &ctx, fonts_ready, ppp, keep_filter: false };
         let fonts = self.fonts.clone();
         let mut prims = Vec::new();
-        let halo = Some((t.colors.hover_outline, 3.0));
+        let halo = Some((t.colors.hover_outline, t.size.hover_halo));
         // The element a drag would move, or is moving, gets a glow.
         let lit = match (&self.gesture, self.hover) {
             (Gesture::Move { key, .. } | Gesture::Reshape { key, .. }, _) => Some(*key),
@@ -694,7 +696,7 @@ impl Editor {
             }
         }
         for r in outlines {
-            paint::outline(&mut shapes, r, t.colors.hover_outline, 2.0);
+            paint::outline(&mut shapes, r, t.colors.hover_outline, t.size.hover_outline_w, t.radius.small);
         }
         painter.extend(shapes);
 

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use egui::{Color32, Context, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, TextureId, Ui, pos2, vec2};
+use guilab_kit::paint_close_badge;
 use guilab_kit::anim::{Fader, INSTANT};
 use guilab_kit::Theme;
 
@@ -16,12 +17,14 @@ struct Anim {
     shown: Fader,
     outline: Fader,
     hover: Fader,
+    /// The remove badge's opacity: gone while covered, fading back after.
+    badge: Fader,
     seen: u64,
 }
 
 impl Anim {
     fn moving(&self, now: f64) -> bool {
-        self.shown.moving(now) || self.outline.moving(now) || self.hover.moving(now)
+        self.shown.moving(now) || self.outline.moving(now) || self.hover.moving(now) || self.badge.moving(now)
     }
 }
 
@@ -93,8 +96,9 @@ impl<K: Clone + Eq + Hash> Slots<K> {
         let now = self.now;
         let ctx = ui.ctx().clone();
         let a = self.anims.entry((slot, key.clone())).or_insert_with(|| {
-            let (shown, outlined) = split(state.unwrap_or_default());
-            Anim { shown: Fader::at(shown), outline: Fader::at(outlined), hover: Fader::at(0.0), seen: 0 }
+            let st = state.unwrap_or_default();
+            let (shown, outlined) = split(st);
+            Anim { shown: Fader::at(shown), outline: Fader::at(outlined), hover: Fader::at(0.0), badge: Fader::at(badge_on(st)), seen: 0 }
         });
         a.seen = self.frame;
         if let Some(st) = state {
@@ -104,6 +108,12 @@ impl<K: Clone + Eq + Hash> Slots<K> {
                 a.shown.set(shown, now, if fade { t.motion.fade } else { INSTANT });
             }
             a.outline.set(outlined, now, t.motion.fade);
+            // Gone at once when covered, fading in after (no pop at a landing).
+            if badge_on(st) == 0.0 {
+                a.badge = Fader::at(0.0);
+            } else {
+                a.badge.set(1.0, now, t.motion.fade);
+            }
         }
 
         // Hover grow: to `hover_grow` of full size, faint slots too (they grow more).
@@ -122,9 +132,9 @@ impl<K: Clone + Eq + Hash> Slots<K> {
             let resp = ui.interact(if lifted_before { drawn } else { scale(look.rest, look.appear) }, id, Sense::click());
             // The badge is painted with the slot below; registered after the thumbnail, its
             // input wins over the thumbnail's.
-            let badge_hover = look.removable && {
+            let badge_hover = look.removable && a.badge.to > 0.5 && {
                 let r = Rect::from_center_size(badge_center(t, drawn), egui::Vec2::splat(t.size.close_badge));
-                let b = ui.interact(r, id.with("x"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Remove");
+                let b = ui.interact(r, id.with("x"), Sense::click()).on_hover_text("Remove");
                 if b.clicked() {
                     out.events.push(ChatEvent::Remove { key: key.clone() });
                 }
@@ -159,14 +169,15 @@ impl<K: Clone + Eq + Hash> Slots<K> {
         let shown = a.shown.value(now);
         let outline = a.outline.value(now);
         if lifted {
-            let shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: c.shadow.gamma_multiply(h) };
+            let mut shadow = t.shadow.lifted;
+            shadow.color = shadow.color.gamma_multiply(h);
             painter.add(shadow.as_shape(drawn, radius));
         }
         let mut used = None;
         if shown < 1.0 {
             let k = (1.0 - shown) * opacity;
             let hot = ui.rect_contains_pointer(drawn) && !look.dying;
-            painter.rect(drawn, radius, c.slot_empty.gamma_multiply(k), Stroke::new(t.size.line, if hot { c.outline_focus } else { c.outline }.gamma_multiply(k)), StrokeKind::Inside);
+            painter.rect_filled(drawn, radius, if hot { c.slot_empty_hover } else { c.slot_empty }.gamma_multiply(k));
         }
         if shown > 0.0 {
             let k = shown * opacity;
@@ -179,14 +190,16 @@ impl<K: Clone + Eq + Hash> Slots<K> {
                 }
                 None => placeholder(&painter, t, drawn, k),
             }
-            let line = if h > 0.5 { c.outline_focus } else { c.outline };
-            painter.rect_stroke(drawn, radius, Stroke::new(t.size.line, line.gamma_multiply(k)), StrokeKind::Inside);
         }
         if outline > 0.0 {
-            painter.rect_stroke(drawn, radius + 1.0, Stroke::new(2.0, c.slot_open.gamma_multiply(outline * look.appear.min(1.0))), StrokeKind::Outside);
+            let ring = t.size.ring;
+            painter.rect_stroke(drawn, radius + ring / 2.0, Stroke::new(ring, c.slot_open.gamma_multiply(outline * look.appear.min(1.0))), StrokeKind::Outside);
         }
-        if look.removable && !look.dying && look.appear > 0.5 {
-            badge(&painter, t, badge_center(t, drawn), ui.rect_contains_pointer(Rect::from_center_size(badge_center(t, drawn), egui::Vec2::splat(t.size.close_badge))));
+        let badge = a.badge.value(now);
+        if look.removable && !look.dying && look.appear > 0.5 && badge > 0.0 {
+            let center = badge_center(t, drawn);
+            let hot = ui.rect_contains_pointer(Rect::from_center_size(center, egui::Vec2::splat(t.size.close_badge)));
+            paint_close_badge(&painter, t, center, hot, badge);
         }
         used
     }
@@ -201,7 +214,12 @@ fn split(s: SlotState) -> (f32, f32) {
     match s {
         SlotState::Shown => (1.0, 0.0),
         SlotState::Away { outlined } => (0.0, outlined as u8 as f32),
+        SlotState::Covered { outlined } => (0.0, outlined as u8 as f32),
     }
+}
+
+fn badge_on(s: SlotState) -> f32 {
+    if matches!(s, SlotState::Covered { .. }) { 0.0 } else { 1.0 }
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -243,16 +261,6 @@ fn badge_center(t: &Theme, r: Rect) -> Pos2 {
     r.right_top() + vec2(-off, off)
 }
 
-fn badge(p: &Painter, t: &Theme, center: Pos2, hot: bool) {
-    let c = &t.colors;
-    let r = t.size.close_badge / 2.0;
-    p.circle_filled(center, r, if hot { c.danger } else { c.badge });
-    let s = Stroke::new(1.5, c.badge_fg);
-    let h = r * 0.44;
-    p.line_segment([center + vec2(-h, -h), center + vec2(h, h)], s);
-    p.line_segment([center + vec2(h, -h), center + vec2(-h, h)], s);
-}
-
 /// No texture: the empty fill with a small picture glyph.
 fn placeholder(p: &Painter, t: &Theme, r: Rect, k: f32) {
     let c = &t.colors;
@@ -261,7 +269,7 @@ fn placeholder(p: &Painter, t: &Theme, r: Rect, k: f32) {
     let g = Rect::from_center_size(r.center(), vec2(s * 1.25, s));
     let col = c.weak.gamma_multiply(k);
     let stroke = Stroke::new(t.size.icon_stroke, col);
-    p.rect_stroke(g, 2.0, stroke, StrokeKind::Middle);
+    p.rect_stroke(g, t.radius.small, stroke, StrokeKind::Middle);
     p.circle_filled(g.min + vec2(g.width() * 0.7, g.height() * 0.3), s * 0.09, col);
     p.line_segment([g.left_bottom() + vec2(s * 0.12, -s * 0.12), g.min + vec2(g.width() * 0.4, g.height() * 0.45)], stroke);
     p.line_segment([g.min + vec2(g.width() * 0.4, g.height() * 0.45), g.right_bottom() + vec2(-s * 0.12, -s * 0.12)], stroke);

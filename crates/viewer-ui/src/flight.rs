@@ -1,6 +1,7 @@
 //! Motion that links the editor and the chat: flights ("whooshes") of an image between the
-//! main view and its chat slot, the live app fading out under an incoming one, and the glow that leads
-//! from the open image's slot to the image.
+//! main view and its chat slot, the live app fading out under an incoming one, an open image
+//! fading out of the view when it's removed or sent, and the glow that leads from the open
+//! image's slot to the image.
 //!
 //! [`Flights`] is the state; the workspace starts flights when the open image changes and
 //! the UI resolves both ends every frame (this frame's slot rects and the view), so a
@@ -9,7 +10,7 @@
 
 use egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Vec2, epaint::Vertex, pos2, vec2};
 use guilab_chat::SlotId;
-use guilab_image::IRect;
+use guilab_image::{Doc, IRect};
 use guilab_kit::anim::{Fader, INSTANT, Motion, lerp_rect};
 use guilab_kit::theme::Motions;
 
@@ -98,8 +99,17 @@ struct GlowSrc {
     held: u8,
 }
 
+/// An open image leaving the view without a slot to fly to (removed, or sent): it fades out
+/// where it was, the live app fading in under it. Holds its own copy of the image.
+pub struct Fade {
+    place: Place,
+    doc: Doc,
+    t0: f64,
+}
+
 pub struct Flights {
     list: Vec<Flight>,
+    fades: Vec<Fade>,
     whoosh: Motion,
     fade: Motion,
     /// The live app's opacity in the view: it fades out as an image flies in; it's back at
@@ -113,7 +123,7 @@ pub struct Flights {
 
 impl Default for Flights {
     fn default() -> Self {
-        Flights { list: Vec::new(), whoosh: INSTANT, fade: INSTANT, live: Fader::at(1.0), glow: Fader::at(0.0), glow_src: None, frame: 0, now: 0.0 }
+        Flights { list: Vec::new(), fades: Vec::new(), whoosh: INSTANT, fade: INSTANT, live: Fader::at(1.0), glow: Fader::at(0.0), glow_src: None, frame: 0, now: 0.0 }
     }
 }
 
@@ -126,6 +136,8 @@ impl Flights {
         self.fade = m.fade;
         let secs = self.whoosh.secs as f64;
         self.list.retain(|f| now - f.t0 < secs);
+        let fade = self.fade.secs as f64;
+        self.fades.retain(|f| now - f.t0 < fade);
     }
 
     pub fn now(&self) -> f64 {
@@ -138,7 +150,7 @@ impl Flights {
 
     /// Something is still moving (keep repainting).
     pub fn moving(&self) -> bool {
-        !self.list.is_empty() || self.live.moving(self.now) || self.glow.moving(self.now) || self.glow_src.is_some_and(|g| g.slide.is_some())
+        !self.list.is_empty() || !self.fades.is_empty() || self.live.moving(self.now) || self.glow.moving(self.now) || self.glow_src.is_some_and(|g| g.slide.is_some())
     }
 
     fn take(&mut self, att: Att) -> Option<Flight> {
@@ -177,6 +189,30 @@ impl Flights {
         self.live = Fader::at(live as u8 as f32);
     }
 
+    /// The open image (`doc`, shown at `place` last frame) leaves the view with no slot to
+    /// go to: it fades out there while the live app fades back in. Without a place, the live
+    /// app is just back.
+    pub fn fade_out(&mut self, place: Option<Place>, doc: Doc) {
+        self.glow = Fader::at(0.0);
+        match place {
+            Some(place) => {
+                self.fades.push(Fade { place, doc, t0: self.now });
+                self.live = Fader::at(0.0);
+                self.live.set(1.0, self.now, self.fade);
+            }
+            None => self.quiet(true),
+        }
+    }
+
+    /// Fading images: where, the image, and their opacity now.
+    pub fn fades(&self) -> impl Iterator<Item = (&Place, &Doc, f32)> {
+        let m = self.fade;
+        self.fades.iter().map(move |f| {
+            let t = if m.secs <= 0.0 { 1.0 } else { m.easing.apply(((self.now - f.t0) / m.secs as f64) as f32) };
+            (&f.place, &f.doc, 1.0 - t)
+        })
+    }
+
     /// Lands every flight into the view now (a press there: the human wants to work on it).
     pub fn land_out(&mut self) {
         self.list.retain(|f| f.dir == Dir::Home);
@@ -185,6 +221,7 @@ impl Flights {
     /// Lands everything (the window went away).
     pub fn finish(&mut self) {
         self.list.clear();
+        self.fades.clear();
         self.live = Fader::at(self.live.to);
         self.glow_src = None;
     }
@@ -273,12 +310,49 @@ impl Flights {
 
 // ---- Painting ----
 
-/// The image's drop shadow in flight: strongest mid-air.
-pub fn shadow(p: &Painter, clip: Rect, t: f32, color: Color32, radius: f32) {
-    let k = (t * std::f32::consts::PI).sin().max(0.0);
+/// The image's drop shadow in flight (`shadow` at full strength): strongest mid-air.
+pub fn shadow(p: &Painter, clip: Rect, t: f32, mut shadow: egui::Shadow, alpha: f32, radius: f32) {
+    let k = (t * std::f32::consts::PI).sin().max(0.0) * alpha;
     if k > 0.01 {
-        let s = egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: color.gamma_multiply(k) };
-        p.add(s.as_shape(clip, radius));
+        shadow.color = shadow.color.gamma_multiply(k);
+        p.add(shadow.as_shape(clip, radius));
+    }
+}
+
+/// How round a flying image's corners are, 0..1: like its slot's thumbnail (1) near the
+/// slot end, square (0) for most of the way and in the view.
+pub fn roundness(dir: Dir, t: f32) -> f32 {
+    let near_slot = match dir {
+        Dir::Out => 1.0 - t,
+        Dir::Home => t,
+    };
+    ((near_slot - 0.7) / 0.3).clamp(0.0, 1.0)
+}
+
+/// Rounds the corners of `r` by `radius`, painting what's outside the rounding in `bg` (the
+/// slot's background): a flight clips square, but lands in a rounded thumbnail.
+pub fn round_corners(p: &Painter, r: Rect, radius: f32, bg: Color32) {
+    let radius = radius.min(r.width() / 2.0).min(r.height() / 2.0);
+    if radius < 0.25 {
+        return;
+    }
+    let n = 6;
+    for (corner, center, a0) in [
+        (r.left_top(), r.left_top() + vec2(radius, radius), 180.0f32),
+        (r.right_top(), r.right_top() + vec2(-radius, radius), 270.0),
+        (r.right_bottom(), r.right_bottom() + vec2(-radius, -radius), 0.0),
+        (r.left_bottom(), r.left_bottom() + vec2(radius, -radius), 90.0),
+    ] {
+        let mut m = Mesh::default();
+        m.vertices.push(vtx(corner, bg));
+        for i in 0..=n {
+            let a = (a0 + 90.0 * i as f32 / n as f32).to_radians();
+            m.vertices.push(vtx(center + vec2(a.cos(), a.sin()) * radius, bg));
+        }
+        for i in 1..=n as u32 {
+            m.indices.extend([0, i, i + 1]);
+        }
+        p.add(Shape::mesh(m));
     }
 }
 
@@ -371,8 +445,7 @@ fn narrow(a: [Pos2; 2], b: [Pos2; 2], n: Vec2) -> (Pos2, Pos2) {
 }
 
 /// A slot scrolled out of `area`: a soft band of light along `area`'s edge, where it is.
-pub fn edge_glow(p: &Painter, slot: Rect, area: Rect, color: Color32) {
-    let (depth, feather) = (18.0, 24.0);
+pub fn edge_glow(p: &Painter, slot: Rect, area: Rect, color: Color32, depth: f32, feather: f32) {
     // The edge it's off on: a point on the edge line, the direction along it and inward.
     let (edge, along, inward, span) = if slot.max.y <= area.min.y {
         (area.min.y, vec2(1.0, 0.0), vec2(0.0, 1.0), (slot.min.x, slot.max.x))
@@ -421,6 +494,13 @@ impl Workspace {
     /// Paints the flights and the glow over everything. Call after the view ran (both ends
     /// are this frame's).
     pub fn paint_motion(&mut self, ctx: &egui::Context, store: &Store, t: &Theme) {
+        // An image leaving the view without a slot: over the view (below menus and toasts).
+        let under = ctx.layer_painter(LayerId::new(Order::Middle, self.id.with("fades")));
+        for (place, doc, alpha) in self.flights.fades() {
+            let mut p = under.with_clip_rect(place.clip);
+            p.set_opacity(alpha);
+            self.editor.paint_body(&p, doc.body(), doc, place.canvas);
+        }
         // Above the chat's hovered (lifted) slots, which are on Foreground.
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, self.id.with("flights")));
         let glow = t.colors.glow;
@@ -431,7 +511,7 @@ impl Workspace {
         // Light first, the images over it.
         for (f, place, _) in &places {
             if let Some(r) = self.slot_rect(f.slot, f.att) {
-                self.light(&painter, r, f.slot, place.clip, glow);
+                self.light(&painter, t, r, f.slot, place.clip, glow);
             }
         }
         if let Some((slot, att)) = open
@@ -441,10 +521,10 @@ impl Workspace {
             // (A slot growing in starts as a point.)
             let src = self.slot_rect(slot, att).filter(|r| self.slot_area(slot).contains(r.center()));
             match self.flights.glow_source(src.map(|r| ((slot, att), r))) {
-                Some((src, alpha)) => self.beam_from(&painter, src, view.clip, glow.gamma_multiply(alpha)),
+                Some((src, alpha)) => self.beam_from(&painter, t, src, view.clip, glow.gamma_multiply(alpha)),
                 None => {
                     if let Some(r) = self.slot_rect(slot, att) {
-                        edge_glow(&painter, r, self.slot_area(slot), glow);
+                        edge_glow(&painter, r, self.slot_area(slot), glow, t.size.glow_edge, t.size.glow_feather);
                     }
                 }
             }
@@ -452,7 +532,8 @@ impl Workspace {
             self.flights.glow_source(None);
         }
         for (f, place, t_) in places {
-            shadow(&painter, place.clip, t_, t.colors.shadow.gamma_multiply(place.alpha), t.radius.thumb);
+            let round = roundness(f.dir, t_) * t.radius.thumb;
+            shadow(&painter, place.clip, t_, t.shadow.flight, place.alpha, round);
             let mut clipped = painter.with_clip_rect(place.clip);
             clipped.set_opacity(place.alpha);
             match f.att {
@@ -467,6 +548,12 @@ impl Workspace {
                     }
                 }
             }
+            // Near the slot, its rounded corners (in the slot's background).
+            let bg = match f.slot {
+                SlotId::Composer => t.colors.field,
+                SlotId::Feed { .. } => t.colors.panel,
+            };
+            round_corners(&clipped, place.clip, round, bg);
         }
         if self.flights.moving() {
             ctx.request_repaint();
@@ -475,19 +562,19 @@ impl Workspace {
 
     /// The beam from a slot (drawn at `slot_rect`) to an image showing at `dst`, and the
     /// slot's halo; for a slot scrolled out of view, its edge of the feed glows instead.
-    fn light(&self, p: &Painter, slot_rect: Rect, slot: SlotId, dst: Rect, color: Color32) {
+    fn light(&self, p: &Painter, t: &Theme, slot_rect: Rect, slot: SlotId, dst: Rect, color: Color32) {
         let area = self.slot_area(slot);
         if area.contains(slot_rect.center()) {
-            self.beam_from(p, slot_rect.intersect(area), dst, color);
+            self.beam_from(p, t, slot_rect.intersect(area), dst, color);
         } else {
-            edge_glow(p, slot_rect, area, color);
+            edge_glow(p, slot_rect, area, color, t.size.glow_edge, t.size.glow_feather);
         }
     }
 
     /// The beam from `src` (on screen) to `dst`, and a halo around `src` within the chat.
-    fn beam_from(&self, p: &Painter, src: Rect, dst: Rect, color: Color32) {
+    fn beam_from(&self, p: &Painter, t: &Theme, src: Rect, dst: Rect, color: Color32) {
         beam(p, src, dst, color);
-        halo(&p.with_clip_rect(self.feed_clip.union(self.composer)), src, 10.0, color.gamma_multiply(0.7));
+        halo(&p.with_clip_rect(self.feed_clip.union(self.composer)), src, t.size.glow_halo, color.gamma_multiply(0.7));
     }
 }
 

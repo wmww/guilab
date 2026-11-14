@@ -145,6 +145,9 @@ pub enum Action {
     /// The human sent a message: text, the drafts to freeze into images (with their
     /// parents), and the past image open in the editor, if any (context, not attached).
     Message { session: String, text: String, drafts: Vec<(Option<ImageId>, Doc)>, viewing: Option<ImageId> },
+    /// The human started typing a message: capture what they see now (the screen a message
+    /// without images refers to), for the message they send.
+    Typing { session: String },
     /// Change the session's output (View menu, handles, "Lock size to window").
     Resize { session: String, size: Option<(u32, u32)>, scale: Option<f64> },
     /// File > Save: ask where, then save `png` (the open image, rendered and marked), or a
@@ -530,7 +533,7 @@ impl ViewerUi {
         p.ws.thumbs.tick(now);
         p.ws.flights.begin(now, &t.motion);
 
-        egui::Panel::left("tools").resizable(false).exact_size(t.size.toolbar_w).show(ui, |ui| {
+        egui::Panel::left("tools").resizable(false).show_separator_line(false).exact_size(t.size.toolbar_w).frame(egui::Frame::new().fill(t.colors.panel)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(t.space.sm);
                 if p.ws.editor.toolbar(ui) == Some(Tool::Interact) {
@@ -540,8 +543,8 @@ impl ViewerUi {
         });
         let panel = match self.chat_place {
             ChatPlace::Off => None,
-            ChatPlace::Bottom => Some(egui::Panel::bottom("chat").default_size(240.0).size_range(90.0..=800.0)),
-            ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(360.0).size_range(220.0..=1200.0)),
+            ChatPlace::Bottom => Some(egui::Panel::bottom("chat").default_size(t.size.chat_h[0]).size_range(t.size.chat_h[1]..=t.size.chat_h[2])),
+            ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(t.size.chat_w[0]).size_range(t.size.chat_w[1]..=t.size.chat_w[2])),
         };
         if panel.is_none() {
             p.ws.slots.clear();
@@ -549,7 +552,7 @@ impl ViewerUi {
         if let Some(panel) = panel {
             p.ws.chat.set_status(s.agent.clone());
             let ws = &mut p.ws;
-            let cout = panel.resizable(true).frame(egui::Frame::new().fill(t.colors.panel)).show(ui, |ui| {
+            let cout = panel.resizable(true).show_separator_line(false).frame(egui::Frame::new().fill(t.colors.panel)).show(ui, |ui| {
                 // Fill the panel, or it shrinks to its content (egui keeps the content's size).
                 ui.set_min_size(ui.available_size());
                 let keys = ws.pending_keys();
@@ -561,6 +564,9 @@ impl ViewerUi {
             ws.feed_clip = cout.feed_clip;
             ws.composer = cout.composer;
             for ev in cout.events {
+                if ev == guilab_chat::ChatEvent::Started {
+                    out.push(Action::Typing { session: s.name.to_string() });
+                }
                 if let Some(text) = ws.chat_event(ev, store, p.zoom) {
                     let viewing = ws.viewing();
                     let drafts = ws.send(p.zoom).into_iter().map(|d| (d.parent, d.doc)).collect();
@@ -743,7 +749,7 @@ impl ViewerUi {
                     if m.item("Insert image…", None, true) {
                         out.push(Action::Insert { session: name.clone() });
                     }
-                    m.separator();
+                    m.gap();
                     let label = if p.ws.image_open() { "Save image…" } else { "Save screenshot…" };
                     if m.item(label, None, true) {
                         let png = match (&p.ws.open, p.ws.doc().filter(|_| p.ws.image_open())) {
@@ -797,14 +803,14 @@ impl ViewerUi {
                     if let Some(sv) = sv {
                         session_size(m, sv, &mut p.sizing, &mut p.zoom, last_view, menu_open, &name, out);
                     }
-                    m.separator();
+                    m.gap();
                     m.heading("Chat");
                     for (place, label) in [(ChatPlace::Off, "Off"), (ChatPlace::Bottom, "Bottom"), (ChatPlace::Right, "Right side")] {
                         if m.radio(chat_place == place, label) {
                             chat_place = place;
                         }
                     }
-                    m.separator();
+                    m.gap();
                     m.heading("Appearance");
                     for (pref, label) in ThemePref::ALL {
                         if m.radio(theme == pref, label) {
@@ -854,7 +860,7 @@ fn session_size(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizi
     }
     let free = !s.locked;
     let resize = |out: &mut Vec<Action>, size: Option<(u32, u32)>, scale: Option<f64>| out.push(Action::Resize { session: name.to_string(), size, scale });
-    m.separator();
+    m.gap();
     m.heading("Session size");
     if m.item("Resize to window", None, free && view.is_some()) {
         resize(out, view.map(|v| sizing::fit_pixels(v, s.scale)), None);

@@ -27,6 +27,15 @@ pub struct Demo {
     /// Actions the demo doesn't handle itself (inputs to the app, saves, ...).
     pub actions: Vec<Action>,
     feed: u64,
+    /// More sessions (tabs) showing the same frame.
+    pub extra: Vec<String>,
+    /// An agent holds the session's lock.
+    pub locked: bool,
+    pub agent: Option<guilab_chat::Status>,
+    /// Paint the pointer and the cursor's name into frames (the real cursor isn't part of one).
+    pub mark_pointer: bool,
+    pointer: Option<Pos2>,
+    cursor: egui::CursorIcon,
 }
 
 impl Demo {
@@ -37,7 +46,22 @@ impl Demo {
         h.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
         let mut ui = ViewerUi::new(Arc::new(Fonts::new()));
         ui.theme = if dark { guilab_kit::ThemePref::Dark } else { guilab_kit::ThemePref::Light };
-        Demo { h, ui, store: Store::new(Limits::default()), group: Group(1), app: fake_app(app[0], app[1], 0), tex: None, scale: ppp as f64, actions: Vec::new(), feed: 0 }
+        Demo {
+            h,
+            ui,
+            store: Store::new(Limits::default()),
+            group: Group(1),
+            app: fake_app(app[0], app[1], 0),
+            tex: None, scale: ppp as f64,
+            actions: Vec::new(),
+            feed: 0,
+            extra: Vec::new(),
+            locked: false,
+            agent: None,
+            mark_pointer: false,
+            pointer: None,
+            cursor: egui::CursorIcon::Default,
+        }
     }
 
     /// Runs one frame `dt` seconds after the last, then answers its actions like the server.
@@ -45,22 +69,29 @@ impl Demo {
         let events: Vec<egui::Event> = input.iter().filter_map(|i| if let HostInput::Egui(e) = i { Some(e.clone()) } else { None }).collect();
         let app = &self.app;
         let tex = self.tex.get_or_insert_with(|| self.h.ctx.load_texture("demo-app", app.clone(), TextureOptions::LINEAR)).id();
-        let sv = SessionView {
-            name: SESSION,
-            key: SESSION,
-            texture: Some(tex),
-            size: (self.app.size[0] as u32, self.app.size[1] as u32),
-            scale: self.scale,
-            locked: false,
-            cursor: HostCursor::Icon(egui::CursorIcon::Default),
-            viz: None,
-            under_pointer: None,
-            agent: None,
-        };
+        for e in &events {
+            if let egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. } = e {
+                self.pointer = Some(*p);
+            }
+        }
+        let size = (self.app.size[0] as u32, self.app.size[1] as u32);
+        let names: Vec<String> = std::iter::once(SESSION.to_string()).chain(self.extra.iter().cloned()).collect();
+        let (scale, locked, agent) = (self.scale, self.locked, self.agent.clone());
+        fn view<'a>(name: &'a str, tex: egui::TextureId, size: (u32, u32), scale: f64, locked: bool, agent: Option<guilab_chat::Status>) -> SessionView<'a> {
+            SessionView { name, key: name, texture: Some(tex), size, scale, locked, cursor: HostCursor::Icon(egui::CursorIcon::Default), viz: None, under_pointer: None, agent }
+        }
+        let sessions: Vec<SessionView> = names.iter().map(|n| view(n, tex, size, scale, locked, agent.clone())).collect();
         let (ui, store) = (&mut self.ui, &self.store);
         let mut actions = Vec::new();
         let mut input = Some(input);
-        let out = self.h.run(events, dt, |eu| actions = ui.show(eu, std::slice::from_ref(&sv), input.take().unwrap_or_default(), false, store));
+        let mark = self.mark_pointer.then_some(self.pointer).flatten().map(|p| (p, self.cursor));
+        let out = self.h.run(events, dt, |eu| {
+            actions = ui.show(eu, &sessions, input.take().unwrap_or_default(), false, store);
+            if let Some((p, cursor)) = mark {
+                mark_pointer(eu.ctx(), p, cursor);
+            }
+        });
+        self.cursor = out.platform_output.cursor_icon;
         for a in actions {
             match a {
                 Action::Capture { ticket, .. } => {
@@ -111,6 +142,20 @@ impl Demo {
         self.frame(vec![HostInput::Egui(egui::Event::PointerMoved(p))], 1.0 / 60.0);
         self.frame(vec![HostInput::Egui(press(p, true)), HostInput::Egui(press(p, false))], 1.0 / 60.0)
     }
+}
+
+/// A crosshair at the pointer and the cursor's name next to it, over everything.
+fn mark_pointer(ctx: &egui::Context, p: Pos2, cursor: egui::CursorIcon) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::new("demo-pointer")));
+    let m = Color32::from_rgb(255, 0, 255);
+    painter.line_segment([p - Vec2::new(7.0, 0.0), p + Vec2::new(7.0, 0.0)], (1.0, m));
+    painter.line_segment([p - Vec2::new(0.0, 7.0), p + Vec2::new(0.0, 7.0)], (1.0, m));
+    let text = format!("{cursor:?}");
+    let font = egui::FontId::monospace(11.0);
+    let at = p + Vec2::new(10.0, 10.0);
+    let r = painter.text(at, egui::Align2::LEFT_TOP, &text, font.clone(), Color32::WHITE);
+    painter.rect_filled(r.expand(2.0), 2.0, Color32::from_black_alpha(200));
+    painter.text(at, egui::Align2::LEFT_TOP, text, font, Color32::WHITE);
 }
 
 pub fn press(p: Pos2, pressed: bool) -> egui::Event {

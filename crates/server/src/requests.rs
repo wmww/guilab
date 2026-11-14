@@ -393,7 +393,7 @@ impl Server {
                     if !draw.is_empty() {
                         imgs.push(MsgImage::Draw(draw));
                     }
-                    match self.human_message(name, text, imgs, None) {
+                    match self.human_message(name, text, imgs, None, None) {
                         Ok(()) => Response::ok(()),
                         Err(e) => Response::err(e),
                     }

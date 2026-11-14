@@ -8,6 +8,11 @@ use guilab_image::{Color, Doc, ElemKey, Element, Fonts, IRect, Kind, Pt, pt};
 use crate::paint::{self, c32};
 use crate::{CanvasOut, Editor, MIN_TEXT_EMS, Tool, WRAP_EMS, Xf};
 
+/// The field's breaks are core's (`with_breaks`); egui only breaks inside words longer than
+/// a line. Its glyph advances differ from core's by a hair, so it gets this much more room
+/// (a fraction of the wrap width, plus 2 points) lest it wrap a line core didn't.
+const WRAP_SLACK: f32 = 0.02;
+
 pub(crate) struct Typing {
     /// The element being edited; `None` for new text.
     pub key: Option<ElemKey>,
@@ -185,7 +190,7 @@ impl Editor {
         let mut layouter = move |ui: &Ui, buf: &dyn egui::TextBuffer, _w: f32| {
             let s = with_breaks(buf.as_str(), &lf, size, wrap);
             let line_h = lf.layout("", size, None).line_height * z;
-            let job = paint::line_job(&s, font.clone(), color, line_h, wrap * z * 1.02 + 2.0);
+            let job = paint::line_job(&s, font.clone(), color, line_h, wrap * z * (1.0 + WRAP_SLACK) + 2.0);
             ui.fonts_mut(|f| f.layout_job(job))
         };
         let l = fonts.layout(&ty.text, ty.size, Some(ty.wrap));

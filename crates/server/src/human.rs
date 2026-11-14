@@ -81,11 +81,21 @@ impl Server {
         Ok(img)
     }
 
+    /// The human started typing a message in the viewer: the screen now (pointer drawn in)
+    /// is what a message without images refers to; the app may change before they send.
+    pub(crate) fn human_typing(&mut self, session: &str) -> Result<(), String> {
+        let Server { sessions, images, .. } = self;
+        let slot = sessions.get_mut(session).ok_or_else(|| format!("no session '{session}'"))?;
+        slot.typing_screen = Some(images.capture(&mut slot.session, slot.group, true, false, None)?);
+        Ok(())
+    }
+
     /// Logs a human message (wakes polls). Its images are held while the session lives. A
-    /// message without images gets the current screen with the pointer drawn in, since it
-    /// refers to what they look at (or point at). `viewing`: an image open in their editor,
-    /// not attached.
-    pub(crate) fn human_message(&mut self, session: &str, text: String, imgs: Vec<MsgImage>, viewing: Option<ImageId>) -> Result<(), String> {
+    /// message without images gets the screen with the pointer drawn in, since it refers to
+    /// what they look at (or point at): `typed`, captured as they started typing (if still
+    /// in the store), else the screen now. `viewing`: an image open in their editor, not
+    /// attached.
+    pub(crate) fn human_message(&mut self, session: &str, text: String, imgs: Vec<MsgImage>, viewing: Option<ImageId>, typed: Option<ImageId>) -> Result<(), String> {
         let Server { sessions, images, .. } = self;
         let slot = sessions.get_mut(session).ok_or_else(|| format!("no session '{session}'"))?;
         slot.last_active = Instant::now();
@@ -107,8 +117,13 @@ impl Server {
         }
         let viewing = viewing.and_then(|id| images.store.image(id).ok());
         let screen = if resolved.is_empty() {
-            let id = images.capture(&mut slot.session, g, true, false, None)?;
-            Some(images.get(id.as_str())?)
+            match typed.and_then(|id| images.store.image(id).ok()) {
+                Some(img) => Some(img),
+                None => {
+                    let id = images.capture(&mut slot.session, g, true, false, None)?;
+                    Some(images.get(id.as_str())?)
+                }
+            }
         } else {
             None
         };

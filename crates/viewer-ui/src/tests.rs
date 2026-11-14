@@ -145,20 +145,27 @@ fn past_image_flies_out_and_its_first_edit_is_quiet() {
 }
 
 #[test]
-fn removing_or_sending_the_open_image_is_quiet() {
+fn removing_or_sending_the_open_image_fades_it_out() {
     let mut d = demo();
     draw(&mut d, pos2(400.0, 150.0), pos2(600.0, 260.0));
     let key = ws(&d).pending[0].key;
     let z = crate::Zoom::default();
     let w = d.ui.workspace_mut().unwrap();
     w.remove(key);
+    // Nothing flies; the image fades out where it was, the live app fading back in.
     assert!(w.flights.flights().is_empty());
+    assert_eq!(w.flights.fades().count(), 1);
+    assert_eq!(w.flights.live.value(w.flights.now()), 0.0);
+    d.idle(30);
+    let w = d.ui.workspace_mut().unwrap();
+    assert_eq!(w.flights.fades().count(), 0);
     assert_eq!(w.flights.live.value(w.flights.now()), 1.0);
     w.undo(&d.store, z);
     d.idle(5);
     let w = d.ui.workspace_mut().unwrap();
     let _ = w.send(z);
     assert!(w.flights.flights().is_empty());
+    assert_eq!(w.flights.fades().count(), 1);
 }
 
 #[test]

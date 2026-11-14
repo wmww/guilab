@@ -159,7 +159,8 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
         }
 
         let (md, sm) = (t.space.md, t.space.sm);
-        let frame = guilab_kit::field_frame(t, focused).inner_margin(egui::Margin { left: (md + 2.0) as i8, right: sm as i8, top: sm as i8, bottom: sm as i8 });
+        let frame = guilab_kit::field_frame(t, focused).inner_margin(egui::Margin { left: md as i8, right: sm as i8, top: sm as i8, bottom: sm as i8 });
+        let was_empty = chat.draft.is_empty();
         let mut click = false;
         let mut changed = false;
         let boxed = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
@@ -202,7 +203,8 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                     let button = t.size.send_button;
                     let w = ui.available_width() - button - md;
                     let line = ui.text_style_height(&egui::TextStyle::Body);
-                    let pad = sm + 2.0;
+                    // One line sits centered on the send button.
+                    let pad = ((button - line) / 2.0).max(0.0);
                     let max_h = line * t.size.composer_lines + 2.0 * pad;
                     let text = ui.allocate_ui_with_layout(vec2(w, max_h), Layout::top_down(Align::Min), |ui| {
                         egui::ScrollArea::vertical().id_salt(id.with("text-scroll")).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -221,7 +223,9 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                     let can_send = !chat.draft.trim().is_empty() || !pending.is_empty();
                     ui.vertical(|ui| {
                         ui.add_space((text_h - button).max(0.0));
-                        click = guilab_kit::send_button(ui, can_send).clicked();
+                        let b = guilab_kit::send_button(ui, can_send);
+                        let tip = if can_send { &chat.send_hint } else { &chat.send_empty_hint };
+                        click = b.on_hover_text(tip.as_str()).clicked();
                     });
                 });
             });
@@ -229,6 +233,9 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
         });
         if changed {
             chat.composer.edited = true;
+            if was_empty && !chat.draft.is_empty() {
+                out.events.push(ChatEvent::Started);
+            }
         }
         out.composer = boxed.inner;
         // Clicking the box's padding focuses the text.

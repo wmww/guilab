@@ -56,8 +56,9 @@ impl T {
         self.run(vec![ev::key(k, m)]);
     }
 
+    /// Events since the last call, but `Started` (see `started_fires_once_per_message`).
     fn events(&mut self) -> Vec<ChatEvent<u32>> {
-        std::mem::take(&mut self.host.log)
+        std::mem::take(&mut self.host.log).into_iter().filter(|e| *e != ChatEvent::Started).collect()
     }
 
     fn slot(&self, slot: SlotId, key: u32) -> Rect {
@@ -75,6 +76,19 @@ impl T {
         let c = self.host.last.composer;
         c.right_bottom() + vec2(-4.0 - 14.0, -4.0 - 14.0)
     }
+}
+
+#[test]
+fn started_fires_once_per_message() {
+    let mut t = T::new();
+    t.focus_text();
+    t.run(vec![ev::text("h")]);
+    t.run(vec![ev::text("i")]);
+    let started = |t: &mut T| std::mem::take(&mut t.host.log).iter().filter(|e| **e == ChatEvent::Started).count();
+    assert_eq!(started(&mut t), 1, "once, on the first character");
+    t.key(Key::Enter, Modifiers::NONE);
+    t.run(vec![ev::text("x")]);
+    assert_eq!(started(&mut t), 1, "again for the next message");
 }
 
 #[test]

@@ -530,6 +530,11 @@ impl Server {
                         tracing::debug!("viewer: resizing {session}: {e}");
                     }
                 }
+                Action::Typing { session } => {
+                    if let Err(e) = self.human_typing(&session) {
+                        tracing::debug!("viewer: screen as typing started: {e}");
+                    }
+                }
                 Action::Capture { session, ticket } => {
                     let img = self.human_capture(&session);
                     self.viewer_ui.captured(&session, ticket, img, &self.images.store);
@@ -539,7 +544,8 @@ impl Server {
                 }
                 Action::Message { session, text, drafts, viewing } => {
                     let imgs = drafts.into_iter().map(|(parent, doc)| MsgImage::Draft { parent, doc }).collect();
-                    if let Err(e) = self.human_message(&session, text, imgs, viewing) {
+                    let typed = self.sessions.get_mut(&session).and_then(|s| s.typing_screen.take());
+                    if let Err(e) = self.human_message(&session, text, imgs, viewing, typed) {
                         tracing::warn!("viewer: sending message: {e}");
                         self.viewer_ui.notices().lock().map(|mut n| n.push(format!("Couldn't send: {e}"))).ok();
                     }

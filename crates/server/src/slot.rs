@@ -25,6 +25,9 @@ pub(crate) struct Slot {
     /// The session's images in the store (dropped with it).
     pub group: guilab_image::Group,
     pub token: RegistrationToken,
+    /// The screen as the human started typing a message in the viewer (pointer drawn in):
+    /// what a message without images refers to. Taken by the next viewer message.
+    pub typing_screen: Option<guilab_image::ImageId>,
 }
 
 pub(crate) struct Working {
@@ -59,7 +62,7 @@ impl LockEnd {
 impl Slot {
     pub fn new(session: Session, root: Option<PathBuf>, ttl: u64, group: guilab_image::Group, token: RegistrationToken) -> Slot {
         let now = Instant::now();
-        Slot { session, root, ttl, last_active: now, lock: LockState::default(), warned: None, working: None, last_agent: now, group, token }
+        Slot { session, root, ttl, last_active: now, lock: LockState::default(), warned: None, working: None, last_agent: now, group, token, typing_screen: None }
     }
 
     pub fn info(&self, name: &str) -> SessionInfo {

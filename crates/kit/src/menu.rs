@@ -8,8 +8,9 @@
 //!
 //! While a menu is open the host should route keys to egui ([`MenuBar::is_open`]) and
 //! ignore presses outside it ([`MenuBar::is_open`] checked before showing the bar).
-//! Menus hold items ([`MenuUi::item`], [`MenuUi::radio`], [`MenuUi::check`]), separators,
-//! headings, notes and custom rows.
+//! Menus hold items ([`MenuUi::item`], [`MenuUi::radio`], [`MenuUi::check`]), gaps between
+//! groups, headings, notes and custom rows. Flat: the popup is set off by its shadow, groups
+//! by space.
 
 use egui::{Align2, Color32, Id, Key, Modifiers, Order, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
@@ -312,21 +313,24 @@ impl MenuUi<'_> {
         let color = if enabled { c.text } else { c.weak };
         let mut x = rect.min.x + s.menu_item_pad;
         if let Some(mark) = mark {
-            let center = pos2(x + 6.0, rect.center().y);
+            let center = pos2(x + s.menu_radio_r, rect.center().y);
             let ring = Stroke::new(s.line, c.weak);
             match mark {
                 Mark::Radio(on) => {
-                    ui.painter().circle_stroke(center, 6.0, ring);
+                    ui.painter().circle_stroke(center, s.menu_radio_r, ring);
                     if on {
-                        ui.painter().circle_filled(center, 3.5, color);
+                        ui.painter().circle_filled(center, s.menu_radio_dot, color);
                     }
                 }
                 Mark::Check(on) => {
-                    let r = Rect::from_center_size(center, vec2(12.0, 12.0));
+                    let side = s.menu_check;
+                    let r = Rect::from_center_size(center, vec2(side, side));
                     ui.painter().rect_stroke(r, t.radius.small, ring, egui::StrokeKind::Inside);
                     if on {
-                        let pts = vec![center + vec2(-3.5, 0.0), center + vec2(-1.0, 2.8), center + vec2(3.8, -3.0)];
-                        ui.painter().add(egui::Shape::line(pts, Stroke::new(1.8, color)));
+                        // A tick in the box's own proportions.
+                        let k = side / 12.0;
+                        let pts = vec![center + vec2(-3.5, 0.0) * k, center + vec2(-1.0, 2.8) * k, center + vec2(3.8, -3.0) * k];
+                        ui.painter().add(egui::Shape::line(pts, Stroke::new(s.icon_bold, color)));
                     }
                 }
             }
@@ -345,11 +349,10 @@ impl MenuUi<'_> {
         chosen
     }
 
-    pub fn separator(&mut self) {
+    /// Space between groups of rows (no line).
+    pub fn gap(&mut self) {
         let t = self.theme.clone();
-        let ui = &mut *self.ui;
-        let (rect, _) = ui.allocate_exact_size(vec2(self.width, t.size.menu_separator_h), Sense::hover());
-        ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(t.size.line, t.colors.outline));
+        self.ui.allocate_exact_size(vec2(self.width, t.size.menu_gap), Sense::hover());
     }
 
     /// A small dim label above a group of items.
@@ -370,7 +373,7 @@ impl MenuUi<'_> {
         let (rect, _) = ui.allocate_exact_size(vec2(self.width, s.menu_item_h + t.space.sm), Sense::hover());
         let inner = rect.shrink2(vec2(s.menu_item_pad, t.space.xs));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        child.spacing_mut().item_spacing = vec2(t.space.sm + 2.0, 0.0);
+        child.spacing_mut().item_spacing = vec2(t.space.sm, 0.0);
         left(&mut child);
         let used = child.min_rect().width();
         let right_w = child.with_layout(egui::Layout::right_to_left(egui::Align::Center), right).response.rect.width();

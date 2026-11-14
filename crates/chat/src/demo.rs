@@ -165,6 +165,7 @@ impl DemoHost {
                     // Clicking the open image's own slot closes it.
                     self.thumbs.open = if self.thumbs.open == Some((*slot, *key)) { None } else { Some((*slot, *key)) };
                 }
+                ChatEvent::Started => {}
                 ChatEvent::Remove { key } => {
                     if let Some(at) = self.pending.iter().position(|k| k == key) {
                         self.history.push(Op::Remove { at, key: *key });

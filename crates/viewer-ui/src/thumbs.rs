@@ -110,6 +110,12 @@ impl Thumbs<Att> for ThumbSource<'_> {
             _ => false,
         };
         // A slot an image is flying to or from is empty meanwhile.
-        if open || self.flights.touching(slot, *key) { SlotState::Away { outlined: open } } else { SlotState::Shown }
+        if self.flights.touching(slot, *key) {
+            SlotState::Covered { outlined: open }
+        } else if open {
+            SlotState::Away { outlined: true }
+        } else {
+            SlotState::Shown
+        }
     }
 }

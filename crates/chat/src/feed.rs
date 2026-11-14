@@ -3,7 +3,7 @@
 
 use std::hash::Hash;
 
-use egui::{Color32, CursorIcon, Label, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Label, RichText, Sense, Ui, pos2, vec2};
 use guilab_kit::Theme;
 
 use crate::slot::{Look, slot_aspect};
@@ -119,10 +119,10 @@ fn item<K: Clone + Eq + Hash>(
             ui.add_space(if matches!(prev, Some(Author::Activity) | None) { t.space.xs } else { t.space.lg });
             let font = t.font.mono_small.clone();
             let mark_w = ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = t.space.sm + 2.0;
+                ui.spacing_mut().item_spacing.x = t.space.sm;
                 // Rows as tall as the text, not a widget: a run of commands stays compact.
                 ui.spacing_mut().interact_size.y = 0.0;
-                let m = ui.label(RichText::new("›").font(font.clone()).color(c.weak)).rect.width() + t.space.sm + 2.0;
+                let m = ui.label(RichText::new("›").font(font.clone()).color(c.weak)).rect.width() + t.space.sm;
                 let hover = if it.time.is_empty() { it.text.clone() } else { format!("{}  {}", it.time, it.text) };
                 ui.add(Label::new(RichText::new(&it.text).font(font).color(c.weak)).truncate()).on_hover_text(hover);
                 m
@@ -202,14 +202,16 @@ fn status(ui: &mut Ui, t: &Theme, st: &Status) {
     ui.add_space(t.space.lg);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = t.space.md;
-        let (rect, _) = ui.allocate_exact_size(vec2(26.0, ui.text_style_height(&egui::TextStyle::Body)), Sense::hover());
+        // Three dots, each 3 radii apart, bobbing up to 2/3 of a radius.
+        let r = t.size.status_dot_r;
+        let (rect, _) = ui.allocate_exact_size(vec2(r * 8.0, ui.text_style_height(&egui::TextStyle::Body)), Sense::hover());
         let now = ui.input(|i| i.time);
         for i in 0..3 {
             // A wave passing left to right, about once a second.
             let phase = (now * 1.2 - i as f64 * 0.18).rem_euclid(1.0);
             let k = (1.0 - (phase * 2.0 - 0.5).abs().min(1.0) * 2.0).max(0.0) as f32;
-            let p = pos2(rect.left() + 4.0 + i as f32 * 9.0, rect.center().y - k * 2.0);
-            ui.painter().circle_filled(p, 3.0, c.agent.gamma_multiply(0.35 + 0.65 * k));
+            let p = pos2(rect.left() + r + i as f32 * 3.0 * r, rect.center().y - k * r * 0.67);
+            ui.painter().circle_filled(p, r, c.agent.gamma_multiply(0.35 + 0.65 * k));
         }
         ui.label(RichText::new(&st.text).color(c.agent));
         ui.label(RichText::new(duration(st.elapsed)).font(t.font.small.clone()).color(c.weak)).on_hover_text("Time spent working");
@@ -223,23 +225,8 @@ fn status(ui: &mut Ui, t: &Theme, st: &Status) {
 
 /// A round button over the feed's bottom right corner; accent when there's something new.
 fn jump_button(ui: &mut Ui, t: &Theme, id: egui::Id, clip: egui::Rect, unseen: bool) -> bool {
-    let c = &t.colors;
     let s = t.size.jump_button;
     let center = pos2(clip.right() - t.space.lg - s / 2.0 - t.space.md, clip.bottom() - t.space.md - s / 2.0);
     let rect = egui::Rect::from_center_size(center, vec2(s, s));
-    let resp = ui.interact(rect, id.with("jump"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Jump to the latest");
-    let p = ui.painter();
-    let (fill, fg) = if unseen {
-        (if resp.hovered() { c.accent_hover } else { c.accent }, c.on_accent)
-    } else {
-        (if resp.hovered() { c.press_fill } else { c.popup }, c.text)
-    };
-    p.add(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: c.shadow }.as_shape(rect, s / 2.0));
-    p.circle(center, s / 2.0, fill, Stroke::new(t.size.line, if unseen { Color32::TRANSPARENT } else { c.popup_stroke }));
-    let stroke = Stroke::new(2.0, fg);
-    let (top, bottom) = (center - vec2(0.0, s * 0.2), center + vec2(0.0, s * 0.2));
-    p.line_segment([top, bottom], stroke);
-    p.line_segment([bottom, bottom + vec2(-s * 0.17, -s * 0.17)], stroke);
-    p.line_segment([bottom, bottom + vec2(s * 0.17, -s * 0.17)], stroke);
-    resp.clicked()
+    guilab_kit::round_button_at(ui, id.with("jump"), rect, guilab_kit::RoundIcon::Down, unseen, true).on_hover_text("Jump to the latest").clicked()
 }

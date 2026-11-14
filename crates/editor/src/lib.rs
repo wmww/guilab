@@ -39,7 +39,7 @@ impl Tool {
 
     pub fn name(self) -> &'static str {
         match self {
-            Tool::Interact => "Use the app",
+            Tool::Interact => "Interact",
             Tool::Move => "Move, resize, or drag to pan",
             Tool::Pen => "Pen",
             Tool::Box => "Box",
@@ -190,6 +190,11 @@ enum Gesture {
 pub struct Editor {
     pub tool: Tool,
     pub color: Color,
+    /// The toolbar's tools, in order (default [`Tool::ALL`]). Only these take their keys.
+    pub tools: Vec<Tool>,
+    /// The name of [`Tool::Interact`] in the toolbar (what "no tool" means to the host, e.g.
+    /// "Use the app").
+    pub interact_name: String,
     id: Id,
     fonts: Arc<Fonts>,
     /// The doc that gesture, typing and hover refer to (keys are only unique within a doc).
@@ -229,6 +234,8 @@ impl Editor {
         Editor {
             tool: Tool::Interact,
             color: Color::RED,
+            tools: Tool::ALL.to_vec(),
+            interact_name: Tool::Interact.name().to_string(),
             id: id.into(),
             fonts,
             doc_id: None,
@@ -254,6 +261,11 @@ impl Editor {
             Some(c) if self.tool != Tool::Crop => c,
             _ => IRect::of_size(canvas),
         }
+    }
+
+    /// A tool's name as the toolbar shows it.
+    pub fn tool_name(&self, tool: Tool) -> &str {
+        if tool == Tool::Interact { &self.interact_name } else { tool.name() }
     }
 
     /// Whether a drag or text edit is in progress.

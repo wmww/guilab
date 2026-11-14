@@ -117,9 +117,12 @@ impl Workspace {
         let mut chat = Chat::new(id.with("chat"));
         chat.hint = "Message the agent".into();
         chat.empty_hint = "Messages, and what the agent does, show up here. Draw on the app to attach a screenshot.".into();
+        chat.send_empty_hint = "Type a message or draw something to send".into();
+        let mut editor = Editor::new(id.with("editor"), fonts);
+        editor.interact_name = "Use the app".into();
         Workspace {
             id,
-            editor: Editor::new(id.with("editor"), fonts),
+            editor,
             chat,
             pending: Vec::new(),
             shelf: Vec::new(),
@@ -396,13 +399,23 @@ impl Workspace {
         }
     }
 
+    /// The open draft `key` leaves the view without flying anywhere (×, send): it fades out
+    /// where it was.
+    fn fade_out(&mut self, key: DraftKey) {
+        let snap = self.pending.iter().find(|d| d.key == key).and_then(|d| Doc::open(d.doc.body().clone(), &d.doc).ok());
+        match snap {
+            Some(doc) => self.flights.fade_out(self.view_place, doc),
+            None => self.flights.quiet(true),
+        }
+    }
+
     /// × on a composer slot.
     pub fn remove(&mut self, key: DraftKey) {
         let Some(at) = self.pending.iter().position(|d| d.key == key) else { return };
         if matches!(self.open, Open::Draft(k) if k == key) {
             self.editor.reset();
             self.open = Open::Live;
-            self.flights.quiet(true);
+            self.fade_out(key);
         }
         let d = self.pending.remove(at);
         self.shelf.push(d);
@@ -515,12 +528,12 @@ impl Workspace {
     /// Send: the message takes every pending draft. Returns them (the server freezes them).
     pub fn send(&mut self, session_zoom: Zoom) -> Vec<Draft> {
         self.commit_editor(session_zoom);
-        let sent = std::mem::take(&mut self.pending);
-        if matches!(self.open, Open::Draft(_)) {
+        if let Open::Draft(k) = self.open {
+            self.fade_out(k);
             self.open = Open::Live;
-            self.flights.quiet(true);
             self.editor.tool = Tool::Interact;
         }
+        let sent = std::mem::take(&mut self.pending);
         let keys: Vec<DraftKey> = sent.iter().map(|d| d.key).collect();
         self.history.retain(|op| !keys.contains(&op.key()));
         let used: Vec<DraftKey> = self.history.ops().map(Op::key).collect();
@@ -548,6 +561,7 @@ impl Workspace {
             ChatEvent::Remove { key: Att::Draft(k) } => self.remove(k),
             ChatEvent::Remove { .. } => {}
             ChatEvent::Send { text } => return Some(text),
+            ChatEvent::Started => {}
             ChatEvent::Undo => self.undo(store, session_zoom),
             ChatEvent::Redo => self.redo(session_zoom),
         }

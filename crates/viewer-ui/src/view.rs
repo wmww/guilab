@@ -391,9 +391,6 @@ impl ViewerUi {
             }
             _ => {}
         }
-        if !flying_in {
-            painter.rect_stroke(img, 0.0, egui::Stroke::new(t.size.line, t.colors.outline), egui::StrokeKind::Outside);
-        }
 
         // The editor over the image. Host zoom is physical px per image px; the canvas
         // counts points.
@@ -449,7 +446,7 @@ impl ViewerUi {
             sizing::paint_handles(&painter, &t, img, view, hot_handle);
         }
         if let Some((_, r)) = &mut self.resizing {
-            painter.rect_stroke(r.target(), 0.0, egui::Stroke::new(t.size.line, t.colors.accent), egui::StrokeKind::Outside);
+            painter.rect_stroke(r.target(), 0.0, egui::Stroke::new(t.size.ring, t.colors.accent), egui::StrokeKind::Outside);
             if let Some(p) = pointer {
                 guilab_kit::pointer_label(ui.ctx(), egui::Id::new("resize-readout"), view, p, format!("{} × {}", r.size.0, r.size.1));
             }

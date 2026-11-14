@@ -85,7 +85,7 @@ pub fn prim_shapes(p: &Prim, c: &mut Ctx, out: &mut Vec<Shape>, halo: Option<(Co
                     };
                     out.push(Shape::image(tex, r, uv, Color32::WHITE));
                 }
-                _ => missing(r, out),
+                _ => missing(r, &guilab_kit::Theme::get(c.ctx), out),
             }
         }
         Prim::Svg { asset, dst } => {
@@ -99,7 +99,7 @@ pub fn prim_shapes(p: &Prim, c: &mut Ctx, out: &mut Vec<Shape>, halo: Option<(Co
                     let tex = c.textures.svg(c.ctx, *asset, &a, px);
                     out.push(Shape::image(tex, r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE));
                 }
-                _ => missing(r, out),
+                _ => missing(r, &guilab_kit::Theme::get(c.ctx), out),
             }
         }
         Prim::Stroke { pts, closed, width, color } => {
@@ -211,12 +211,13 @@ fn scaled(g: &Galley, k: f32) -> Arc<Galley> {
     Arc::new(g)
 }
 
-/// A picture whose asset is gone: a gray box with a cross.
-fn missing(r: Rect, out: &mut Vec<Shape>) {
-    let gray = Color32::from_gray(128);
-    out.push(Shape::rect_filled(r, 0.0, Color32::from_gray(128).gamma_multiply(0.3)));
-    out.push(Shape::line_segment([r.left_top(), r.right_bottom()], Stroke::new(1.0, gray)));
-    out.push(Shape::line_segment([r.right_top(), r.left_bottom()], Stroke::new(1.0, gray)));
+/// A picture whose asset is gone: a faint box with a cross.
+fn missing(r: Rect, t: &guilab_kit::Theme, out: &mut Vec<Shape>) {
+    let c = t.colors.missing;
+    let s = Stroke::new(t.size.line, c);
+    out.push(Shape::rect_filled(r, 0.0, c.gamma_multiply(0.3)));
+    out.push(Shape::line_segment([r.left_top(), r.right_bottom()], s));
+    out.push(Shape::line_segment([r.right_top(), r.left_bottom()], s));
 }
 
 /// Textures of pictures. Rasters are immutable, so one upload per asset is exact: the filter
@@ -331,14 +332,14 @@ fn raster_image(ctx: &Context, r: &guilab_image::Raster) -> ColorImage {
 /// A key point: a small disc with a ring; `hot` lights it up.
 pub fn key_point(out: &mut Vec<Shape>, at: Pos2, hot: bool, t: &guilab_kit::Theme) {
     let c = &t.colors;
-    let r = t.size.key_point_r + if hot { 1.0 } else { 0.0 };
+    let r = t.size.key_point_r + if hot { t.size.key_point_grow } else { 0.0 };
     out.push(Shape::circle_filled(at, r, if hot { c.key_point_hot } else { c.key_point }));
     out.push(Shape::circle_stroke(at, r, Stroke::new(t.size.line, c.key_point_ring)));
 }
 
 /// Outline just outside a screen rect (hover on text and pictures).
-pub fn outline(out: &mut Vec<Shape>, r: Rect, color: Color32, w: f32) {
-    out.push(Shape::rect_stroke(r.expand(w / 2.0 + 1.0), 2.0, Stroke::new(w, color), egui::StrokeKind::Middle));
+pub fn outline(out: &mut Vec<Shape>, r: Rect, color: Color32, w: f32, radius: f32) {
+    out.push(Shape::rect_stroke(r.expand(w), radius, Stroke::new(w, color), egui::StrokeKind::Middle));
 }
 
 pub fn shade(out: &mut Vec<Shape>, outer: Rect, hole: Rect, color: Color32) {
