@@ -217,12 +217,16 @@ impl ViewerUi {
         }
         self.sessions.retain(|k, p| sessions.iter().any(|s| s.name == k && s.key == p.key));
 
-        egui::Panel::top("tabs").show(ui, |ui| {
+        // Session tabs: the selected one takes the panel color below it, so it reads as
+        // attached to the session it shows.
+        let bar = ui.visuals().extreme_bg_color;
+        egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(bar).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 0 })).show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for s in sessions {
                     let sel = self.current.as_deref() == Some(s.name);
                     let label = if s.locked { format!("🔒 {}", s.name) } else { s.name.to_string() };
-                    if ui.selectable_label(sel, label).clicked() && !sel {
+                    if session_tab(ui, sel, &label).clicked() && !sel {
                         self.current = Some(s.name.to_string());
                     }
                 }
@@ -537,4 +541,29 @@ fn zoom_bar(ui: &mut egui::Ui, z: &mut Zoom) {
         z.fit = false;
     }
     ui.weak("Ctrl+scroll: zoom · middle-drag: pan");
+}
+
+/// One session tab: rounded top corners, an accent line on the selected one.
+fn session_tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    let v = ui.visuals().clone();
+    let text_color = if selected { v.strong_text_color() } else { v.weak_text_color() };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), text_color);
+    let size = egui::vec2((galley.size().x + 32.0).max(80.0), 30.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if selected {
+        v.panel_fill
+    } else if resp.hovered() {
+        v.widgets.hovered.weak_bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
+    if selected {
+        let top = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 0.0), egui::vec2(rect.width() - 12.0, 2.0));
+        p.rect_filled(top, 1.0, v.selection.bg_fill);
+    }
+    let text_color = if !selected && resp.hovered() { v.text_color() } else { text_color };
+    p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, text_color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

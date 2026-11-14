@@ -151,10 +151,9 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
         Command::Output { .. } => output(&get(v)?),
         Command::Lock { .. } => {
             let l: LockInfo = get(v)?;
-            format!(
-                "token {} (session {}). Pass it to commands that change the session: guilab -t {} input ...",
-                l.token, l.session, l.token
-            )
+            // Only the token on stdout, so `T=$(guilab lock)` works; the hint goes to stderr.
+            eprintln!("locked session {}. Pass the token to commands that change it: guilab -t {} input ...", l.session, l.token);
+            l.token
         }
         Command::Unlock { .. } => "unlocked".into(),
         Command::Input { .. } => {

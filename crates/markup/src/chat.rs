@@ -84,25 +84,49 @@ impl Chat {
     pub fn show(&mut self, ui: &mut Ui, sketch: &mut Sketch) -> Option<Outgoing> {
         let mut sent = None;
         egui::Panel::bottom(self.id.with("input")).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 sketch.queue_strip(ui);
                 if sketch.drawing_open() {
                     ui.weak("+ open drawing").on_hover_text("Sent with the next message");
                 }
-                let send_w = 56.0;
-                let edit = egui::TextEdit::multiline(&mut self.draft)
-                    .id(self.id.with("draft"))
-                    .hint_text("Message the agent (Enter: send, Shift+Enter: new line)")
-                    .desired_rows(1)
-                    .desired_width(ui.available_width() - send_w - 8.0);
-                // Plain Enter sends; take it before the text box turns it into a newline.
-                let has_focus = ui.memory(|m| m.has_focus(self.id.with("draft")));
-                let enter = has_focus && ui.input_mut(crate::consume_plain_enter);
-                ui.add(edit);
-                let click = ui.add_sized(vec2(send_w, 24.0), egui::Button::new("Send")).clicked();
                 let has_images = sketch.queued() > 0 || sketch.drawing_open();
-                if (enter || click) && (!self.draft.trim().is_empty() || has_images) {
+                let can_send = !self.draft.trim().is_empty() || has_images;
+                let draft_id = self.id.with("draft");
+                let focused = ui.memory(|m| m.has_focus(draft_id));
+                // Plain Enter sends; take it before the text box turns it into a newline.
+                let enter = focused && ui.input_mut(crate::consume_plain_enter);
+                // A rounded box holding the text and a round send button; a dim outline,
+                // a little brighter while typing.
+                let v = ui.visuals();
+                let stroke_color = if focused { v.widgets.inactive.fg_stroke.color.gamma_multiply(0.45) } else { v.widgets.noninteractive.bg_stroke.color };
+                let mut click = false;
+                let boxed = egui::Frame::new()
+                    .fill(v.extreme_bg_color)
+                    .stroke(egui::Stroke::new(1.0, stroke_color))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 })
+                    .show(ui, |ui| {
+                        // Bottom-aligned, so the button stays at the last line as the text grows.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| {
+                            let button = 28.0;
+                            let edit = egui::TextEdit::multiline(&mut self.draft)
+                                .id(draft_id)
+                                // A custom frame replaces `.margin()`, so the padding goes here.
+                                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
+                                .hint_text("Message the agent (Enter: send, Shift+Enter: new line)")
+                                .desired_rows(1)
+                                .min_size(vec2(0.0, button))
+                                .desired_width(ui.available_width() - button - 8.0);
+                            ui.add(edit);
+                            click = send_button(ui, button, can_send).clicked();
+                        });
+                    });
+                // Clicking the box's padding focuses the text too.
+                if boxed.response.interact(Sense::click()).clicked() {
+                    ui.memory_mut(|m| m.request_focus(draft_id));
+                }
+                if (enter || click) && can_send {
                     sent = Some(Outgoing { text: self.draft.trim().to_string(), images: sketch.take_all() });
                     self.draft.clear();
                     // Follow the conversation again (the sent message arrives as a feed item).
@@ -110,7 +134,7 @@ impl Chat {
                     self.scroll_to_end = true;
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(8.0);
         });
 
         let id = self.id;
@@ -176,4 +200,26 @@ fn show_item(ui: &mut Ui, item: &mut Item) {
             ui.add_space(2.0);
         }
     }
+}
+
+/// A round button with an up arrow: accent-filled when there's something to send.
+fn send_button(ui: &mut Ui, size: f32, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), if enabled { Sense::click() } else { Sense::hover() });
+    let v = ui.visuals();
+    let (fill, fg) = if enabled {
+        let fill = if resp.hovered() { v.selection.bg_fill.gamma_multiply(1.25) } else { v.selection.bg_fill };
+        (fill, Color32::WHITE)
+    } else {
+        (v.widgets.inactive.bg_fill, v.weak_text_color())
+    };
+    let p = ui.painter();
+    let c = rect.center();
+    let r = size / 2.0;
+    p.circle_filled(c, r, fill);
+    let stroke = egui::Stroke::new(2.0, fg);
+    let (top, bottom) = (c - vec2(0.0, r * 0.45), c + vec2(0.0, r * 0.45));
+    p.line_segment([bottom, top], stroke);
+    p.line_segment([top, top + vec2(-r * 0.38, r * 0.38)], stroke);
+    p.line_segment([top, top + vec2(r * 0.38, r * 0.38)], stroke);
+    resp.on_hover_text("Send (Enter)")
 }

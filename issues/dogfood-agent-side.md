@@ -17,8 +17,8 @@ First `run` printed "[guilab events since the session started]" with a long line
 ## Inner CLI commands autostart a stray server
 Any `guilab` command autostarts a server if none answers. When driving a nested guilab whose server is down or restarting, a stray `ls`/`new` silently creates a new server outside the outer session (no viewer, not an outer app). Had to wait for `control.sock` to appear by hand. Suggest an env/flag to disable autostart (e.g. `GUILAB_NO_AUTOSTART=1`), or a `guilab server --wait` that blocks until a server is up.
 
-## `lock --force` prints a sentence, not a bare token
-`guilab lock` prints just the token, so `T=$(guilab lock)` works. `guilab lock --force` prints `token gh9gm4uy (session guilab). Pass it to ...` on stdout, so the same capture yields garbage and the follow-up `-t $T input ...` fails with a confusing clap error ("unrecognized subcommand 'move'"). Both should print only the token on stdout; put prose on stderr.
+## `lock` printed a sentence, not a bare token (fixed)
+Skill doc says `guilab lock` "prints a token", but both `lock` and `lock --force` printed `token gh9gm4uy (session guilab). Pass it to ...` on stdout, so the same capture yields garbage and the follow-up `-t $T input ...` fails with a confusing clap error ("unrecognized subcommand 'move'"). Fixed: stdout is now only the token; the hint goes to stderr.
 
 ## Lost token means `--force` on your own lock
 I captured a token inside a command whose output I discarded; the next `lock` said the session is locked by someone. There's no way for the holder to recover its own token (e.g. `guilab lock` from the same worktree/agent could say "you already hold it: TOKEN", or `unlock --force` is the only exit). Minor, but cost a round trip.
@@ -28,3 +28,9 @@ Driving the inner viewer: `input move X Y click type 'abc'` on the chat box gave
 
 ## Messages split across two viewers are confusing to track
 With nested guilabs, the human sometimes typed into the inner viewer's chat (goes to the inner `demo` session's log) vs the outer one (goes to me). Inner chat messages don't wake my outer `poll`. Not a bug per se, but the agent needs to also watch `ig poll` or check the inner log to see them.
+
+## `log` output looked like it lacked a message that was there
+I grepped `guilab log` of the inner session for "message" and found nothing, then told the human their inner-chat message was never sent. It had been (22:41, visible in their screenshot). Unclear whether `log` truncates by default or whether the grep raced the restart; either way, I made a wrong claim from it. If `log` limits output by default it should say "(N older events; use -n/--since)".
+
+## egui TextEdit: custom `.frame()` silently drops `.margin()`
+(Code-side, but bit me in viewer work.) In egui 0.35 a TextEdit with `.frame(...)` ignores `.margin(...)`; padding must go in the frame's `inner_margin`. The chat box looked misaligned and clicks on its lower half missed it until fixed.

@@ -49,27 +49,41 @@ fn viewed(env: &[(&str, &str)]) -> (Lab, String) {
     (v, log)
 }
 
-/// Host pixel -> viewed-session pixel offset, found by moving the host pointer and reading
-/// the viewed session's human motion event.
-fn offset(h: &Lab, t: &str, v: &Lab) -> (i64, i64) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for i in 0.. {
-        let (x, y) = (600 + i % 7, 400 + i % 5);
-        h.input(t, &["move", &x.to_string(), &y.to_string()]);
-        std::thread::sleep(Duration::from_millis(100));
-        let log = v.json(&["log", "--kind", "motion", "-n", "1"]);
-        if let Some(p) = log["events"][0]["path"].as_array().and_then(|p| p.last()) {
-            let (sx, sy) = (p[0].as_i64().unwrap(), p[1].as_i64().unwrap());
-            return (x - sx, y - sy);
-        }
-        assert!(Instant::now() < deadline, "no human motion reached the session: {log}\n{}", v.run(&["log"]));
-    }
-    unreachable!()
+/// Host pixel -> viewed-session pixel mapping, found by moving the host pointer to two
+/// points and reading the viewed session's human motion events (the view may be zoomed).
+struct Mapping {
+    /// Host = origin + session * scale.
+    origin: (f64, f64),
+    scale: f64,
 }
 
-fn click_button(h: &Lab, t: &str, (dx, dy): (i64, i64), log: &str) {
+fn mapping(h: &Lab, t: &str, v: &Lab) -> Mapping {
+    // Waits for the session's latest pointer position to differ from `prev`.
+    let probe = |x: i64, y: i64, prev: Option<(f64, f64)>| -> (f64, f64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            h.input(t, &["move", &x.to_string(), &y.to_string()]);
+            std::thread::sleep(Duration::from_millis(100));
+            let log = v.json(&["log", "--kind", "motion", "-n", "1"]);
+            if let Some(p) = log["events"][0]["path"].as_array().and_then(|p| p.last()) {
+                let at = (p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
+                if Some(at) != prev {
+                    return at;
+                }
+            }
+            assert!(Instant::now() < deadline, "no human motion reached the session: {log}\n{}", v.run(&["log"]));
+        }
+    };
+    let (ax, ay) = probe(400, 300, None);
+    let (bx, _) = probe(700, 300, Some((ax, ay)));
+    let scale = 300.0 / (bx - ax);
+    Mapping { origin: (400.0 - ax * scale, 300.0 - ay * scale), scale }
+}
+
+fn click_button(h: &Lab, t: &str, m: &Mapping, log: &str) {
     let (bx, by) = center(&std::fs::read_to_string(log).unwrap(), "button", 1.0);
-    let (x, y) = (bx.parse::<i64>().unwrap() + dx, by.parse::<i64>().unwrap() + dy);
+    let x = (m.origin.0 + bx.parse::<f64>().unwrap() * m.scale).round() as i64;
+    let y = (m.origin.1 + by.parse::<f64>().unwrap() * m.scale).round() as i64;
     h.input(t, &["move", &x.to_string(), &y.to_string(), "click"]);
 }
 
@@ -88,17 +102,17 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     let info = v.info().viewer.expect("viewer info");
     assert_eq!(info.buffers, buffers);
 
-    let off = offset(&h, &t, &v);
-    click_button(&h, &t, off, &log);
+    let m = mapping(&h, &t, &v);
+    click_button(&h, &t, &m, &log);
     wait_log(&log, "clicked 1", 5);
 
     // Locked by an agent: the human's clicks are dropped, until shared.
     let vt = v.lock();
-    click_button(&h, &t, off, &log);
+    click_button(&h, &t, &m, &log);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(clicks(&log), 1, "a click got through the lock");
     v.run(&["debug", "share", "on"]);
-    click_button(&h, &t, off, &log);
+    click_button(&h, &t, &m, &log);
     wait_log(&log, "clicked 2", 5);
     v.run(&["-t", &vt, "unlock"]);
 }
@@ -202,14 +216,13 @@ fn draw_and_send() {
         h.input(&t, actions);
         std::thread::sleep(Duration::from_millis(150));
     };
-    step(&["move", "19", "101", "click"]); // box tool
+    step(&["move", "19", "115", "click"]); // box tool
     step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
-    step(&["move", "19", "230", "click"]); // text tool
+    step(&["move", "19", "244", "click"]); // text tool
     step(&["move", "520", "330", "click"]);
     step(&["type", "label", "key", "Return"]);
     step(&["move", "600", "777", "click"]); // message box
     step(&["type", "fix it", "key", "Return"]);
-
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     assert!(out.contains("human message: \"fix it\""), "{out}{err}");
     assert!(out.contains("red text annotation on image 1 at pixel") && out.contains("\"label\""), "{out}");
