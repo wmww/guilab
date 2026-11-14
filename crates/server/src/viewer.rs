@@ -148,6 +148,9 @@ fn to_event(s: &Session, input: Input) -> InputEvent {
         Input::SwipeBegin { fingers } => InputEvent::SwipeBegin { fingers },
         Input::SwipeUpdate { dx, dy } => InputEvent::SwipeUpdate { delta: (dx / scale, dy / scale).into() },
         Input::SwipeEnd { cancelled } => InputEvent::SwipeEnd { cancelled },
+        Input::TouchDown { id, x, y } => InputEvent::TouchDown { slot: id as u32, pos: (x / scale, y / scale).into() },
+        Input::TouchMotion { id, x, y } => InputEvent::TouchMotion { slot: id as u32, pos: (x / scale, y / scale).into() },
+        Input::TouchUp { id } => InputEvent::TouchUp { slot: id as u32 },
     }
 }
 
@@ -408,8 +411,12 @@ impl Server {
                     }
                     // The human using a session keeps it alive.
                     slot.last_active = Instant::now();
+                    let touch = matches!(input, Input::TouchDown { .. } | Input::TouchMotion { .. } | Input::TouchUp { .. });
                     let ev = to_event(&slot.session, input);
                     slot.session.inject(ev, InputSource::Human);
+                    if touch {
+                        slot.session.inject(InputEvent::TouchFrame, InputSource::Human);
+                    }
                 }
                 Action::Revoke { session } => self.revoke_lock(&session),
                 Action::Resize { session, size, scale } => {

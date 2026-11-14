@@ -85,6 +85,15 @@ pub enum HostInput {
     Egui(egui::Event),
     Key(RawKey),
     Gesture(Gesture),
+    Touch(Touch),
+}
+
+/// A touch point on the host (surface points).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Touch {
+    pub id: i32,
+    pub phase: egui::TouchPhase,
+    pub pos: egui::Pos2,
 }
 
 /// A touchpad gesture on the host (zwp_pointer_gestures). Deltas in surface points.
@@ -204,6 +213,9 @@ pub struct HostState {
     cursor_device: Option<WpCursorShapeDeviceV1>,
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
+    touch: Option<wayland_client::protocol::wl_touch::WlTouch>,
+    /// Where each active touch point is (cancel ends them all there).
+    touches: Vec<(i32, egui::Pos2)>,
     /// Serial of the last pointer enter (`set_cursor` needs it).
     pointer_serial: u32,
     /// What the pointer should show (re-applied on enter).
@@ -311,6 +323,8 @@ impl HostState {
             cursor_device: None,
             keyboard: None,
             pointer: None,
+            touch: None,
+            touches: Vec::new(),
             pointer_serial: 0,
             cursor: None,
             present: None,
@@ -778,6 +792,9 @@ impl SeatHandler for HostState {
         if cap == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
         }
+        if cap == Capability::Touch && self.touch.is_none() {
+            self.touch = self.seat_state.get_touch(qh, &seat).ok();
+        }
         if cap == Capability::Pointer && self.pointer.is_none() {
             let Ok(ptr) = self.seat_state.get_pointer(qh, &seat) else { return };
             self.cursor_device = self.cursor_shapes.as_ref().map(|m| m.get_shape_device(&ptr, qh));
@@ -792,6 +809,12 @@ impl SeatHandler for HostState {
         {
             k.release();
             self.keyboard_left = true;
+        }
+        if cap == Capability::Touch
+            && let Some(t) = self.touch.take()
+        {
+            t.release();
+            self.touch_cancel();
         }
         if cap == Capability::Pointer
             && let Some(p) = self.pointer.take()
@@ -937,6 +960,45 @@ impl PointerHandler for HostState {
     }
 }
 
+impl HostState {
+    fn touch_event(&mut self, id: i32, phase: egui::TouchPhase, pos: egui::Pos2) {
+        self.events.push(HostInput::Touch(Touch { id, phase, pos }));
+        self.dirty = true;
+    }
+
+    fn touch_cancel(&mut self) {
+        for (id, pos) in std::mem::take(&mut self.touches) {
+            self.touch_event(id, egui::TouchPhase::Cancel, pos);
+        }
+    }
+}
+
+impl sctk::seat::touch::TouchHandler for HostState {
+    fn down(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, _: u32, _: WlSurface, id: i32, p: (f64, f64)) {
+        let pos = egui::pos2(p.0 as f32, p.1 as f32);
+        self.touches.retain(|(i, _)| *i != id);
+        self.touches.push((id, pos));
+        self.touch_event(id, egui::TouchPhase::Start, pos);
+    }
+    fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, _: u32, id: i32) {
+        let Some(i) = self.touches.iter().position(|(t, _)| *t == id) else { return };
+        let (_, pos) = self.touches.remove(i);
+        self.touch_event(id, egui::TouchPhase::End, pos);
+    }
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, id: i32, p: (f64, f64)) {
+        let pos = egui::pos2(p.0 as f32, p.1 as f32);
+        if let Some(t) = self.touches.iter_mut().find(|(t, _)| *t == id) {
+            t.1 = pos;
+            self.touch_event(id, egui::TouchPhase::Move, pos);
+        }
+    }
+    fn shape(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: i32, _: f64, _: f64) {}
+    fn orientation(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: i32, _: f64) {}
+    fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch) {
+        self.touch_cancel();
+    }
+}
+
 impl ShmHandler for HostState {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -1028,6 +1090,7 @@ delegate_shm!(HostState);
 delegate_seat!(HostState);
 delegate_keyboard!(HostState);
 delegate_pointer!(HostState);
+sctk::delegate_touch!(HostState);
 delegate_xdg_shell!(HostState);
 delegate_xdg_window!(HostState);
 delegate_dmabuf!(HostState);

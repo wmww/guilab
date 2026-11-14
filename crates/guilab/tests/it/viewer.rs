@@ -444,3 +444,35 @@ fn pixel_exact_at_fractional_scale() {
     let differ = (0..vh).flat_map(|y| (0..vw).map(move |x| (x, y))).filter(|&(x, y)| at(&vp, vc, vw, x, y) != at(&hp, hc, hw, ox + x, oy + y)).count();
     assert_eq!(differ, 0, "{differ} pixels differ at offset {ox},{oy}");
 }
+
+/// Host touch: a tap on the app's image reaches the app as touch; a tap on the viewer's
+/// own UI acts like a click there (here: the box tool, then a touch drag draws a box).
+#[test]
+fn touch_through() {
+    let Some((h, sock, t)) = host() else { return };
+    if !gtk4() {
+        return;
+    }
+    let (v, log) = viewed(&[]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let m = mapping(&h, &t, &v);
+    let (bx, by) = center(&std::fs::read_to_string(&log).unwrap(), "button", 1.0);
+    let x = (m.origin.0 + bx.parse::<f64>().unwrap() * m.scale).round() as i64;
+    let y = (m.origin.1 + by.parse::<f64>().unwrap() * m.scale).round() as i64;
+    h.input(&t, &["tap", &x.to_string(), &y.to_string()]);
+    wait_log(&log, "clicked 1", 5);
+    let fingers = v.run(&["log", "--kind", "touch"]);
+    assert!(fingers.contains("finger 0 down"), "{fingers}");
+    // Toolbar: box tool at 19,133 (one session, no tab bar).
+    h.input(&t, &["tap", "19", "133", "sleep", "150", "touch", "down", "1", &(x - 100).to_string(), &(y + 150).to_string(), "touch", "move", "1", &(x + 50).to_string(), &(y + 250).to_string(), "300", "touch", "up", "1"]);
+    std::thread::sleep(Duration::from_millis(300));
+    let shot = h.path("touch.png");
+    h.run(&["screenshot", "-o", &shot]);
+    let (w, _, px, ch) = crate::read_png(&shot);
+    let red = (y + 150..y + 250).filter(|yy| {
+        let i = ((yy * w as i64 + x - 100) as usize) * ch;
+        px[i] > 180 && px[i + 1] < 80 && px[i + 2] < 80
+    }).count();
+    assert!(red > 50, "no box drawn along its left edge ({red} red px)");
+}

@@ -72,6 +72,9 @@ pub enum Input {
     SwipeBegin { fingers: u32 },
     SwipeUpdate { dx: f64, dy: f64 },
     SwipeEnd { cancelled: bool },
+    TouchDown { id: i32, x: f64, y: f64 },
+    TouchMotion { id: i32, x: f64, y: f64 },
+    TouchUp { id: i32 },
 }
 
 /// How scrolling moves the view when it doesn't go to the app.
@@ -115,7 +118,7 @@ enum GestureTo {
 impl Input {
     /// Releases are always delivered, even while human input is blocked.
     pub fn is_release(&self) -> bool {
-        matches!(self, Input::Button { pressed: false, .. } | Input::Key { pressed: false, .. } | Input::PinchEnd { .. } | Input::SwipeEnd { .. })
+        matches!(self, Input::Button { pressed: false, .. } | Input::Key { pressed: false, .. } | Input::PinchEnd { .. } | Input::SwipeEnd { .. } | Input::TouchUp { .. })
     }
 }
 
@@ -227,6 +230,10 @@ pub struct ViewerUi {
     last_view: Option<Rect>,
     /// A resize handle drag, in this session.
     resizing: Option<(String, Resizing)>,
+    /// Touch points we put down in `held_in` (to lift when input goes elsewhere).
+    held_touches: Vec<i32>,
+    /// Where touches go to the app as of the last frame: the image, with "Use the app".
+    touch_area: Option<Rect>,
 }
 
 /// Where the chat panel goes (View menu).
@@ -270,6 +277,12 @@ impl ViewerUi {
         self.pixel_ratio >= 2.0
     }
 
+    /// Whether a touch starting at `p` is the app's (its image, no drawing tool, no menu
+    /// open; as of the last frame). Blocked ones go there too (and are dropped).
+    pub fn touch_to_app(&self, ctx: &egui::Context, p: Pos2) -> bool {
+        self.touch_area.is_some_and(|r| r.contains(p)) && !guilab_markup::menu::MenuBar::is_open(ctx, "menubar")
+    }
+
     /// The cursor the host should show, given the cursor egui picked this frame.
     pub fn host_cursor(&self, egui: CursorIcon) -> HostCursor {
         match &self.app_image {
@@ -291,6 +304,9 @@ impl ViewerUi {
         }
         for code in self.held_keys.drain(..) {
             out.push(Action::Input { session: session.clone(), input: Input::Key { code, pressed: false } });
+        }
+        for id in self.held_touches.drain(..) {
+            out.push(Action::Input { session: session.clone(), input: Input::TouchUp { id } });
         }
         self.middle = None;
         out
@@ -669,6 +685,30 @@ impl ViewerUi {
                     }
                     continue;
                 }
+                HostInput::Touch(t) => {
+                    let (x, y) = to_session(img, t.pos);
+                    match t.phase {
+                        egui::TouchPhase::Start => {
+                            if !to_app {
+                                tried |= blocked;
+                                continue;
+                            }
+                            if self.held_in.as_deref() != Some(s.name) {
+                                out.extend(self.release_all());
+                                self.held_in = Some(s.name.to_string());
+                            }
+                            self.held_touches.push(t.id);
+                            send(out, Input::TouchDown { id: t.id, x, y });
+                        }
+                        _ if !self.held_touches.contains(&t.id) => {}
+                        egui::TouchPhase::Move => send(out, Input::TouchMotion { id: t.id, x, y }),
+                        egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                            self.held_touches.retain(|i| *i != t.id);
+                            send(out, Input::TouchUp { id: t.id });
+                        }
+                    }
+                    continue;
+                }
                 HostInput::Gesture(g) => {
                     // Over the app with "Use the app": the whole gesture goes to it. Else
                     // a pinch zooms the view (swipes do nothing).
@@ -926,6 +966,7 @@ impl ViewerUi {
             }
         }
         self.image_rect = Some(img);
+        self.touch_area = (!drawing).then_some(img.intersect(view));
         self.pixel_ratio = z.zoom;
 
         // Cursor. Over the image: the app's when input goes to it, else a tool cursor, never

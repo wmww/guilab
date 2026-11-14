@@ -67,6 +67,9 @@ pub struct Viewer {
     pending: egui::TexturesDelta,
     /// Frames presented.
     pub frames: u64,
+    /// Host touch points going to the app, and the one acting as egui's pointer.
+    touch_app: Vec<i32>,
+    touch_egui: Option<i32>,
 }
 
 impl Viewer {
@@ -89,6 +92,8 @@ impl Viewer {
             shown: 0,
             pending: Default::default(),
             frames: 0,
+            touch_app: Vec::new(),
+            touch_egui: None,
         })
     }
 
@@ -164,9 +169,47 @@ impl Viewer {
         self.ui.release_all()
     }
 
+    /// Touches that start on the app's image go to the app (the UI forwards them); the
+    /// first other one drives egui's pointer (buttons, menus), the rest are dropped.
+    fn route_touches(&mut self, inputs: Vec<HostInput>) -> Vec<HostInput> {
+        use egui::{Event, PointerButton, TouchPhase};
+        let mut out = Vec::with_capacity(inputs.len());
+        for i in inputs {
+            let HostInput::Touch(t) = i else {
+                out.push(i);
+                continue;
+            };
+            let button = |pressed| HostInput::Egui(Event::PointerButton { pos: t.pos, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+            match t.phase {
+                TouchPhase::Start if self.ui.touch_to_app(&self.gfx.ctx, t.pos) => {
+                    self.touch_app.push(t.id);
+                    out.push(i);
+                }
+                TouchPhase::Start if self.touch_egui.is_none() => {
+                    self.touch_egui = Some(t.id);
+                    out.extend([HostInput::Egui(Event::PointerMoved(t.pos)), button(true)]);
+                }
+                _ if self.touch_app.contains(&t.id) => {
+                    if matches!(t.phase, TouchPhase::End | TouchPhase::Cancel) {
+                        self.touch_app.retain(|x| *x != t.id);
+                    }
+                    out.push(i);
+                }
+                TouchPhase::Move if self.touch_egui == Some(t.id) => out.push(HostInput::Egui(Event::PointerMoved(t.pos))),
+                TouchPhase::End | TouchPhase::Cancel if self.touch_egui == Some(t.id) => {
+                    self.touch_egui = None;
+                    out.extend([button(false), HostInput::Egui(Event::PointerGone)]);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// Runs the UI and presents a frame if the host is ready. Returns the human's actions.
     pub fn draw(&mut self, renderer: &mut GlesRenderer, sessions: &[SessionFrame], now: Instant) -> anyhow::Result<Vec<Action>> {
         let inputs = self.host.take_input();
+        let inputs = self.route_touches(inputs);
         let keyboard_left = std::mem::take(&mut self.host.keyboard_left);
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
@@ -176,7 +219,7 @@ impl Viewer {
             .filter_map(|i| match i {
                 HostInput::Egui(egui::Event::Key { .. } | egui::Event::Text(_)) if to_session => None,
                 HostInput::Egui(e) => Some(e.clone()),
-                HostInput::Key(_) | HostInput::Gesture(_) => None,
+                HostInput::Key(_) | HostInput::Gesture(_) | HostInput::Touch(_) => None,
             })
             .collect();
         // The UI gets everything in order (pointer and keys interleaved), keys only if
