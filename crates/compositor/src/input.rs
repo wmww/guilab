@@ -33,6 +33,10 @@ pub enum InputSource {
     Human,
 }
 
+/// Key repeat for human typing: keys per second, and ms before repeating starts.
+const HUMAN_REPEAT_RATE: i32 = 25;
+const HUMAN_REPEAT_DELAY: i32 = 600;
+
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     PointerMotion { pos: Point<f64, Logical> },
@@ -197,6 +201,15 @@ impl Session {
         self.log.push(data, None);
     }
 
+    /// Key repeat is client-side, so it's per seat, not per key: on while a human types (held
+    /// keys repeat as usual), off for agents (held keys in input chains must not repeat).
+    fn set_repeat(&mut self, kb: &smithay::input::keyboard::KeyboardHandle<Session>, on: bool) {
+        if self.key_repeat != on {
+            self.key_repeat = on;
+            kb.change_repeat_info(if on { HUMAN_REPEAT_RATE } else { 0 }, HUMAN_REPEAT_DELAY);
+        }
+    }
+
     /// Delivers one event to the seat. The only way input reaches clients.
     pub fn inject(&mut self, ev: InputEvent, source: InputSource) {
         self.last_input = Instant::now();
@@ -262,6 +275,9 @@ impl Session {
             }
             InputEvent::Key { code, pressed } => {
                 let Some(kb) = self.seat.get_keyboard() else { return };
+                if pressed {
+                    self.set_repeat(&kb, source == InputSource::Human);
+                }
                 let state = if pressed { KeyState::Pressed } else { KeyState::Released };
                 let mut sym = None;
                 kb.input::<(), _>(self, code, state, SERIAL_COUNTER.next_serial(), time, |_, _, h| {

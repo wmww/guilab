@@ -102,7 +102,8 @@ impl Viewer {
 
     /// Whether to run the UI now: the host is ready for a frame and something changed, or
     /// there's new input (handled right away even if the frame has to wait).
-    pub fn wants_draw(&self, now: Instant, sessions: &[SessionFrame]) -> bool {
+    pub fn wants_draw(&mut self, now: Instant, sessions: &[SessionFrame]) -> bool {
+        self.host.tick_repeat(now);
         let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
         (self.host.can_draw() && changed) || self.host.has_input()
     }

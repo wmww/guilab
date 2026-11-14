@@ -236,3 +236,21 @@ fn draw_and_send() {
     assert!(red > 300, "the box isn't in the image ({red} red pixels)");
     assert!(v.info().viewer.is_some(), "the viewer survived");
 }
+
+/// A key the human holds repeats in the viewer's text boxes (the host session turns client
+/// key repeat on for human keys; the viewer repeats keys for egui itself).
+#[test]
+fn held_key_repeats() {
+    let Some((h, sock, t)) = host() else { return };
+    h.run(&["-t", &t, "unlock"]);
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    h.run(&["debug", "input", "move", "600", "777", "sleep", "100", "click"]); // message box
+    std::thread::sleep(Duration::from_millis(200));
+    h.run(&["debug", "input", "keydown", "x", "sleep", "1200", "keyup", "x", "key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    let n = out.lines().find_map(|l| l.split("human message: \"").nth(1)).map(|m| m.chars().take_while(|c| *c == 'x').count());
+    assert!(n.is_some_and(|n| n >= 5), "expected repeats: {out}{err}");
+}

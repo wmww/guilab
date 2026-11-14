@@ -148,6 +148,8 @@ pub struct Session {
     /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
     pub extra_keys: Vec<(Keysym, Keycode)>,
     pub held: Held,
+    /// Clients have key repeat on (see `input::set_repeat`).
+    pub key_repeat: bool,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
     /// Mime types of a client-owned clipboard selection (None: empty or ours).
@@ -237,7 +239,8 @@ impl Session {
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "seat0");
-        // Repeat rate 0: no client-side key repeat, so held keys in agent input chains don't repeat.
+        // Repeat starts off (rate 0), so held keys in agent input chains don't repeat; human keys
+        // turn it on (see `input::set_repeat`).
         seat.add_keyboard(XkbConfig { layout: "us", ..Default::default() }, 600, 0)
             .context("keyboard (is xkeyboard-config installed?)")?;
         // Same keymap, as text we keep (keys.rs extends it to type arbitrary characters).
@@ -308,6 +311,7 @@ impl Session {
             keymap,
             extra_keys: Vec::new(),
             held: Held::default(),
+            key_repeat: false,
             click_in_grab: false,
             clip_mimes: None,
             dnd_icon: None,

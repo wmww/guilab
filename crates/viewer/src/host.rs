@@ -8,7 +8,7 @@
 use std::{
     os::{fd::AsFd, unix::net::UnixStream},
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, anyhow};
@@ -22,7 +22,7 @@ use sctk::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
         pointer::{PointerEvent, PointerEventKind, PointerHandler, cursor_shape::CursorShapeManager},
     },
     shell::{
@@ -163,6 +163,16 @@ pub struct HostState {
     pointer_pos: egui::Pos2,
     pinch_scale: f64,
     pub buffer_kind: Option<BufferKind>,
+    /// Key repeat from the host compositor: (keys per second, delay ms); None = off.
+    repeat_info: Option<(u32, u32)>,
+    /// The key repeating for egui (session apps repeat keys themselves).
+    repeating: Option<Repeat>,
+}
+
+struct Repeat {
+    code: u32,
+    ev: KeyEvent,
+    next: Instant,
 }
 
 /// Same physical GPU? Render and card nodes of one device share `/sys/dev/char/M:m/device`.
@@ -246,6 +256,8 @@ impl HostState {
             pointer_pos: egui::Pos2::ZERO,
             pinch_scale: 1.0,
             buffer_kind: None,
+            repeat_info: Some((25, 600)),
+            repeating: None,
         })
     }
 
@@ -604,6 +616,7 @@ impl KeyboardHandler for HostState {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: &WlSurface, _: u32) {
         self.focused = false;
         self.keyboard_left = true;
+        self.repeating = None;
         self.modifiers = Default::default();
         self.events.push(HostInput::Egui(egui::Event::WindowFocused(false)));
         self.dirty = true;
@@ -612,6 +625,12 @@ impl KeyboardHandler for HostState {
         self.key(ev, true);
     }
     fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, _: KeyEvent) {}
+    fn update_repeat_info(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, info: RepeatInfo) {
+        self.repeat_info = match info {
+            RepeatInfo::Repeat { rate, delay } => Some((rate.get(), delay)),
+            RepeatInfo::Disable => None,
+        };
+    }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, ev: KeyEvent) {
         self.key(ev, false);
     }
@@ -624,13 +643,46 @@ impl HostState {
     fn key(&mut self, ev: KeyEvent, pressed: bool) {
         self.dirty = true;
         self.events.push(HostInput::Key(RawKey { code: ev.raw_code, pressed }));
+        if pressed && !ev.keysym.is_modifier_key() {
+            self.repeating = self.repeat_info.map(|(_, delay)| Repeat { code: ev.raw_code, ev: ev.clone(), next: Instant::now() + Duration::from_millis(delay as u64) });
+        } else if !pressed && self.repeating.as_ref().is_some_and(|r| r.code == ev.raw_code) {
+            self.repeating = None;
+        }
+        self.egui_key(&ev, pressed, false);
+    }
+
+    /// Repeats the held key for egui (the host compositor leaves repeat to clients). Called
+    /// every server tick.
+    pub fn tick_repeat(&mut self, now: Instant) {
+        let (Some(r), Some((rate, _))) = (&mut self.repeating, self.repeat_info) else { return };
+        if !self.focused || now < r.next {
+            return;
+        }
+        let ev = r.ev.clone();
+        let step = Duration::from_secs(1) / rate.max(1);
+        // At most a few per tick, so a stall doesn't dump a burst.
+        let mut n = 0;
+        while r.next <= now && n < 3 {
+            r.next += step;
+            n += 1;
+        }
+        if r.next <= now {
+            r.next = now + step;
+        }
+        for _ in 0..n {
+            self.egui_key(&ev, true, true);
+        }
+        self.dirty = true;
+    }
+
+    fn egui_key(&mut self, ev: &KeyEvent, pressed: bool, repeat: bool) {
         if let Some(key) = egui_key(ev.keysym) {
-            self.events.push(HostInput::Egui(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: self.modifiers }));
+            self.events.push(HostInput::Egui(egui::Event::Key { key, physical_key: None, pressed, repeat, modifiers: self.modifiers }));
         }
         if pressed
             && !self.modifiers.ctrl
             && !self.modifiers.alt
-            && let Some(t) = ev.utf8.filter(|t| !t.chars().any(char::is_control))
+            && let Some(t) = ev.utf8.clone().filter(|t| !t.chars().any(char::is_control))
         {
             self.events.push(HostInput::Egui(egui::Event::Text(t)));
         }
