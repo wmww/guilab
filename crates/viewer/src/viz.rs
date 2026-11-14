@@ -12,16 +12,24 @@ const AGENT: Color32 = Color32::from_rgb(255, 176, 64);
 const HUMAN: Color32 = Color32::from_rgb(110, 180, 255);
 const TOUCH: Color32 = Color32::from_rgb(120, 230, 150);
 /// Seconds things stay visible.
-const GLOW: f64 = 1.5;
 const TRAIL: f64 = 0.5;
 const RIPPLE: f64 = 0.45;
 const KEYS: f64 = 3.0;
+/// Glow fade after the pointer leaves; scroll marks' life.
+const LEAVE: f64 = 0.3;
+const SCROLL: f64 = 0.5;
 
 #[derive(Default)]
 pub struct Overlay {
     next: u64,
     /// Pointer: position (session px), last event time, by an agent, button held.
     pointer: Option<(Pos2, f64, bool, bool)>,
+    /// When the pointer left (the glow fades out from then).
+    left: Option<f64>,
+    /// Wheel notches: where, when, direction (unit, screen-ish), by an agent.
+    notches: Vec<(Pos2, f64, egui::Vec2, bool)>,
+    /// Smooth scrolling: when, delta (session px), by an agent.
+    smooth: VecDeque<(f64, egui::Vec2, bool)>,
     trail: VecDeque<(Pos2, f64, bool)>,
     ripples: Vec<(Pos2, f64, bool)>,
     /// Touch points: position, last event time, lifted.
@@ -49,6 +57,7 @@ impl Overlay {
                 VizKind::Motion { x, y } => {
                     let p = pos2(*x as f32, *y as f32);
                     self.pointer = Some((p, t, agent, held));
+                    self.left = None;
                     if agent || held {
                         self.trail.push_back((p, t, agent));
                     }
@@ -60,13 +69,27 @@ impl Overlay {
                         ptr.3 = *pressed;
                         if *pressed {
                             self.ripples.push((ptr.0, t, agent));
+                            // The drag's trail starts at the press.
+                            self.trail.push_back((ptr.0, t, agent));
                         }
                     }
                 }
-                VizKind::Scroll => {
-                    if let Some(ptr) = &mut self.pointer {
-                        ptr.1 = t;
-                        ptr.2 = agent;
+                VizKind::Leave => self.left = Some(t),
+                VizKind::Scroll { dx, dy, discrete } => {
+                    let Some(ptr) = &mut self.pointer else { continue };
+                    ptr.1 = t;
+                    ptr.2 = agent;
+                    let d = vec2(*dx as f32, *dy as f32);
+                    if *discrete {
+                        // One mark per notch (a few at most), per axis.
+                        for (n, unit) in [(d.x, vec2(1.0, 0.0)), (d.y, vec2(0.0, 1.0))] {
+                            let count = n.abs().round().clamp(if n != 0.0 { 1.0 } else { 0.0 }, 3.0) as usize;
+                            for i in 0..count {
+                                self.notches.push((ptr.0, t + i as f64 * 0.06, unit * n.signum(), agent));
+                            }
+                        }
+                    } else {
+                        self.smooth.push_back((t, d, agent));
                     }
                 }
                 VizKind::Touch { id, x, y, phase } => {
@@ -85,6 +108,14 @@ impl Overlay {
             self.trail.pop_front();
         }
         self.ripples.retain(|r| now - r.1 < RIPPLE);
+        self.notches.retain(|n| now - n.1 < SCROLL);
+        while self.smooth.front().is_some_and(|e| now - e.0 > SCROLL) {
+            self.smooth.pop_front();
+        }
+        if self.left.is_some_and(|t| now - t > LEAVE) {
+            self.pointer = None;
+            self.left = None;
+        }
         self.touches.retain(|_, t| !t.2 || now - t.1 < RIPPLE);
         while self.keys.len() > 12 || self.keys.front().is_some_and(|k| now - k.1 > KEYS) {
             self.keys.pop_front();
@@ -107,9 +138,10 @@ impl Overlay {
             painter.line_segment([to_screen(a.0), to_screen(b.0)], Stroke::new(3.0, tint(if b.2 { AGENT } else { HUMAN }, f * 0.45)));
             animating = true;
         }
-        // Pointer glow: soft concentric discs; a ring while a button is held.
-        if let Some((p, t, agent, down)) = self.pointer {
-            let f = if down { 1.0 } else { 1.0 - (now - t) / GLOW };
+        // Pointer glow: soft concentric discs, until the pointer leaves; a ring while a
+        // button is held.
+        if let Some((p, _, agent, down)) = self.pointer {
+            let f = self.left.map_or(1.0, |t| 1.0 - (now - t) / LEAVE);
             if f > 0.0 {
                 let c = if agent { AGENT } else { HUMAN };
                 let at = to_screen(p);
@@ -119,7 +151,38 @@ impl Overlay {
                 if down {
                     painter.circle_stroke(at, 9.0, Stroke::new(2.0, tint(c, 0.8)));
                 }
-                animating |= !down;
+                animating |= self.left.is_some();
+            }
+            // Wheel notches: chevrons stepping out from the pointer in the scroll direction.
+            for (at, t, dir, agent) in &self.notches {
+                let age = now - t;
+                if age < 0.0 {
+                    animating = true;
+                    continue;
+                }
+                let f = (age / SCROLL) as f32;
+                let c = tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64) * 0.9);
+                let tip = to_screen(*at) + *dir * (16.0 + 14.0 * f);
+                let n = vec2(-dir.y, dir.x) * 5.0;
+                painter.line_segment([tip - *dir * 5.0 + n, tip], Stroke::new(2.0, c));
+                painter.line_segment([tip - *dir * 5.0 - n, tip], Stroke::new(2.0, c));
+                animating = true;
+            }
+            // Smooth scrolling: a streak from the pointer, as long as recent motion.
+            if !self.smooth.is_empty() {
+                // Length from the motion just before the latest event; fades from then.
+                let &(last, _, by_agent) = self.smooth.back().unwrap();
+                let sum = self.smooth.iter().filter(|e| last - e.0 < 0.2).fold(vec2(0.0, 0.0), |s, e| s + e.1);
+                let f = 1.0 - (now - last) / SCROLL;
+                let len = sum.length().min(40.0);
+                if len > 1.0 && f > 0.0 {
+                    let dir = sum / sum.length();
+                    let at = to_screen(p) + dir * 12.0;
+                    let c = tint(if by_agent { AGENT } else { HUMAN }, f * 0.7);
+                    painter.line_segment([at, at + dir * len], Stroke::new(3.0, c));
+                    painter.circle_filled(at + dir * len, 2.5, c);
+                }
+                animating = true;
             }
         }
         for (p, t, agent) in &self.ripples {

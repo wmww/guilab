@@ -8,7 +8,10 @@ pub enum VizKind {
     /// Pointer position, output pixels.
     Motion { x: f64, y: f64 },
     Button { pressed: bool },
-    Scroll,
+    /// The pointer left the output (e.g. the human's pointer left the app in the viewer).
+    Leave,
+    /// Wheel notches (`discrete`) or smooth output pixels; positive = down/right.
+    Scroll { dx: f64, dy: f64, discrete: bool },
     Touch { id: u32, x: f64, y: f64, phase: TouchPhase },
     /// A key press, labeled for display ("A", "Ctrl+S", "Enter", "F2"; the viewer draws
     /// symbols for Enter, Space, Backspace and arrows).

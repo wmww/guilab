@@ -221,7 +221,11 @@ impl Session {
                 VizKind::Motion { x, y }
             }
             InputEvent::PointerButton { pressed, .. } => VizKind::Button { pressed: *pressed },
-            InputEvent::PointerAxis { .. } => VizKind::Scroll,
+            InputEvent::PointerAxis { delta, steps, .. } => match steps {
+                Some((sx, sy)) => VizKind::Scroll { dx: *sx, dy: *sy, discrete: true },
+                None => VizKind::Scroll { dx: delta.0 * s, dy: delta.1 * s, discrete: false },
+            },
+            InputEvent::PointerLeave => VizKind::Leave,
             InputEvent::TouchDown { slot, pos } | InputEvent::TouchMotion { slot, pos } => {
                 let (x, y) = px(*pos);
                 let phase = if matches!(ev, InputEvent::TouchDown { .. }) { TouchPhase::Down } else { TouchPhase::Move };
