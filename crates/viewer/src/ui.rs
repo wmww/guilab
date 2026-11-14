@@ -407,14 +407,15 @@ impl ViewerUi {
                 self.blocked_at = None;
             }
             if let Some(t) = self.blocked_at {
-                let mut stop = false;
+                let (mut share, mut stop) = (false, false);
                 let r = guilab_markup::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
                     ui.label("Agent using app");
+                    share = ui.button("Share").on_hover_text("Use the app alongside the agent").clicked();
                     stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
                 });
                 slot += 1;
-                if stop {
-                    out.push(Action::Revoke { session: s.name.to_string() });
+                if share || stop {
+                    out.push(if stop { Action::Revoke { session: s.name.to_string() } } else { Action::Share { session: s.name.to_string(), on: true } });
                     self.blocked_at = None;
                 } else if r.hovered() {
                     self.blocked_at = Some(now);
@@ -422,6 +423,21 @@ impl ViewerUi {
                     self.blocked_at = None;
                 } else {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TOAST_SECS - (now - t) + 0.05));
+                }
+            }
+            // Shared: both drive the app, which is unusual and worth keeping in view.
+            if s.locked && s.shared {
+                let (mut unshare, mut stop) = (false, false);
+                guilab_markup::toast(ui, egui::Id::new("shared-toast"), view, slot, |ui| {
+                    ui.label("Sharing the app with the agent");
+                    unshare = ui.button("Stop sharing").on_hover_text("Leave the app to the agent").clicked();
+                    stop = ui.button("Take over").on_hover_text("Take the app back from the agent").clicked();
+                });
+                slot += 1;
+                if unshare {
+                    out.push(Action::Share { session: s.name.to_string(), on: false });
+                } else if stop {
+                    out.push(Action::Revoke { session: s.name.to_string() });
                 }
             }
             if let Ok(mut n) = self.notices.lock()
