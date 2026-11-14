@@ -1,6 +1,6 @@
 # Image system
 
-Queued; not started. Replaces the issues annotation-marks, image-pull and agent-images. The UI side is in `chat-image-flow.md`. When built, move the parts that end up true into a note.
+Queued; not started. The UI side is in `chat-image-flow.md`. This file is the user's spec. **The design, phases and parallel plan are in `notes/image-system-design.md`**, and the tested agent doc text is in `notes/image-format-doc.md`. When built, move the parts that end up true into notes.
 
 ## Model
 - **Raster**: immutable pixels with a random id. Made by screenshots (human or agent) and by inserted files. Shared by every image that uses it; that sharing is the link between related images.
@@ -13,17 +13,7 @@ Queued; not started. Replaces the issues annotation-marks, image-pull and agent-
 - **Invariant**: the editor only opens images, never rendered files. A baked annotation can never become an editable element, except through out-of-band tools.
 
 ## Text format (one format both ways)
-Agents read marks and write them in **exactly the same syntax**, so they can copy what they've seen and have no wrong assumptions about what exists. No SVG-like input. Sketch (settle details while building):
-```
-image k3f9 1280x720 (parent q81c), crop 400,200 600x400
-  #1 raster r7 0,0 1280x720
-  #2 red arrow 412,300 → 640,410
-  #3 red box 600,380 – 700,440
-  #4 green pen bounds 300,500 – 420,560
-  #5 red text 640,410 "too big"
-  #6 svg ./mock.svg 100,100 400x300
-```
-Element numbers are stable within an image, since images are immutable. Pen strokes show only their bounds when listed for reading; writing a pen stroke takes points.
+Agents read marks and write them in **exactly the same syntax**, so they can copy what they've seen and have no wrong assumptions about what exists. No SVG-like input. Grammar and examples: design note "Text format" (tested on 6 fresh agents).
 
 ## Agent CLI
 - `guilab image ID [-o PATH] [--crop X,Y,W,H] [--no-marks] [--max WxH]`: render to PNG, print the path. **Pull, not push.** Deliveries and `poll` give only text (image ids, sizes, element lists, a fetch hint). A crop at full resolution gives more detail than a shrunk whole image, for less context. `--max` only shrinks.
@@ -44,3 +34,8 @@ Split so each part could be pulled into another app (an egui harness, a mobile i
 - **chat widget** (egui, no guilab): feed and composer, generic over attachments (a small trait for thumbnails and clicks), not tied to the image core.
 - **toolkit** (egui widgets + theme): shared by the editor, chat and viewer, and tied to none of them.
 - guilab glues it together: the server owns the image store (the CLI needs it), and the viewer uses it in-process.
+
+## Open questions for the user
+The design assumes these defaults; none blocks phases 1–3.
+- **Deleting an element in the editor** (the spec says pictures can be "deleted as a unit", but there's no UI for it): Delete/Backspace removes the item under the pointer while the Move tool is selected.
+- **Cropping in the editor** (the spec says crops are non-destructive and can be undone, but there's no UI for it): a Crop tool. Drag a rectangle; while the tool is selected, the whole canvas shows dimmed outside the crop, with a "Show all" button to uncrop.
