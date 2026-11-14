@@ -50,6 +50,8 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
     // items, the status line and a growing composer keep it there. A wheel or scroll bar
     // move away in the same frame still wins, and then it stops following.
     let follow = scroll || chat.feed.at_end;
+    // Read before the scroll area consumes the wheel.
+    let scrolling = ui.input(|i| i.smooth_scroll_delta.y != 0.0 || i.pointer.primary_down());
     let empty = chat.items.is_empty() && chat.status.is_none();
     let room = (chat.feed.view_h - chat.feed.content_h).max(0.0);
     let mut content_h = 0.0;
@@ -82,7 +84,14 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
         ui.ctx().request_repaint();
     }
     let fits = area.content_size.y <= area.inner_rect.height();
-    chat.feed.at_end = fits || area.state.offset.y + area.inner_rect.height() >= area.content_size.y - 1.0;
+    let at_end = fits || area.state.offset.y + area.inner_rect.height() >= area.content_size.y - 1.0;
+    // A follow can land short when the view shrank this frame (egui aims with the old clip
+    // size): keep following unless the human scrolled (wheel, or a press on the feed).
+    let user = scrolling && ui.input(|i| i.pointer.hover_pos().is_some_and(|p| area.inner_rect.contains(p)));
+    chat.feed.at_end = at_end || (follow && !user);
+    if !at_end && chat.feed.at_end {
+        ui.ctx().request_repaint();
+    }
     if chat.feed.at_end {
         chat.feed.unseen = false;
     } else if jump_button(ui, t, id, area.inner_rect, chat.feed.unseen) {

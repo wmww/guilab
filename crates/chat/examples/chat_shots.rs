@@ -169,6 +169,18 @@ fn scenarios(d: &mut Driver, filter: &str) {
         d.settle();
         d.snap("10-copy-on-edit");
     }
+    if want("long") {
+        let c = d.host.last.composer;
+        d.click(c.left_bottom() + vec2(30.0, -16.0));
+        for i in 0..12 {
+            d.run(vec![ev::text(&format!("line {i} of a long message")), ev::key(Key::Enter, Modifiers::SHIFT)]);
+        }
+        d.settle();
+        d.snap("14-long-draft");
+        d.h.ctx.memory_mut(|m| m.surrender_focus(d.host.chat.text_id()));
+        d.host.chat.draft_mut().clear();
+        d.settle();
+    }
     if want("faint") {
         let (s, k) = d.feed_slot(4, 0);
         // Scroll it into view.

@@ -253,3 +253,22 @@ fn follows_the_end() {
     t.settle();
     assert!(clip.contains_rect(t.slot(SlotId::Feed { item: id2, index: 0 }, k2)));
 }
+
+#[test]
+fn growing_composer_keeps_the_end() {
+    let mut t = T::new();
+    t.host.sample();
+    t.host.status = None;
+    t.settle();
+    let (id, it) = t.host.chat.items().nth(7).map(|(i, it)| (i, it.clone())).unwrap();
+    let last = |t: &T| t.slot(SlotId::Feed { item: id, index: 0 }, it.attachments[0]);
+    t.focus_text();
+    let before = t.host.last.feed_clip.bottom() - last(&t).bottom();
+    for i in 0..12 {
+        t.run(vec![ev::text(&format!("line {i}")), ev::key(Key::Enter, Modifiers::SHIFT)]);
+    }
+    t.settle();
+    let after = t.host.last.feed_clip.bottom() - last(&t).bottom();
+    assert!(t.host.last.composer.height() > 150.0);
+    assert!((before - after).abs() < 1.0, "the feed's end stays in view: {before} vs {after}");
+}
