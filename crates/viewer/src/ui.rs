@@ -375,7 +375,7 @@ impl ViewerUi {
             self.view(ui, s, &mut p.zoom, view, resp.hovered(), &p.sketch, inputs, &mut out);
             if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
                 p.viz.update(log, now);
-                let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0);
+                let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 185.0);
                 p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now, light);
             }
             if drawing && let Some(rect) = self.image_rect {
