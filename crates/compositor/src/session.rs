@@ -152,6 +152,8 @@ pub struct Session {
     pub key_repeat: bool,
     /// Input that reached the apps, for the viewer to show.
     pub viz: guilab_proto::viz::VizLog,
+    /// Cache for `color_under_pointer`: (viz end, frame seq), when sampled, the color.
+    pub(crate) under_pointer: Option<((u64, u64), Instant, Option<[u8; 3]>)>,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
     /// Mime types of a client-owned clipboard selection (None: empty or ours).
@@ -315,6 +317,7 @@ impl Session {
             held: Held::default(),
             key_repeat: false,
             viz: Default::default(),
+            under_pointer: None,
             click_in_grab: false,
             clip_mimes: None,
             dnd_icon: None,

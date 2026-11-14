@@ -48,6 +48,8 @@ pub struct SessionFrame<'a> {
     pub cursor: egui::CursorIcon,
     /// Input that reached the apps (the overlay shows it).
     pub viz: &'a guilab_proto::viz::VizLog,
+    /// Average color around the pointer in the session's frame.
+    pub under_pointer: Option<[u8; 3]>,
 }
 
 pub struct Viewer {
@@ -184,6 +186,7 @@ impl Viewer {
                 shared: s.shared,
                 cursor: s.cursor,
                 viz: (Some(s.name) == cur.as_deref()).then_some(s.viz),
+                under_pointer: s.under_pointer,
             })
             .collect();
 

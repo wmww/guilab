@@ -185,9 +185,22 @@ impl Frame {
 
     /// Reads the last rendered frame back as tightly packed RGBA8.
     pub fn read_rgba(&mut self, gpu: &mut Gpu) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+        self.read_rgba_region(gpu, None)
+    }
+
+    /// Like [`Self::read_rgba`], for a part of the frame (x, y, w, h in pixels, clamped).
+    pub fn read_rgba_region(&mut self, gpu: &mut Gpu, region: Option<(i32, i32, i32, i32)>) -> anyhow::Result<(u32, u32, Vec<u8>)> {
         let (target, size) = self.target.as_mut().context("nothing rendered yet")?;
         let size = *size;
-        let rect = Rectangle::from_size((size.w, size.h).into());
+        let rect = match region {
+            None => Rectangle::from_size((size.w, size.h).into()),
+            Some((x, y, w, h)) => {
+                let (x0, y0) = (x.clamp(0, size.w - 1), y.clamp(0, size.h - 1));
+                let (x1, y1) = ((x + w).clamp(x0 + 1, size.w), (y + h).clamp(y0 + 1, size.h));
+                Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
+            }
+        };
+        let size = rect.size;
         macro_rules! go {
             ($r:expr, $t:expr) => {{
                 let fb = $r.bind($t)?;

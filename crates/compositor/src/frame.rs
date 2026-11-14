@@ -120,6 +120,38 @@ impl Session {
         self.frame.read_rgba(&mut gpu.borrow_mut())
     }
 
+    /// Average color of the frame in a square of `radius` pixels around output pixel (x, y).
+    pub fn sample_rgb(&mut self, x: f64, y: f64, radius: i32) -> Option<[u8; 3]> {
+        let gpu = self.gpu.clone();
+        let (x, y) = (x.round() as i32, y.round() as i32);
+        let (_, _, px) = self.frame.read_rgba_region(&mut gpu.borrow_mut(), Some((x - radius, y - radius, 2 * radius + 1, 2 * radius + 1))).ok()?;
+        let n = (px.len() / 4).max(1) as u64;
+        let mut sum = [0u64; 3];
+        for p in px.as_chunks::<4>().0 {
+            for c in 0..3 {
+                sum[c] += p[c] as u64;
+            }
+        }
+        Some(sum.map(|s| (s / n) as u8))
+    }
+
+    /// The color under the pointer (see [`Self::sample_rgb`]), resampled at most every
+    /// 100 ms and only when the pointer moved or the frame changed.
+    pub fn color_under_pointer(&mut self) -> Option<[u8; 3]> {
+        let key = (self.viz.end(), self.frame_seq);
+        let now = Instant::now();
+        if let Some((k, at, c)) = self.under_pointer
+            && (k == key || now.duration_since(at) < Duration::from_millis(100))
+        {
+            return c;
+        }
+        let s = self.output.current_scale().fractional_scale();
+        let p = self.pointer_location();
+        let c = self.sample_rgb(p.x * s, p.y * s, 4);
+        self.under_pointer = Some((key, now, c));
+        c
+    }
+
     pub fn output_info(&self) -> guilab_proto::OutputInfo {
         let size = self.output.current_mode().map(|m| m.size).unwrap_or_default();
         guilab_proto::OutputInfo {

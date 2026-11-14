@@ -39,6 +39,7 @@ pub struct SessionView<'a> {
     pub cursor: CursorIcon,
     /// Input that reached the apps (current session only).
     pub viz: Option<&'a guilab_proto::viz::VizLog>,
+    pub under_pointer: Option<[u8; 3]>,
 }
 
 impl SessionView<'_> {
@@ -374,7 +375,8 @@ impl ViewerUi {
             self.view(ui, s, &mut p.zoom, view, resp.hovered(), &p.sketch, inputs, &mut out);
             if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
                 p.viz.update(log, now);
-                p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now);
+                let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0);
+                p.viz.paint(ui, view, img, (s.size.0 as f32, s.size.1 as f32), now, light);
             }
             if drawing && let Some(rect) = self.image_rect {
                 let size = [s.size.0 as usize, s.size.1 as usize];

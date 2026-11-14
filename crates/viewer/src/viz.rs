@@ -8,9 +8,17 @@ use std::collections::{BTreeMap, VecDeque};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Ui, pos2, vec2};
 use guilab_proto::viz::{TouchPhase, VizKind, VizLog};
 
-const AGENT: Color32 = Color32::from_rgb(255, 176, 64);
-const HUMAN: Color32 = Color32::from_rgb(110, 180, 255);
-const TOUCH: Color32 = Color32::from_rgb(120, 230, 150);
+/// Colors over dark content, and deeper ones over light content (picked from the color
+/// under the pointer).
+struct Palette {
+    agent: Color32,
+    human: Color32,
+    touch: Color32,
+    /// Glow layer opacity.
+    glow: f64,
+}
+const DARK_BG: Palette = Palette { agent: Color32::from_rgb(255, 176, 64), human: Color32::from_rgb(110, 180, 255), touch: Color32::from_rgb(120, 230, 150), glow: 0.14 };
+const LIGHT_BG: Palette = Palette { agent: Color32::from_rgb(215, 100, 0), human: Color32::from_rgb(20, 95, 215), touch: Color32::from_rgb(20, 145, 70), glow: 0.2 };
 /// Seconds things stay visible.
 const TRAIL: f64 = 0.5;
 const RIPPLE: f64 = 0.45;
@@ -133,7 +141,9 @@ impl Overlay {
     }
 
     /// Paints over the session `view`, whose image (of `size` pixels) is at `img`.
-    pub fn paint(&self, ui: &Ui, view: Rect, img: Rect, size: (f32, f32), now: f64) {
+    /// `light`: the content under the pointer is light.
+    pub fn paint(&self, ui: &Ui, view: Rect, img: Rect, size: (f32, f32), now: f64, light: bool) {
+        let pal = if light { &LIGHT_BG } else { &DARK_BG };
         let to_screen = |p: Pos2| img.min + vec2(p.x / size.0 * img.width(), p.y / size.1 * img.height());
         let painter = ui.painter_at(view);
         let mut animating = false;
@@ -144,7 +154,7 @@ impl Overlay {
         let mut run_agent = false;
         let flush = |run: &mut Vec<(Pos2, f32)>, agent: bool| {
             if run.len() > 1 {
-                strip(&painter, run, 2.0, if agent { AGENT } else { HUMAN }, 0.35);
+                strip(&painter, run, 2.0, if agent { pal.agent } else { pal.human }, 0.35);
             }
             run.clear();
         };
@@ -162,7 +172,7 @@ impl Overlay {
         let drags = self.drag.iter().map(|(path, a)| (path, 1.0, *a)).chain(self.dropped.iter().map(|(path, t, a)| (path, (1.0 - (now - t) / TRAIL) as f32, *a)));
         for (path, f, agent) in drags {
             let pts: Vec<(Pos2, f32)> = path.iter().map(|p| (to_screen(*p), f)).collect();
-            strip(&painter, &pts, 3.5, if agent { AGENT } else { HUMAN }, 0.85);
+            strip(&painter, &pts, 3.5, if agent { pal.agent } else { pal.human }, 0.85);
             animating |= f < 1.0;
         }
         // Pointer glow: soft concentric discs, until the pointer leaves; a ring while a
@@ -183,14 +193,10 @@ impl Overlay {
                 animating = true;
             }
             if f > 0.0 {
-                let c = if agent { AGENT } else { HUMAN };
+                let c = if agent { pal.agent } else { pal.human };
                 let at = to_screen(p);
-                // A faint dark halo first, so it also reads on light content.
-                for r in [18.0, 15.5] {
-                    droplet(&painter, at, r, tail * (r / 14.0), Color32::from_black_alpha((f * 22.0) as u8));
-                }
                 for r in [14.0, 10.5, 7.0, 4.5] {
-                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * 0.14));
+                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * pal.glow));
                 }
                 if down {
                     painter.circle_stroke(at, 8.0, Stroke::new(2.0, tint(c, 0.85)));
@@ -205,7 +211,7 @@ impl Overlay {
                     continue;
                 }
                 let f = (age / SCROLL) as f32;
-                let c = tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64) * 0.9);
+                let c = tint(if *agent { pal.agent } else { pal.human }, (1.0 - f as f64) * 0.9);
                 let tip = to_screen(*at) + *dir * (16.0 + 14.0 * f);
                 let n = vec2(-dir.y, dir.x) * 5.0;
                 painter.line_segment([tip - *dir * 5.0 + n, tip], Stroke::new(2.0, c));
@@ -217,16 +223,16 @@ impl Overlay {
             let f = ((now - t) / RIPPLE) as f32;
             // A quick bright flash, then the ring spreads.
             if f < 0.35 {
-                painter.circle_filled(to_screen(*p), 9.0, tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64 / 0.35) * 0.55));
+                painter.circle_filled(to_screen(*p), 9.0, tint(if *agent { pal.agent } else { pal.human }, (1.0 - f as f64 / 0.35) * 0.55));
             }
-            painter.circle_stroke(to_screen(*p), 6.0 + 18.0 * f, Stroke::new(2.0, tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64) * 0.8)));
+            painter.circle_stroke(to_screen(*p), 6.0 + 18.0 * f, Stroke::new(2.0, tint(if *agent { pal.agent } else { pal.human }, (1.0 - f as f64) * 0.8)));
             animating = true;
         }
         for (p, t, up) in self.touches.values() {
             let f = if *up { 1.0 - (now - t) / RIPPLE } else { 1.0 };
             let at = to_screen(*p);
-            painter.circle_filled(at, 18.0, tint(TOUCH, f * 0.15));
-            painter.circle_stroke(at, 18.0, Stroke::new(2.0, tint(TOUCH, f * 0.8)));
+            painter.circle_filled(at, 18.0, tint(pal.touch, f * 0.15));
+            painter.circle_stroke(at, 18.0, Stroke::new(2.0, tint(pal.touch, f * 0.8)));
             animating |= *up;
         }
         // Key stream, newest at the bottom.
@@ -234,7 +240,7 @@ impl Overlay {
         for (label, t, agent) in self.keys.iter().rev() {
             let age = now - t;
             let f = if age > KEYS - 1.0 { KEYS - age } else { 1.0 };
-            let color = tint(if *agent { AGENT } else { Color32::WHITE }, f);
+            let color = tint(if *agent { pal.agent } else { Color32::WHITE }, f);
             // "Ctrl+Enter" -> text "Ctrl+" and an Enter symbol.
             let (prefix, key) = match label.rfind('+') {
                 Some(i) if i + 1 < label.len() => label.split_at(i + 1),
@@ -326,8 +332,8 @@ fn droplet(p: &egui::Painter, c: Pos2, r: f32, tail: egui::Vec2, color: Color32)
     p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
-/// A polyline as one triangle strip (no overlapping caps at joints), with a soft dark
-/// underlay for light content. Each point carries its own opacity factor.
+/// A polyline as one triangle strip (no overlapping caps at joints). Each point carries
+/// its own opacity factor.
 fn strip(p: &egui::Painter, pts: &[(Pos2, f32)], width: f32, color: Color32, alpha: f32) {
     use egui::epaint::{Mesh, Vertex, WHITE_UV};
     let add = |w: f32, col: &dyn Fn(f32) -> Color32| {
@@ -353,6 +359,5 @@ fn strip(p: &egui::Painter, pts: &[(Pos2, f32)], width: f32, color: Color32, alp
         }
         p.add(egui::Shape::mesh(mesh));
     };
-    add(width + 2.0, &|f| Color32::from_black_alpha((f.max(0.0) * alpha * 40.0) as u8));
     add(width, &|f| tint(color, (f.max(0.0) * alpha) as f64));
 }

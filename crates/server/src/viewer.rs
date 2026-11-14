@@ -296,6 +296,8 @@ impl Server {
                     let items = feed_items(log, next);
                     s.viewer.push_feed(name, &slot.session.tag, items, log.end());
                 }
+                // What's under the pointer decides the overlay's light/dark colors.
+                let under: Vec<Option<[u8; 3]>> = self.sessions.values_mut().map(|slot| slot.session.color_under_pointer()).collect();
                 let frames: Vec<SessionFrame> = self
                     .sessions
                     .iter()
@@ -312,7 +314,13 @@ impl Server {
                             shared: slot.lock.current.as_ref().is_some_and(|l| l.shared),
                             cursor: egui_cursor(&slot.session.cursor_status),
                             viz: &slot.session.viz,
+                            under_pointer: None,
                         }
+                    })
+                    .zip(&under)
+                    .map(|(mut f, u)| {
+                        f.under_pointer = *u;
+                        f
                     })
                     .collect();
                 if !s.viewer.wants_draw(now, &frames) {
