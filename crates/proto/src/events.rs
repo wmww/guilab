@@ -34,7 +34,7 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
     /// Delivery key of the client whose command caused it, so its own actions aren't
-    /// echoed back to it. Never serialized: it may be a lock token.
+    /// echoed back to it. Server-internal, never serialized.
     #[serde(skip)]
     pub by: Option<String>,
 }

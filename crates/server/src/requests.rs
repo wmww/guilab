@@ -9,7 +9,7 @@ use std::{
 use guilab_compositor::{Chain, ClipRead, InputSource, Session, SessionConfig};
 use guilab_image::{Made, MakeReq, Region, RenderOpts};
 use guilab_proto::{
-    Command, Delivery, DoneInfo, EventData, HumanOp, ImageInfo, LockInfo, Request, Response, SessionInfo, Target, events::PollInfo,
+    Command, Delivery, GlobalCmd, SessionCmd, DoneInfo, EventData, HumanOp, ImageInfo, LockInfo, Request, Response, SessionInfo, Target, events::PollInfo,
     log::ANON,
 };
 
@@ -81,13 +81,46 @@ impl Server {
     /// Handles a request: replies now, or registers it to be answered later.
     pub(crate) fn handle(&mut self, req: Request, stream: &UnixStream) {
         let Request { target, cmd, .. } = req;
+        let cmd = match cmd {
+            Command::Global(g) => return self.handle_global(&target, g, stream),
+            Command::Session(c) => c,
+        };
+        let name = match self.resolve(&target) {
+            Ok(n) => n,
+            Err(e) => return self.out.send(stream, &Response::err(e)),
+        };
+        // One delivery cursor per agent (see guilab_proto::log): requests from the
+        // session's own worktree or from outside git share the default cursor, so an
+        // agent that changes directories doesn't see events twice; another worktree
+        // (another agent, picking the session by name) gets its own.
+        let key = match &target.root {
+            Some(r) if self.sessions[&name].root.as_ref() != Some(r) => r.display().to_string(),
+            _ => ANON.to_string(),
+        };
+        let policy = cmd.policy();
+        // The human's chains aren't the agent's: no delivery key.
+        let wait_key = (!policy.human).then(|| key.clone());
+        match self.handle_session(&name, &key, cmd, target.token.as_deref()) {
+            Reply::Now(r) => {
+                let r = if policy.delivers { self.attach(&name, Some(&key), r) } else { r };
+                self.out.send(stream, &r);
+            }
+            Reply::Later(w) => self.later(name, wait_key, stream, w),
+            Reply::Then(r, w) => {
+                self.out.send(stream, &r);
+                self.later(name, wait_key, stream, w);
+            }
+        }
+    }
+
+    fn handle_global(&mut self, target: &Target, cmd: GlobalCmd, stream: &UnixStream) {
         let r = match cmd {
-            Command::Ping => {
+            GlobalCmd::Ping => {
                 let mut info = self.info.clone();
                 info.viewer = self.viewer_info();
                 Response::ok(info)
             }
-            Command::Show { display } => 'show: {
+            GlobalCmd::Show { display } => 'show: {
                 // `-S NAME show` also picks the tab.
                 if let Some(n) = &target.name {
                     if !self.sessions.contains_key(n) {
@@ -101,57 +134,26 @@ impl Server {
                     None => return,
                 }
             }
-            Command::Hide => {
+            GlobalCmd::Hide => {
                 self.hide_viewer(None);
                 Response::ok(())
             }
-            Command::Shutdown => {
+            GlobalCmd::Shutdown => {
                 self.stop = true;
                 Response::ok(())
             }
-            Command::Ls => {
+            GlobalCmd::Ls => {
                 let shown = self.viewer_current();
                 let mut list: Vec<SessionInfo> = self.sessions.iter().map(|(n, s)| s.info(n)).collect();
                 list.iter_mut().for_each(|i| i.in_viewer = shown.as_deref() == Some(i.name.as_str()));
                 Response::ok(list)
             }
-            Command::New { name, size, scale, ttl, xwayland } => match self.new_session(&target, name, size, scale, ttl, xwayland) {
+            GlobalCmd::New { name, size, scale, ttl, xwayland } => match self.new_session(target, name, size, scale, ttl, xwayland) {
                 // Answered once Xwayland is up.
                 Ok(name) if xwayland => return self.later(name, None, stream, Wait::New { deadline: Instant::now() + XWAYLAND_TIMEOUT }),
                 Ok(name) => Response::ok(self.sessions[&name].info(&name)),
                 Err(e) => Response::err(e),
             },
-            cmd => {
-                let name = match self.resolve(&target) {
-                    Ok(n) => n,
-                    Err(e) => return self.out.send(stream, &Response::err(e)),
-                };
-                // One delivery cursor per agent (see guilab_proto::log): requests from the
-                // session's own worktree or from outside git share the default cursor, so an
-                // agent that changes directories doesn't see events twice; another worktree
-                // (another agent, picking the session by name) gets its own.
-                let key = match &target.root {
-                    Some(r) if self.sessions[&name].root.as_ref() != Some(r) => r.display().to_string(),
-                    _ => ANON.to_string(),
-                };
-                // Not deliveries: the human's actions (the viewer's), reading the log, and
-                // polls (they deliver themselves).
-                let delivers = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
-                // The human's chains aren't the agent's: no delivery key.
-                let wait_key = (!matches!(cmd, Command::Human { .. })).then(|| key.clone());
-                match self.handle_session(&name, &key, cmd, target.token.as_deref()) {
-                    Reply::Now(r) => {
-                        let r = if delivers { self.attach(&name, Some(&key), r) } else { r };
-                        self.out.send(stream, &r);
-                    }
-                    Reply::Later(w) => self.later(name, wait_key, stream, w),
-                    Reply::Then(r, w) => {
-                        self.out.send(stream, &r);
-                        self.later(name, wait_key, stream, w);
-                    }
-                }
-                return;
-            }
         };
         self.out.send(stream, &r);
     }
@@ -165,18 +167,19 @@ impl Server {
     }
 
     /// A command on session `name`.
-    fn handle_session(&mut self, name: &str, key: &str, cmd: Command, token: Option<&str>) -> Reply {
+    fn handle_session(&mut self, name: &str, key: &str, cmd: SessionCmd, token: Option<&str>) -> Reply {
+        let policy = cmd.policy();
         let slot = self.sessions.get_mut(name).unwrap();
-        if matches!(cmd, Command::Lock { .. } | Command::Input { .. }) && slot.working.is_none() {
+        if policy.needs_working && slot.working.is_none() {
             return Reply::Now(Response::err(NOT_WORKING));
         }
-        if let Err(e) = slot.lock.check(name, cmd.access(), token) {
+        if let Err(e) = slot.lock.check(name, policy.access, token) {
             return Reply::Now(Response::err(e));
         }
         slot.last_active = Instant::now();
         // Commands may move windows, change the output, focus...: render the next tick.
         slot.session.dirty = true;
-        if !matches!(cmd, Command::Human { .. }) {
+        if !policy.human {
             slot.last_agent = Instant::now();
         }
         if let Some(text) = cmd.log_text() {
@@ -184,8 +187,8 @@ impl Server {
         }
         let s = &mut slot.session;
         let r = match cmd {
-            Command::End => Response::ok(self.end_session(name)),
-            Command::Lock { force } => match slot.lock.take(name, token, force) {
+            SessionCmd::End => Response::ok(self.end_session(name)),
+            SessionCmd::Lock { force } => match slot.lock.take(name, token, force) {
                 Ok((token, took)) => {
                     match took {
                         Took::Same => {}
@@ -198,7 +201,7 @@ impl Server {
                 }
                 Err(e) => Response::err(e),
             },
-            Command::Unlock { force } => match slot.lock.may_release(name, token, force) {
+            SessionCmd::Unlock { force } => match slot.lock.may_release(name, token, force) {
                 Ok(true) => {
                     slot.lock.release();
                     self.end_lock(name, LockEnd::Unlock, Some(key));
@@ -207,13 +210,13 @@ impl Server {
                 Ok(false) => Response::ok(()),
                 Err(e) => Response::err(e),
             },
-            Command::Input { actions } => {
+            SessionCmd::Input { actions } => {
                 if let Err(e) = s.check_chain(&actions) {
                     return Reply::Now(Response::err(e));
                 }
                 return Reply::Later(Wait::Input { chain: Chain::new(actions, InputSource::Agent), resume_at: Instant::now(), started: false });
             }
-            Command::ClipGet => match s.clip_get() {
+            SessionCmd::ClipGet => match s.clip_get() {
                 Ok(ClipRead::Text(t)) => Response::ok(t),
                 Ok(ClipRead::Pipe(fd)) => {
                     let pipe = std::fs::File::from(fd);
@@ -222,27 +225,27 @@ impl Server {
                 }
                 Err(e) => Response::err(e),
             },
-            Command::ClipSet { text } => {
+            SessionCmd::ClipSet { text } => {
                 s.clip_set(text);
                 Response::ok(())
             }
-            Command::Run { argv, cwd, env } => match s.spawn(&argv, &cwd, &env) {
+            SessionCmd::Run { argv, cwd, env } => match s.spawn(&argv, &cwd, &env) {
                 Ok(p) => {
                     s.log.push(EventData::AppStart { id: p.id, argv: p.argv.clone() }, Some(key));
                     Response::ok(p)
                 }
                 Err(e) => Response::err(format!("{e:#}")),
             },
-            Command::Kill { id } => match s.kill(id) {
+            SessionCmd::Kill { id } => match s.kill(id) {
                 Ok(killed) if killed.is_empty() => Response::ok(killed),
                 // Answered once they're gone (a `Wait::Kill`), so `kill && run` doesn't race
                 // a single-instance app's old copy.
                 Ok(killed) => return Reply::Later(Wait::Kill { killed, deadline: Instant::now() + KILL_WAIT }),
                 Err(e) => Response::err(format!("{e:#}")),
             },
-            Command::Ps => Response::ok(s.ps()),
-            Command::Tree => Response::ok(s.tree()),
-            Command::Output { size, scale } => {
+            SessionCmd::Ps => Response::ok(s.ps()),
+            SessionCmd::Tree => Response::ok(s.tree()),
+            SessionCmd::Output { size, scale } => {
                 if (size.is_some() || scale.is_some())
                     && let Err(e) = set_output(s, size.map(|[w, h]| (w as i32, h as i32)), scale, Some(key))
                 {
@@ -250,7 +253,7 @@ impl Server {
                 }
                 Response::ok(s.output_info())
             }
-            Command::Screenshot { path, settle, cursor, crop, max } => {
+            SessionCmd::Screenshot { path, settle, cursor, crop, max } => {
                 let crop = match crop.as_deref().map(guilab_image::format::parse_crop).transpose() {
                     Ok(c) => c.flatten(),
                     Err(e) => return Reply::Now(Response::err(format!("--crop: {e}"))),
@@ -258,7 +261,7 @@ impl Server {
                 // Answered after the next frame at the earliest.
                 return Reply::Later(Wait::Shot { path, settle, cursor, crop, max, start: Instant::now() });
             }
-            Command::Image { id, path, crop, max, marks, list, points } => {
+            SessionCmd::Image { id, path, crop, max, marks, list, points } => {
                 let img = match self.images.get(&id) {
                     Ok(i) => i,
                     Err(e) => return Reply::Now(Response::err(e)),
@@ -277,7 +280,7 @@ impl Server {
                     Err(e) => Response::err(e),
                 }
             }
-            Command::ImageMake { from, canvas, color, crop, drop, elements, cwd } => {
+            SessionCmd::ImageMake { from, canvas, color, crop, drop, elements, cwd } => {
                 let req = MakeReq { from, canvas, color, crop, drop, elements, cwd };
                 let made = self.images.make(&req, slot.group).and_then(|id| self.images.get(id.as_str()));
                 let img = match made {
@@ -290,7 +293,7 @@ impl Server {
                     Err(e) => Response::err(e),
                 }
             }
-            Command::Poll { timeout_ms, follow, tiers } => {
+            SessionCmd::Poll { timeout_ms, follow, tiers } => {
                 if let Err(e) = tiers.check() {
                     return Reply::Now(Response::err(e));
                 }
@@ -326,14 +329,14 @@ impl Server {
                     None => Reply::Later(wait),
                 };
             }
-            Command::Log { after, since, kinds, last } => {
+            SessionCmd::Log { after, since, kinds, last } => {
                 let kinds = match guilab_proto::events::expand_kinds(&kinds) {
                     Ok(k) => k,
                     Err(e) => return Reply::Now(Response::err(e)),
                 };
                 return Reply::Now(Response::ok(s.log.query(after, since, &kinds, last)));
             }
-            Command::Work { status, message, images } => {
+            SessionCmd::Work { status, message, images } => {
                 let status = status.trim().to_string();
                 if status.is_empty() {
                     return Reply::Now(Response::err("say what you're doing: guilab work \"running the tests\""));
@@ -348,7 +351,7 @@ impl Server {
                 slot.set_working(status, key);
                 Response::ok(())
             }
-            Command::Done { message, images } => {
+            SessionCmd::Done { message, images } => {
                 // Answering without reading what the human just said would ignore it.
                 if let Some(first) = s.log.unread().next() {
                     let at = guilab_proto::text::Fmt { tz: crate::tz_offset() }.clock(first.t);
@@ -379,7 +382,7 @@ impl Server {
                 slot.set_done(key);
                 Response::ok(DoneInfo { unlocked: unlock })
             }
-            Command::Human { op } => match op {
+            SessionCmd::Human { op } => match op {
                 HumanOp::Message { text, images, draw } => {
                     let mut imgs: Vec<MsgImage> = images.into_iter().map(MsgImage::Spec).collect();
                     if !draw.is_empty() {
@@ -404,7 +407,6 @@ impl Server {
                     Err(e) => Response::err(e),
                 },
             },
-            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => unreachable!(),
         };
         Reply::Now(r)
     }
@@ -446,13 +448,8 @@ impl Server {
             return Err(format!("session '{name}' already exists"));
         }
         let [w, h] = size.unwrap_or(DEFAULT_SIZE);
-        if !(1..=16384).contains(&w) || !(1..=16384).contains(&h) {
-            return Err("size must be 1x1 to 16384x16384".into());
-        }
         let scale = scale.unwrap_or(1.0);
-        if !(0.25..=8.0).contains(&scale) {
-            return Err("scale must be 0.25 to 8".into());
-        }
+        guilab_proto::check_output(Some((w as i64, h as i64)), Some(scale))?;
         let dir = self.sessions_dir.join(&name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;

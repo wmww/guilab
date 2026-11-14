@@ -328,10 +328,10 @@ When a doc is open or a drawing tool is selected, the editor owns primary-button
 ```rust
 // proto (PROTO 3)
 pub struct ImageRef { pub id: String, pub size: [u32; 2], pub listing: String, pub marks: Option<[i32; 4]> }  // fetch(), elements()
-Command::Screenshot { path, settle, cursor, crop: Option<String>, max: Option<[u32; 2]> }   // Access::Read
-Command::Image { id, path, crop /* "X,Y WxH" | "none" */, max, marks, list, points }      // Access::Read
-Command::ImageMake { from, canvas, color, crop, drop: Vec<u32>, elements: Vec<String>, cwd }  // Access::Read; not logged as a command (ImageMade is)
-Command::Work/Done { .., images: Vec<String> }      // ids, or absolute paths (the CLI absolutizes anything with / or . or an existing file)
+SessionCmd::Screenshot { path, settle, cursor, crop: Option<String>, max: Option<[u32; 2]> }   // Access::Read
+SessionCmd::Image { id, path, crop /* "X,Y WxH" | "none" */, max, marks, list, points }      // Access::Read
+SessionCmd::ImageMake { from, canvas, color, crop, drop: Vec<u32>, elements: Vec<String>, cwd }  // Access::Read; not logged as a command (ImageMade is)
+SessionCmd::Work/Done { .., images: Vec<String> }      // ids, or absolute paths (the CLI absolutizes anything with / or . or an existing file)
 HumanOp::Message { text, images: Vec<String>, draw: Vec<String> }   // draw: element lines on a capture taken now
 // replies
 ShotInfo { image, header, path, width, height /* PNG */, shows: [i32; 4], zoom, settled, animating, cropped }

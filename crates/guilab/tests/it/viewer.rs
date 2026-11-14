@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use guilab_proto::{Client, Command, Request, ServerInfo, Target};
+use guilab_proto::{Client, Request, ServerInfo, Target};
 
 use crate::{
     Lab, app,
@@ -14,7 +14,7 @@ use crate::{
 impl Lab {
     fn info(&self) -> ServerInfo {
         let mut c = Client::connect(&self.rt.join("guilab/control.sock")).unwrap();
-        c.call_as(&Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping }).unwrap()
+        c.call_as(&Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: guilab_proto::GlobalCmd::Ping.into() }).unwrap()
     }
 
     /// `guilab show` on `host`'s session socket.

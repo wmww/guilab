@@ -102,6 +102,14 @@ fn lock_rules() {
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(lab.input(&t, &["sleep", "1"])["pointer"], serde_json::json!([2.0, 2.0]));
 
+    // The server checks limits itself, whatever the client: a glide of 4e9 ms is refused.
+    let mut c = guilab_proto::Client::connect(&lab.rt.join("guilab/control.sock")).unwrap();
+    let target = guilab_proto::Target { token: Some(t.clone()), ..Default::default() };
+    let actions = vec![guilab_proto::Action::Move { x: 1.0, y: 1.0, ms: 4_000_000_000 }];
+    let req = guilab_proto::Request { proto: guilab_proto::PROTO, target, cmd: guilab_proto::SessionCmd::Input { actions }.into() };
+    let err = c.call_as::<serde_json::Value>(&req).unwrap_err();
+    assert!(err.contains("milliseconds must be 0 to 60000"), "{err}");
+
     // Taking over: the old token stops working.
     let t2 = lab.json(&["lock", "--force"])["token"].as_str().unwrap().to_string();
     assert_ne!(t, t2);

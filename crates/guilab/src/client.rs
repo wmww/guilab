@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use guilab_proto::{Client, Command, Request, Response, ServerInfo, Target};
+use guilab_proto::{Client, Command, GlobalCmd, Request, Response, ServerInfo, Target};
 
 /// Autostarted servers exit after this long without sessions.
 const AUTOSTART_IDLE_EXIT: u64 = 600;
@@ -98,7 +98,7 @@ impl Conn {
     /// A server from another build: an error if it speaks another protocol, else a warning
     /// (it keeps running its old code until restarted).
     fn check_server(&mut self) -> Result<(), String> {
-        let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping };
+        let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: GlobalCmd::Ping.into() };
         let Ok(info) = self.client.call_as::<ServerInfo>(&ping) else { return Ok(()) };
         if info.proto != guilab_proto::PROTO {
             return Err(format!(
@@ -148,7 +148,7 @@ pub fn run_server(idle_exit: u64, show: Option<PathBuf>, build: String) -> Resul
 pub fn wait_server() -> Result<(), String> {
     let path = guilab_proto::socket_path().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: Command::Ping };
+    let ping = Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: GlobalCmd::Ping.into() };
     loop {
         if let Ok(mut c) = Client::connect(&path)
             && c.call_as::<ServerInfo>(&ping).is_ok()
@@ -168,8 +168,8 @@ pub fn stop_server() -> Result<(), String> {
         return Err("no server running".into());
     };
     let req = |cmd| Request { proto: guilab_proto::PROTO, target: Target::default(), cmd };
-    let info: ServerInfo = client.call_as(&req(Command::Ping))?;
-    client.call_as::<serde_json::Value>(&req(Command::Shutdown))?;
+    let info: ServerInfo = client.call_as(&req(GlobalCmd::Ping.into()))?;
+    client.call_as::<serde_json::Value>(&req(GlobalCmd::Shutdown.into()))?;
     // Wait for it to finish cleaning up, so a following command gets a fresh server.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && Path::new(&format!("/proc/{}", info.pid)).exists() {

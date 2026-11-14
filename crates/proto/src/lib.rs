@@ -88,9 +88,48 @@ pub struct Request {
     pub cmd: Command,
 }
 
+/// A request's command: about the server, or about one session (resolved from the target).
+/// On the wire both are one object tagged by `cmd`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Command {
+    Global(GlobalCmd),
+    Session(SessionCmd),
+}
+
+impl From<GlobalCmd> for Command {
+    fn from(c: GlobalCmd) -> Self {
+        Command::Global(c)
+    }
+}
+
+impl From<SessionCmd> for Command {
+    fn from(c: SessionCmd) -> Self {
+        Command::Session(c)
+    }
+}
+
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // Untagged would lose the real error ("missing field ...") behind "no variant matched".
+        let v = serde_json::Value::deserialize(d)?;
+        let global = match GlobalCmd::deserialize(&v) {
+            Ok(c) => return Ok(Command::Global(c)),
+            Err(e) => e.to_string(),
+        };
+        match SessionCmd::deserialize(&v) {
+            Ok(c) => Ok(Command::Session(c)),
+            Err(e) if global.starts_with("unknown variant") => Err(D::Error::custom(e)),
+            Err(_) => Err(D::Error::custom(global)),
+        }
+    }
+}
+
+/// Commands about the server, not a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
-pub enum Command {
+pub enum GlobalCmd {
     /// Reply: [`ServerInfo`].
     Ping,
     /// Stop the server (ends all sessions). Reply: null.
@@ -112,10 +151,16 @@ pub enum Command {
         #[serde(default)]
         xwayland: bool,
     },
-    /// Reply: [`SessionInfo`] of the ended session.
-    End,
     /// Reply: `Vec<SessionInfo>`. Ignores the target.
     Ls,
+}
+
+/// Commands on the target's session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum SessionCmd {
+    /// Reply: [`SessionInfo`] of the ended session.
+    End,
     /// Reply: [`ProcInfo`].
     Run {
         argv: Vec<String>,
@@ -234,11 +279,11 @@ pub enum Command {
         #[serde(default)]
         images: Vec<String>,
     },
-    /// What the viewer does for the human (until it exists: `guilab debug`, for tests).
+    /// What the viewer does for the human; `guilab debug`, the tests' stand-in for it.
     Human { op: HumanOp },
 }
 
-/// Human actions (the viewer's, later). Reply: null.
+/// Human actions, as the viewer would do them. Reply: null.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HumanOp {
@@ -268,30 +313,53 @@ pub enum Access {
     Drive,
 }
 
-impl Command {
-    pub fn access(&self) -> Access {
+/// How the server treats a session command. Every command decides every field (the
+/// match has no catch-all), so a new command can't silently get a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// The lock rule.
+    pub access: Access,
+    /// The reply carries the requester's undelivered events (not for the human's actions,
+    /// reading the log, or polls, which deliver themselves).
+    pub delivers: bool,
+    /// Needs the agent marked working (`guilab work`).
+    pub needs_working: bool,
+    /// Done by the human (`guilab debug`); everything else is the agent's activity.
+    pub human: bool,
+}
+
+impl SessionCmd {
+    pub fn policy(&self) -> Policy {
+        use SessionCmd as C;
+        let p = |access, delivers, needs_working| Policy { access, delivers, needs_working, human: false };
         match self {
-            Command::Input { .. } => Access::Drive,
-            Command::Run { .. } | Command::Kill { .. } | Command::End | Command::ClipSet { .. } => Access::Change,
-            Command::Output { size, scale } if size.is_some() || scale.is_some() => Access::Change,
-            _ => Access::Read,
+            C::Input { .. } => p(Access::Drive, true, true),
+            C::Lock { .. } => p(Access::Read, true, true),
+            C::Run { .. } | C::Kill { .. } | C::End | C::ClipSet { .. } => p(Access::Change, true, false),
+            C::Output { size, scale } => p(if size.is_some() || scale.is_some() { Access::Change } else { Access::Read }, true, false),
+            C::Unlock { .. } | C::Ps | C::Tree | C::Screenshot { .. } | C::Image { .. } | C::ImageMake { .. } | C::ClipGet => {
+                p(Access::Read, true, false)
+            }
+            C::Work { .. } | C::Done { .. } => p(Access::Read, true, false),
+            C::Poll { .. } | C::Log { .. } => p(Access::Read, false, false),
+            C::Human { .. } => Policy { access: Access::Read, delivers: false, needs_working: false, human: true },
         }
     }
 
     /// The command as it goes into the event log (CLI form without `guilab`), or None
-    /// for commands that aren't logged (they don't act on a session or have their own events).
+    /// for commands that aren't logged.
     pub fn log_text(&self) -> Option<String> {
         let opt = |name: &str, v: Option<String>| v.map(|v| format!(" {name} {v}")).unwrap_or_default();
         Some(match self {
-            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => return None,
-            Command::Poll { .. } | Command::Log { .. } | Command::Human { .. } => return None,
-            Command::Work { .. } | Command::Done { .. } | Command::ImageMake { .. } => return None,
-            Command::End => "end".into(),
-            Command::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
-            Command::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
-            Command::Ps => "ps".into(),
-            Command::Tree => "tree".into(),
-            Command::Screenshot { path, settle, cursor, crop, max } => format!(
+            // Their own events say it all.
+            SessionCmd::Poll { .. } | SessionCmd::Log { .. } | SessionCmd::Human { .. } => return None,
+            SessionCmd::Work { .. } | SessionCmd::Done { .. } | SessionCmd::ImageMake { .. } => return None,
+            SessionCmd::End => "end".into(),
+            SessionCmd::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
+            SessionCmd::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
+            SessionCmd::Ps => "ps".into(),
+            SessionCmd::Tree => "tree".into(),
+            SessionCmd::Screenshot { path, settle, cursor, crop, max } => format!(
                 "screenshot{}{}{}{}{}",
                 opt("-o", path.as_ref().map(|p| p.display().to_string())),
                 if *settle { "" } else { " --no-settle" },
@@ -299,7 +367,7 @@ impl Command {
                 opt("--crop", crop.as_ref().map(|c| format!("'{c}'"))),
                 opt("--max", max.map(|[w, h]| format!("{w}x{h}"))),
             ),
-            Command::Image { id, path, crop, max, marks, list, points } => format!(
+            SessionCmd::Image { id, path, crop, max, marks, list, points } => format!(
                 "image {id}{}{}{}{}{}{}",
                 opt("-o", path.as_ref().map(|p| p.display().to_string())),
                 opt("--crop", crop.as_ref().map(|c| format!("'{c}'"))),
@@ -308,18 +376,18 @@ impl Command {
                 if *list { " --list" } else { "" },
                 if *points { " --points" } else { "" },
             ),
-            Command::Output { size, scale } => format!(
+            SessionCmd::Output { size, scale } => format!(
                 "output{}{}",
                 opt("-s", size.map(|[w, h]| format!("{w}x{h}"))),
                 opt("--scale", scale.map(|s| s.to_string()))
             ),
-            Command::Lock { force } => if *force { "lock --force" } else { "lock" }.into(),
-            Command::Unlock { force } => if *force { "unlock --force" } else { "unlock" }.into(),
-            Command::Input { actions } => {
+            SessionCmd::Lock { force } => if *force { "lock --force" } else { "lock" }.into(),
+            SessionCmd::Unlock { force } => if *force { "unlock --force" } else { "unlock" }.into(),
+            SessionCmd::Input { actions } => {
                 format!("input {}", actions.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" "))
             }
-            Command::ClipGet => "clip get".into(),
-            Command::ClipSet { text } => format!("clip set {text:?}"),
+            SessionCmd::ClipGet => "clip get".into(),
+            SessionCmd::ClipSet { text } => format!("clip set {text:?}"),
         })
     }
 }
@@ -398,6 +466,21 @@ pub struct SessionInfo {
     /// The session the viewer window shows (its current tab).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_viewer: bool,
+}
+
+/// Output size and scale limits, for `new`, `output` and the viewer's resizes.
+pub fn check_output(size: Option<(i64, i64)>, scale: Option<f64>) -> Result<(), String> {
+    if let Some((w, h)) = size
+        && !((1..=16384).contains(&w) && (1..=16384).contains(&h))
+    {
+        return Err("size must be 1x1 to 16384x16384".into());
+    }
+    if let Some(s) = scale
+        && !(0.25..=8.0).contains(&s)
+    {
+        return Err("scale must be 0.25 to 8".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -610,14 +693,21 @@ mod tests {
         let req = Request {
             proto: PROTO,
             target: Target { name: Some("a".into()), ..Default::default() },
-            cmd: Command::Screenshot { path: None, settle: true, cursor: false, crop: None, max: None },
+            cmd: SessionCmd::Screenshot { path: None, settle: true, cursor: false, crop: None, max: None }.into(),
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, format!(r#"{{"proto":{PROTO},"target":{{"name":"a"}},"cmd":"screenshot","path":null,"settle":true}}"#));
         let back: Request = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back.cmd, Command::Screenshot { settle: true, .. }));
+        assert!(matches!(back.cmd, Command::Session(SessionCmd::Screenshot { settle: true, .. })));
         // target may be omitted
         let r: Request = serde_json::from_str(r#"{"cmd":"ls"}"#).unwrap();
-        assert!(matches!(r.cmd, Command::Ls));
+        assert!(matches!(r.cmd, Command::Global(GlobalCmd::Ls)));
+        // Errors stay specific.
+        let e = serde_json::from_str::<Request>(r#"{"cmd":"screenshot"}"#).unwrap_err().to_string();
+        assert!(e.contains("missing field `settle`"), "{e}");
+        let e = serde_json::from_str::<Request>(r#"{"cmd":"new","size":"big"}"#).unwrap_err().to_string();
+        assert!(e.contains("invalid type"), "{e}");
+        let e = serde_json::from_str::<Request>(r#"{"cmd":"nope"}"#).unwrap_err().to_string();
+        assert!(e.contains("unknown variant `nope`"), "{e}");
     }
 }

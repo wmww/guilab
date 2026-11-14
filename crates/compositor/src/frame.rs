@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use smithay::{
     input::pointer::CursorImageStatus,
     backend::renderer::element::default_primary_scanout_output_compare,
@@ -209,16 +209,7 @@ impl Session {
 
     /// Changes output pixel size and/or scale at runtime; windows follow.
     pub fn set_output(&mut self, size: Option<(i32, i32)>, scale: Option<f64>) -> anyhow::Result<()> {
-        if let Some((w, h)) = size
-            && !(1..=16384).contains(&w) | !(1..=16384).contains(&h)
-        {
-            bail!("size must be 1x1 to 16384x16384");
-        }
-        if let Some(s) = scale
-            && !(0.25..=8.0).contains(&s)
-        {
-            bail!("scale must be 0.25 to 8");
-        }
+        guilab_proto::check_output(size.map(|(w, h)| (w as i64, h as i64)), scale).map_err(anyhow::Error::msg)?;
         let mode = size.map(|(w, h)| Mode { size: (w, h).into(), refresh: 60_000 });
         if let Some(m) = mode {
             self.output.set_preferred(m);

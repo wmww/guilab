@@ -70,6 +70,46 @@ pub enum Action {
     Sleep { ms: u32 },
 }
 
+/// Longest glide or sleep, in ms.
+pub const MAX_MS: u32 = 60_000;
+/// Largest touch finger id.
+pub const MAX_FINGER_ID: u32 = 1000;
+pub const MAX_CLICKS: u32 = 10;
+pub const MAX_SWIPE_FINGERS: u32 = 5;
+
+impl Action {
+    /// The limits on values, enforced by the server for any client (the parser checks them
+    /// too, with messages that point at the word). A glide of 4e9 ms would allocate
+    /// billions of steps.
+    pub fn check(&self) -> Result<(), String> {
+        let finite = |vs: &[f64]| if vs.iter().all(|v| v.is_finite()) { Ok(()) } else { Err("numbers must be finite".to_string()) };
+        let ms = |ms: u32| if ms <= MAX_MS { Ok(()) } else { Err(format!("milliseconds must be 0 to {MAX_MS}")) };
+        let finger = |id: u32| if id <= MAX_FINGER_ID { Ok(()) } else { Err(format!("ID must be a whole number from 0 to {MAX_FINGER_ID}")) };
+        match self {
+            Action::Move { x, y, ms: m } => finite(&[*x, *y]).and(ms(*m)),
+            Action::Down { .. } | Action::Up { .. } | Action::On { .. } => Ok(()),
+            Action::Click { count, .. } if (1..=MAX_CLICKS).contains(count) => Ok(()),
+            Action::Click { .. } => Err(format!("click count must be 1 to {MAX_CLICKS}")),
+            Action::Scroll { dx, dy } | Action::ScrollPx { dx, dy } | Action::Tap { x: dx, y: dy } => finite(&[*dx, *dy]),
+            Action::Key { keys } if keys.is_empty() || keys.iter().any(String::is_empty) => Err("empty key name in chord".into()),
+            Action::KeyDown { key } | Action::KeyUp { key } if key.is_empty() => Err("empty key name".into()),
+            Action::Key { .. } | Action::KeyDown { .. } | Action::KeyUp { .. } | Action::Type { .. } => Ok(()),
+            Action::TouchDown { id, x, y } => finger(*id).and(finite(&[*x, *y])),
+            Action::TouchMove { id, x, y, ms: m } => finger(*id).and(finite(&[*x, *y])).and(ms(*m)),
+            Action::TouchUp { id } => finger(*id),
+            Action::Pinch { scale, rotate } => {
+                finite(&[*scale, *rotate])?;
+                if *scale > 0.0 { Ok(()) } else { Err("SCALE must be positive (2 = zoom in, 0.5 = zoom out)".into()) }
+            }
+            Action::Swipe { dx, dy, fingers } => {
+                finite(&[*dx, *dy])?;
+                if (1..=MAX_SWIPE_FINGERS).contains(fingers) { Ok(()) } else { Err(format!("FINGERS must be 1 to {MAX_SWIPE_FINGERS}")) }
+            }
+            Action::Sleep { ms: m } => ms(*m),
+        }
+    }
+}
+
 /// Help for `guilab input`: the whole grammar, for agents with no other docs.
 pub const HELP: &str = "\
 Send input to the session. Needs a lock (`guilab lock`, then -t TOKEN).
@@ -125,7 +165,7 @@ pub fn parse(words: &[String]) -> Result<Vec<Action>, String> {
     while p.i < words.len() {
         let start = p.i;
         let word = p.next().unwrap();
-        let act = p.action(word).map_err(|e| {
+        let act = p.action(word).and_then(|a| a.check().map(|()| a)).map_err(|e| {
             let shown: Vec<&str> = words[start..p.i.min(words.len())].iter().map(String::as_str).collect();
             format!("input action {} `{}`: {e}", out.len() + 1, shown.join(" "))
         })?;
@@ -183,8 +223,8 @@ impl<'a> Parser<'a> {
     fn opt_ms(&mut self) -> Result<u32, String> {
         match self.opt_num() {
             None => Ok(0),
-            Some(v) if (0.0..=60_000.0).contains(&v) => Ok(v as u32),
-            Some(_) => Err("milliseconds must be 0 to 60000".into()),
+            Some(v) if (0.0..=MAX_MS as f64).contains(&v) => Ok(v as u32),
+            Some(_) => Err(format!("milliseconds must be 0 to {MAX_MS}")),
         }
     }
 
@@ -211,8 +251,8 @@ impl<'a> Parser<'a> {
                 let button = self.opt_button();
                 let count = match self.opt_num() {
                     None => 1,
-                    Some(n) if n.fract() == 0.0 && (1.0..=10.0).contains(&n) => n as u32,
-                    Some(_) => return Err("click count must be 1 to 10".into()),
+                    Some(n) if n.fract() == 0.0 && (1.0..=MAX_CLICKS as f64).contains(&n) => n as u32,
+                    Some(_) => return Err(format!("click count must be 1 to {MAX_CLICKS}")),
                 };
                 Action::Click { button, count }
             }
@@ -234,9 +274,9 @@ impl<'a> Parser<'a> {
             "keyup" => Action::KeyUp { key: self.word("KEY")?.to_string() },
             "type" => Action::Type { text: unescape(self.word("TEXT (quote it if it has spaces)")?) },
             "touch" => match self.word("down, move or up")? {
-                "down" => Action::TouchDown { id: self.uint("ID", 1000)?, x: self.num("X")?, y: self.num("Y")? },
-                "move" => Action::TouchMove { id: self.uint("ID", 1000)?, x: self.num("X")?, y: self.num("Y")?, ms: self.opt_ms()? },
-                "up" => Action::TouchUp { id: self.uint("ID", 1000)? },
+                "down" => Action::TouchDown { id: self.uint("ID", MAX_FINGER_ID)?, x: self.num("X")?, y: self.num("Y")? },
+                "move" => Action::TouchMove { id: self.uint("ID", MAX_FINGER_ID)?, x: self.num("X")?, y: self.num("Y")?, ms: self.opt_ms()? },
+                "up" => Action::TouchUp { id: self.uint("ID", MAX_FINGER_ID)? },
                 w => {
                     self.i -= 1;
                     return Err(format!("expected touch down|move|up, got '{w}'"));
@@ -254,8 +294,8 @@ impl<'a> Parser<'a> {
                 let (dx, dy) = (self.num("DX")?, self.num("DY")?);
                 let fingers = match self.opt_num() {
                     None => 3,
-                    Some(n) if n.fract() == 0.0 && (1.0..=5.0).contains(&n) => n as u32,
-                    Some(_) => return Err("FINGERS must be 1 to 5".into()),
+                    Some(n) if n.fract() == 0.0 && (1.0..=MAX_SWIPE_FINGERS as f64).contains(&n) => n as u32,
+                    Some(_) => return Err(format!("FINGERS must be 1 to {MAX_SWIPE_FINGERS}")),
                 };
                 Action::Swipe { dx, dy, fingers }
             }
@@ -270,7 +310,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            "sleep" => Action::Sleep { ms: self.uint("MS", 60_000)? },
+            "sleep" => Action::Sleep { ms: self.uint("MS", MAX_MS)? },
             _ => {
                 let hint = if word.starts_with('-') && word.parse::<f64>().is_err() {
                     " (options like -t TOKEN go before the actions: guilab -t TOKEN input ...)"
@@ -381,6 +421,15 @@ mod tests {
         let e = p("right").unwrap_err();
         assert!(e.contains("click right"), "{e}");
         assert!(parse(&[]).unwrap_err().contains("no actions"));
+    }
+
+    #[test]
+    fn check_limits() {
+        assert!(Action::Move { x: 0.0, y: 0.0, ms: 4_000_000_000 }.check().unwrap_err().contains("60000"));
+        assert!(Action::TouchUp { id: 5000 }.check().is_err());
+        assert!(Action::Tap { x: f64::NAN, y: 0.0 }.check().is_err());
+        assert!(Action::Swipe { dx: 1.0, dy: 1.0, fingers: 0 }.check().is_err());
+        assert!(Action::Sleep { ms: 60_000 }.check().is_ok());
     }
 
     #[test]

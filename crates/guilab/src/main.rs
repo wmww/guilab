@@ -8,7 +8,7 @@ mod format;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use guilab_proto::Command;
+use guilab_proto::{Command, GlobalCmd, SessionCmd};
 
 const AFTER_HELP: &str = "\
 Quick start:
@@ -251,7 +251,7 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 100)]
         last: usize,
     },
-    /// Act as the human (for tests, until the viewer exists).
+    /// Act as the human, like the viewer does (the tests' stand-in for it).
     #[command(hide = true)]
     Debug {
         #[command(subcommand)]
@@ -388,28 +388,28 @@ fn main() {
 
 fn real_main(cli: Cli) -> Result<(), String> {
     let fmt = guilab_proto::text::Fmt { tz: tz_offset() };
-    let cmd = match cli.cmd {
+    let cmd: Command = match cli.cmd {
         Cmd::Server { wait: true, .. } => return client::wait_server(),
         Cmd::Server { stop: false, idle_exit, show, .. } => {
             let show = show.then(guilab_proto::own_wayland_socket).transpose()?;
             return client::run_server(idle_exit, show, build_id::build_id());
         }
-        Cmd::Show => Command::Show { display: guilab_proto::own_wayland_socket()? },
-        Cmd::Hide => Command::Hide,
+        Cmd::Show => GlobalCmd::Show { display: guilab_proto::own_wayland_socket()? }.into(),
+        Cmd::Hide => GlobalCmd::Hide.into(),
         Cmd::Server { stop: true, .. } => return client::stop_server(),
-        Cmd::New { name, size, scale, ttl, xwayland } => Command::New { name: name.or_else(|| cli.session.clone()), size, scale, ttl, xwayland },
-        Cmd::End => Command::End,
-        Cmd::Ls => Command::Ls,
-        Cmd::Run { cmd } => Command::Run {
+        Cmd::New { name, size, scale, ttl, xwayland } => GlobalCmd::New { name: name.or_else(|| cli.session.clone()), size, scale, ttl, xwayland }.into(),
+        Cmd::End => SessionCmd::End.into(),
+        Cmd::Ls => GlobalCmd::Ls.into(),
+        Cmd::Run { cmd } => SessionCmd::Run {
             argv: cmd,
             cwd: std::env::current_dir().map_err(|e| e.to_string())?,
             env: std::env::vars().collect(),
-        },
-        Cmd::Kill { id } => Command::Kill { id },
-        Cmd::Ps => Command::Ps,
-        Cmd::Tree => Command::Tree,
+        }.into(),
+        Cmd::Kill { id } => SessionCmd::Kill { id }.into(),
+        Cmd::Ps => SessionCmd::Ps.into(),
+        Cmd::Tree => SessionCmd::Tree.into(),
         Cmd::Screenshot { output, no_settle, cursor, crop, max } => {
-            Command::Screenshot { path: output.map(abs), settle: !no_settle, cursor, crop, max }
+            SessionCmd::Screenshot { path: output.map(abs), settle: !no_settle, cursor, crop, max }.into()
         }
         Cmd::Image { make: Some(ImageCmd::Make { from, canvas, color, crop, drop, elements }), .. } => {
             let mut stdin = None;
@@ -424,22 +424,22 @@ fn real_main(cli: Cli) -> Result<(), String> {
                     lines.push(e);
                 }
             }
-            Command::ImageMake { from, canvas, color, crop, drop, elements: lines, cwd: std::env::current_dir().map_err(|e| e.to_string())? }
+            SessionCmd::ImageMake { from, canvas, color, crop, drop, elements: lines, cwd: std::env::current_dir().map_err(|e| e.to_string())? }.into()
         }
         Cmd::Image { make: None, id, output, crop, max, no_marks, list, points } => {
-            Command::Image { id: id.unwrap_or_default(), path: output.map(abs), crop, max, marks: !no_marks, list, points }
+            SessionCmd::Image { id: id.unwrap_or_default(), path: output.map(abs), crop, max, marks: !no_marks, list, points }.into()
         }
-        Cmd::Output { size, scale } => Command::Output { size, scale },
-        Cmd::Lock { force } => Command::Lock { force },
-        Cmd::Unlock { force } => Command::Unlock { force },
-        Cmd::Input { actions } => Command::Input { actions: guilab_proto::input::parse(&actions)? },
+        Cmd::Output { size, scale } => SessionCmd::Output { size, scale }.into(),
+        Cmd::Lock { force } => SessionCmd::Lock { force }.into(),
+        Cmd::Unlock { force } => SessionCmd::Unlock { force }.into(),
+        Cmd::Input { actions } => SessionCmd::Input { actions: guilab_proto::input::parse(&actions)? }.into(),
         Cmd::Poll { timeout, follow, wake, passive } => {
             let tiers = guilab_proto::Tiers { wake, passive };
             tiers.check()?;
-            Command::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }
+            SessionCmd::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }.into()
         }
-        Cmd::Work { status, message, image } => Command::Work { status, message, images: image.iter().map(|i| image_arg(i)).collect() },
-        Cmd::Done { message, image } => Command::Done { message, images: image.iter().map(|i| image_arg(i)).collect() },
+        Cmd::Work { status, message, image } => SessionCmd::Work { status, message, images: image.iter().map(|i| image_arg(i)).collect() }.into(),
+        Cmd::Done { message, image } => SessionCmd::Done { message, images: image.iter().map(|i| image_arg(i)).collect() }.into(),
         Cmd::Say { .. } => {
             return Err("`guilab say` is gone. While you keep working: guilab work \"what you're doing\" -m \"MESSAGE\". \
                         When you're finished: guilab done \"MESSAGE\" (then wait with guilab poll)"
@@ -447,9 +447,9 @@ fn real_main(cli: Cli) -> Result<(), String> {
         }
         Cmd::Log { since, after, kind, last } => {
             guilab_proto::events::expand_kinds(&kind)?;
-            Command::Log { after, since: since.map(|s| parse_since(&s, fmt.tz)).transpose()?, kinds: kind, last }
+            SessionCmd::Log { after, since: since.map(|s| parse_since(&s, fmt.tz)).transpose()?, kinds: kind, last }.into()
         }
-        Cmd::Debug { op } => Command::Human {
+        Cmd::Debug { op } => SessionCmd::Human {
             op: match op {
                 DebugOp::Message { text, image, draw } => {
                     guilab_proto::HumanOp::Message { text, images: image.iter().map(|i| image_arg(i)).collect(), draw }
@@ -457,14 +457,14 @@ fn real_main(cli: Cli) -> Result<(), String> {
                 DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
                 DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
             },
-        },
-        Cmd::Clip { op: ClipOp::Get } => Command::ClipGet,
-        Cmd::Clip { op: ClipOp::Set { text } } => Command::ClipSet {
+        }.into(),
+        Cmd::Clip { op: ClipOp::Get } => SessionCmd::ClipGet.into(),
+        Cmd::Clip { op: ClipOp::Set { text } } => SessionCmd::ClipSet {
             text: match text {
                 Some(t) => t,
                 None => std::io::read_to_string(std::io::stdin()).map_err(|e| format!("reading stdin: {e}"))?,
             },
-        },
+        }.into(),
     };
     let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
     let target = guilab_proto::Target {
@@ -474,7 +474,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
     };
     let mut c = client::connect()?;
     let mut reply = c.request(target.clone(), cmd.clone())?;
-    if let Command::Poll { follow, timeout_ms, .. } = &cmd {
+    if let Command::Session(SessionCmd::Poll { follow, timeout_ms, .. }) = &cmd {
         let timeout = timeout_ms.map(|ms| ms as f64 / 1000.0);
         loop {
             if !reply.ok {

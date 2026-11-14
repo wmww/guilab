@@ -5,7 +5,7 @@ use guilab_proto::{
     events::{LogInfo, PollInfo},
     text::Fmt,
 };
-use guilab_proto::{Command, ImageInfo, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, RenderInfo, SessionInfo, ShotInfo, TreeNode};
+use guilab_proto::{Command, GlobalCmd, ImageInfo, InputInfo, LockInfo, NodeKind, OutputInfo, ProcInfo, ProcState, RenderInfo, SessionCmd, SessionInfo, ShotInfo, TreeNode};
 use serde::de::DeserializeOwned;
 
 fn get<T: DeserializeOwned>(v: serde_json::Value) -> Result<T, String> {
@@ -126,31 +126,31 @@ pub fn poll(r: &Response, fmt: &Fmt, json: bool, follow: bool, timeout: Option<f
 
 pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), String> {
     let text = match cmd {
-        Command::New { .. } => {
+        Command::Global(GlobalCmd::New { .. }) => {
             let s: SessionInfo = get(v)?;
             format!("{}\nWAYLAND_DISPLAY={}", session(&s), s.wayland_display.display())
         }
-        Command::End => format!("ended {}", get::<SessionInfo>(v)?.name),
-        Command::Ls => {
+        Command::Session(SessionCmd::End) => format!("ended {}", get::<SessionInfo>(v)?.name),
+        Command::Global(GlobalCmd::Ls) => {
             let l: Vec<SessionInfo> = get(v)?;
             if l.is_empty() { "no sessions".into() } else { l.iter().map(session).collect::<Vec<_>>().join("\n") }
         }
-        Command::Run { .. } => proc_line(&get(v)?),
-        Command::Kill { .. } => {
+        Command::Session(SessionCmd::Run { .. }) => proc_line(&get(v)?),
+        Command::Session(SessionCmd::Kill { .. }) => {
             let l: Vec<ProcInfo> = get(v)?;
             if l.is_empty() { "nothing running".into() } else { l.iter().map(|p| format!("killed {} pid={}", p.id, p.pid)).collect::<Vec<_>>().join("\n") }
         }
-        Command::Ps => {
+        Command::Session(SessionCmd::Ps) => {
             let l: Vec<ProcInfo> = get(v)?;
             if l.is_empty() { "no apps".into() } else { l.iter().map(proc_line).collect::<Vec<_>>().join("\n") }
         }
-        Command::Tree => {
+        Command::Session(SessionCmd::Tree) => {
             let l: Vec<TreeNode> = get(v)?;
             let mut s = String::new();
             tree(&l, 0, &mut s);
             if s.is_empty() { "no windows".into() } else { s.trim_end().to_string() }
         }
-        Command::Screenshot { .. } => {
+        Command::Session(SessionCmd::Screenshot { .. }) => {
             let s: ShotInfo = get(v)?;
             let mut line = format!("{}\n{}", s.path.display(), s.header);
             if s.shows != [0, 0, s.width as i32, s.height as i32] || s.zoom != 1.0 {
@@ -169,8 +169,8 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             line
         }
-        Command::Output { .. } => output(&get(v)?),
-        Command::Image { .. } => {
+        Command::Session(SessionCmd::Output { .. }) => output(&get(v)?),
+        Command::Session(SessionCmd::Image { .. }) => {
             let i: ImageInfo = get(v)?;
             let mut out = Vec::new();
             if let Some(r) = &i.render {
@@ -179,7 +179,7 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             out.extend(i.listing);
             out.join("\n")
         }
-        Command::ImageMake { .. } => {
+        Command::Session(SessionCmd::ImageMake { .. }) => {
             let i: ImageInfo = get(v)?;
             let mut out: Vec<String> = i.listing.into_iter().collect();
             if let Some(r) = &i.render {
@@ -188,14 +188,14 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             out.push(format!("send it: guilab done \"...\" --image {}", i.id));
             out.join("\n")
         }
-        Command::Lock { .. } => {
+        Command::Session(SessionCmd::Lock { .. }) => {
             let l: LockInfo = get(v)?;
             // Only the token on stdout, so `T=$(guilab lock)` works; the hint goes to stderr.
             eprintln!("locked session {}. Pass the token to commands that change it: guilab -t {} input ...", l.session, l.token);
             l.token
         }
-        Command::Unlock { .. } => "unlocked".into(),
-        Command::Input { .. } => {
+        Command::Session(SessionCmd::Unlock { .. }) => "unlocked".into(),
+        Command::Session(SessionCmd::Input { .. }) => {
             let i: InputInfo = get(v)?;
             let n = |v: f64| if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v}") };
             let mut line = format!("pointer {},{}", n(i.pointer[0]), n(i.pointer[1]));
@@ -212,7 +212,7 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             line
         }
-        Command::ClipGet => {
+        Command::Session(SessionCmd::ClipGet) => {
             let t: String = get(v)?;
             print!("{t}");
             if !t.ends_with('\n') {
@@ -220,11 +220,11 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             return Ok(());
         }
-        Command::Work { status, message, images } => {
+        Command::Session(SessionCmd::Work { status, message, images }) => {
             let posted = if message.is_some() || !images.is_empty() { "; message posted" } else { "" };
             format!("working: {status}{posted}")
         }
-        Command::Done { message, images } => {
+        Command::Session(SessionCmd::Done { message, images }) => {
             let info: guilab_proto::DoneInfo = get(v)?;
             let mut lines = Vec::new();
             if message.is_some() || !images.is_empty() {
@@ -236,8 +236,8 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             lines.push("marked done: the human sees you're waiting for them. Wait for their reply with: guilab poll --timeout 300 (keep it below your shell's time limit; on timeout, poll again)".into());
             lines.join("\n")
         }
-        Command::ClipSet { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),
-        Command::Log { .. } => {
+        Command::Session(SessionCmd::ClipSet { .. }) | Command::Session(SessionCmd::Human { .. }) | Command::Session(SessionCmd::Poll { .. }) => return Ok(()),
+        Command::Session(SessionCmd::Log { .. }) => {
             let l: LogInfo = get(v)?;
             let mut out: Vec<String> = Vec::new();
             if l.dropped > 0 {
@@ -254,12 +254,12 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             }
             if out.is_empty() { "no events".into() } else { out.join("\n") }
         }
-        Command::Show { .. } => {
+        Command::Global(GlobalCmd::Show { .. }) => {
             let i: guilab_proto::ViewerInfo = get(v)?;
             let how = if i.buffers == "shm" { ", shm: CPU copy" } else { "" };
             format!("viewer shown on {}{how}", i.display.display())
         }
-        Command::Ping | Command::Shutdown | Command::Hide => return Ok(()),
+        Command::Global(GlobalCmd::Ping) | Command::Global(GlobalCmd::Shutdown) | Command::Global(GlobalCmd::Hide) => return Ok(()),
     };
     println!("{text}");
     Ok(())

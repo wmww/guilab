@@ -85,10 +85,10 @@ impl Chain {
 }
 
 impl Session {
-    /// Checks what can be checked before running anything (key names, text).
+    /// Checks what can be checked before running anything (limits, key names, text).
     pub fn check_chain(&self, actions: &[Action]) -> Result<(), String> {
         for (i, a) in actions.iter().enumerate() {
-            let r = match a {
+            let r = a.check().and_then(|()| match a {
                 Action::Key { keys } => keys.iter().try_for_each(|k| self.keymap.key(k).map(drop)),
                 Action::KeyDown { key } | Action::KeyUp { key } => self.keymap.key(key).map(drop),
                 Action::Type { text } => match text.chars().find(|c| char_keysym(*c).is_none()) {
@@ -96,7 +96,7 @@ impl Session {
                     None => Ok(()),
                 },
                 _ => Ok(()),
-            };
+            });
             r.map_err(|e| format!("input action {} `{a}`: {e} (nothing was done)", i + 1))?;
         }
         Ok(())
