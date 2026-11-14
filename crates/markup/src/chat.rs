@@ -101,8 +101,10 @@ impl Chat {
                 let v = ui.visuals();
                 let stroke_color = if focused { v.widgets.inactive.fg_stroke.color.gamma_multiply(0.45) } else { v.widgets.noninteractive.bg_stroke.color };
                 let mut click = false;
+                // A touch lighter than the panel (not the black text-field default).
+                let fill = if v.dark_mode { Color32::from_gray(36) } else { Color32::from_gray(250) };
                 let boxed = egui::Frame::new()
-                    .fill(v.extreme_bg_color)
+                    .fill(fill)
                     .stroke(egui::Stroke::new(1.0, stroke_color))
                     .corner_radius(10.0)
                     .inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 })
