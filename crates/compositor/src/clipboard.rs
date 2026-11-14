@@ -79,10 +79,14 @@ impl Session {
 }
 
 /// Writes server-owned clipboard text to a pasting client, off the event loop
-/// (a client that doesn't read must not block the session).
-pub(crate) fn send_text(text: Arc<str>, fd: OwnedFd) {
+/// (a client that doesn't read must not block the session). X's STRING is Latin-1.
+pub(crate) fn send_text(text: Arc<str>, mime: &str, fd: OwnedFd) {
+    let bytes: Vec<u8> = match mime {
+        "STRING" => text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect(),
+        _ => text.as_bytes().to_vec(),
+    };
     std::thread::spawn(move || {
         let mut f = std::fs::File::from(fd);
-        let _ = f.write_all(text.as_bytes());
+        let _ = f.write_all(&bytes);
     });
 }

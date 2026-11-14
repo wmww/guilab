@@ -195,7 +195,7 @@ impl SelectionHandler for Session {
 
     fn send_selection(&mut self, ty: SelectionTarget, mime: String, fd: OwnedFd, _: Seat<Self>, data: &SelData) {
         match data {
-            SelData::Text(t) => crate::clipboard::send_text(t.clone(), fd),
+            SelData::Text(t) => crate::clipboard::send_text(t.clone(), &mime, fd),
             SelData::X11 => {
                 if let Some(wm) = self.xw.wm.as_mut()
                     && let Err(e) = wm.send_selection(ty, mime, fd)

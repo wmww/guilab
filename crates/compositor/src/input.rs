@@ -10,7 +10,7 @@ use smithay::{
     backend::input::{AxisSource, ButtonState, InputTime, KeyState},
     desktop::{Window, WindowSurfaceType},
     input::{
-        keyboard::{FilterResult, Keycode, Keysym, xkb},
+        keyboard::{FilterResult, Keycode, xkb},
         pointer::{
             AxisFrame, ButtonEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
             GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
@@ -69,7 +69,7 @@ pub(crate) struct InputState {
     /// Clients have key repeat on (see `set_repeat`).
     pub key_repeat: bool,
     /// Extra keysyms on spare keycodes of the current seat keymap (typing, see actions.rs).
-    pub extra_keys: Vec<(Keysym, Keycode)>,
+    pub extra_keys: Vec<crate::keys::Extra>,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
     /// The human's touchpad gesture in progress (logged when it ends).

@@ -177,6 +177,9 @@ fn gtk_input_and_clipboard() {
     let (ex, ey) = c("entry");
     lab.input(&t, &["move", &ex, &ey, "click", "type", "Hé → ✓!"]);
     wait_log(&log, "entry 'Hé → ✓!'", 5);
+    let many = "ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħ";
+    lab.input(&t, &["type", many]);
+    wait_log(&log, &format!("entry 'Hé → ✓!{many}'"), 5);
 
     // Click, double-click and a right-click context menu, dismissed by clicking outside.
     let (bx, by) = c("button");
@@ -223,8 +226,7 @@ fn gtk_input_and_clipboard() {
     lab.input(&t, &["move", &ex, &ey, "click", "key", "ctrl+a", "key", "ctrl+v"]);
     wait_log(&log, "entry 'clip ü'", 5);
     lab.input(&t, &["type", " copied", "key", "ctrl+a", "key", "ctrl+c"]);
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(lab.json(&["clip", "get"]), "clip ü copied");
+    lab.wait_clip("clip ü copied", 5);
 }
 
 #[test]

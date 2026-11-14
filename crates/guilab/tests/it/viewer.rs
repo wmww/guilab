@@ -64,8 +64,9 @@ fn mapping(h: &Lab, t: &str, v: &Lab) -> Mapping {
         loop {
             h.input(t, &["move", &x.to_string(), &y.to_string()]);
             std::thread::sleep(Duration::from_millis(100));
+            // `-n` doesn't count motion: this lists every motion event.
             let log = v.json(&["log", "--kind", "motion", "-n", "1"]);
-            if let Some(p) = log["events"][0]["path"].as_array().and_then(|p| p.last()) {
+            if let Some(p) = log["events"].as_array().and_then(|e| e.last()).and_then(|e| e["path"].as_array()).and_then(|p| p.last()) {
                 let at = (p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
                 if Some(at) != prev {
                     return at;
@@ -480,15 +481,23 @@ fn touch_through() {
     assert!(fingers.contains("finger 0 down"), "{fingers}");
     // Toolbar: box tool at 19,133 (one session, no tab bar).
     h.input(&t, &["tap", "19", "133", "sleep", "150", "touch", "down", "1", &(x - 100).to_string(), &(y + 150).to_string(), "touch", "move", "1", &(x + 50).to_string(), &(y + 250).to_string(), "300", "touch", "up", "1"]);
-    std::thread::sleep(Duration::from_millis(300));
     let shot = h.path("touch.png");
-    h.run(&["screenshot", "-o", &shot]);
-    let (w, _, px, ch) = crate::read_png(&shot);
-    let red = (y + 150..y + 250).filter(|yy| {
-        let i = ((yy * w as i64 + x - 100) as usize) * ch;
-        px[i] > 180 && px[i + 1] < 80 && px[i + 2] < 80
-    }).count();
-    assert!(red > 50, "no box drawn along its left edge ({red} red px)");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        h.run(&["screenshot", "-o", &shot]);
+        let (w, _, px, ch) = crate::read_png(&shot);
+        let red = (y + 150..y + 250)
+            .filter(|yy| {
+                let i = ((yy * w as i64 + x - 100) as usize) * ch;
+                px[i] > 180 && px[i + 1] < 80 && px[i + 2] < 80
+            })
+            .count();
+        if red > 50 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no box drawn along its left edge ({red} red px)");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The host clipboard and the shown session's are bridged (text): host → session always,

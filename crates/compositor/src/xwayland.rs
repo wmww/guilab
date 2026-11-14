@@ -342,7 +342,7 @@ impl XwmHandler for Session {
                     SelData::X11 => None,
                 });
                 if let Some(text) = own {
-                    crate::clipboard::send_text(text, fd);
+                    crate::clipboard::send_text(text, &mime_type, fd);
                 } else if let Err(e) = request_data_device_client_selection(&self.seat, mime_type, fd) {
                     tracing::debug!("clipboard for X: {e}");
                 }
@@ -399,11 +399,14 @@ impl XwmHandler for Session {
 
 /// Text to X: when our own (`clip set`) selection changes, X needs to hear about it.
 pub(crate) fn announce_selection(s: &mut Session, ty: SelectionTarget, mimes: Option<Vec<String>>) {
-    if let Some(wm) = s.xw.wm.as_mut()
-        && let Err(e) = wm.new_selection(ty, mimes)
-    {
+    let Some(wm) = s.xw.wm.as_mut() else { return };
+    if let Err(e) = wm.new_selection(ty, mimes) {
         tracing::debug!("x11 selection: {e}");
     }
+    // new_selection only queues SetSelectionOwner on the X11Wm's connection; until
+    // something flushes it, X clients pasting still see the old owner (Tk then falls back
+    // to STRING). A round trip flushes it and makes X own it before we reply.
+    let _ = wm.get_randr_primary_output();
 }
 
 /// Reads an X-owned selection into `fd`.

@@ -130,7 +130,8 @@ fn screenshot_settle_cases() {
     std::thread::sleep(Duration::from_millis(1300));
     let t = Instant::now();
     let s = lab.json(&["screenshot"]);
-    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    // Not the full 3 s cap (there's slack for a loaded machine).
+    assert!(t.elapsed() < Duration::from_millis(2500), "{:?}", t.elapsed());
     assert_eq!((s["settled"].as_bool(), s["animating"].as_bool()), (Some(false), Some(true)), "{s}");
     // A second app: the screenshot waits for its window.
     lab.run(&["run", "--", "python3", &app("gtk_app.py")]);

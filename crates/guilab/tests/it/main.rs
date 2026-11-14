@@ -86,6 +86,21 @@ impl Lab {
         }
     }
 
+    /// Polls `clip get` until it returns `want` (or panics after `secs`). Copying is
+    /// asynchronous (the app announces the selection whenever it gets to it).
+    pub fn wait_clip(&self, want: &str, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            let (ok, out, err) = self.try_run(&["--json", "clip", "get"]);
+            let got = if ok { serde_json::from_str::<Value>(&out).unwrap() } else { Value::String(err) };
+            if got == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "clipboard never became {want:?}: {got}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn path(&self, name: &str) -> String {
         self.rt.join(name).to_string_lossy().into()
     }

@@ -54,8 +54,10 @@ fn x11_windows_input_menus_dialogs() {
     let (ex, ey) = c("entry");
     lab.input(&t, &["move", &ex, &ey, "click", "type", "Hi é€ 日本 ok"]);
     wait_log(&log, "edit 'Hi é€ 日本 ok'", 5);
-    lab.input(&t, &["type", "ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒē!"]);
-    wait_log(&log, "edit 'Hi é€ 日本 okĀāĂăĄąĆćĈĉĊċČčĎďĐđĒē!'", 5);
+    // More new characters than fit in one keymap: several swaps.
+    let many = "ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİı!";
+    lab.input(&t, &["type", many]);
+    wait_log(&log, &format!("edit 'Hi é€ 日本 ok{many}'"), 5);
 
     // A menu (override-redirect window) under its button; pick an item with `on`.
     let (mx, my) = c("menu");
@@ -96,8 +98,7 @@ fn x11_clipboard_bridging() {
     lab.input(&t, &["move", &ex, &ey, "click", "key", "ctrl+v"]);
     wait_log(&log, "edit 'from guilab ü'", 5);
     lab.input(&t, &["type", " + tk", "key", "ctrl+slash", "key", "ctrl+c"]);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(lab.json(&["clip", "get"]), "from guilab ü + tk");
+    lab.wait_clip("from guilab ü + tk", 5);
 
     // X -> Wayland app -> X.
     if !gtk4() {
@@ -114,7 +115,7 @@ fn x11_clipboard_bridging() {
     lab.input(&t, &["move", &gex, &gey, "click", "key", "ctrl+v"]);
     wait_log(&glog, "entry 'from guilab ü + tk'", 5);
     lab.input(&t, &["key", "ctrl+a", "type", "from gtk", "key", "ctrl+a", "key", "ctrl+c"]);
-    std::thread::sleep(Duration::from_millis(300));
+    lab.wait_clip("from gtk", 5);
     lab.input(&t, &["move", &ex, &ey, "click", "key", "ctrl+slash", "key", "BackSpace", "key", "ctrl+v"]);
     wait_log(&log, "edit 'from gtk'", 5);
 }

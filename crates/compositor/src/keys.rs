@@ -18,6 +18,15 @@ pub struct KeyPos {
     pub mods: Vec<Keycode>,
 }
 
+/// A keysym placed on a spare keycode of an extended keymap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Extra {
+    pub sym: Keysym,
+    pub code: Keycode,
+    /// On level 2 (typed with Shift).
+    pub shifted: bool,
+}
+
 pub struct Keymap {
     /// Seat keymap as text (what clients get).
     pub text: String,
@@ -165,20 +174,23 @@ impl Keymap {
         })
     }
 
-    pub fn spare_count(&self) -> usize {
-        self.spare.len()
+    /// Keycodes <= 255 without symbols, usable for extra keysyms.
+    pub fn spare(&self) -> &[u32] {
+        &self.spare
     }
 
-    /// The seat keymap text plus `extra` keysyms on spare keycodes, and where each landed.
-    /// `extra.len()` must be <= `spare_count()`.
-    pub fn extended(&self, extra: &[Keysym]) -> Option<(String, Vec<(Keysym, Keycode)>)> {
+    /// The seat keymap text plus extra keysyms on spare keycodes, each on level 1 or 2
+    /// (`shifted`) of its key.
+    pub fn extended(&self, extra: &[Extra]) -> Option<String> {
         let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let km = xkb::Keymap::new_from_string(&ctx, self.text.clone(), xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS)?;
         let mut names = String::new();
         let mut syms = String::new();
-        let mut placed = Vec::new();
-        for (sym, &code) in extra.iter().zip(&self.spare) {
-            let kc = Keycode::new(code);
+        let mut codes: Vec<Keycode> = extra.iter().map(|e| e.code).collect();
+        codes.sort_by_key(|c| c.raw());
+        codes.dedup();
+        for kc in codes {
+            let code = kc.raw();
             let name = match km.key_get_name(kc) {
                 Some(n) => n.to_string(),
                 None => {
@@ -186,9 +198,12 @@ impl Keymap {
                     format!("GLX{code}")
                 }
             };
-            let sname = xkb::keysym_get_name(*sym);
-            syms.push_str(&format!("\tkey <{name}> {{ [ {sname} ] }};\n"));
-            placed.push((*sym, kc));
+            let level = |shifted: bool| extra.iter().find(|e| e.code == kc && e.shifted == shifted).map(|e| xkb::keysym_get_name(e.sym));
+            match (level(false), level(true)) {
+                (Some(a), Some(b)) => syms.push_str(&format!("\tkey <{name}> {{ type= \"TWO_LEVEL\", [ {a}, {b} ] }};\n")),
+                (Some(a), None) => syms.push_str(&format!("\tkey <{name}> {{ [ {a} ] }};\n")),
+                _ => return None,
+            }
         }
         // Splice into the serialized keymap (libxkbcommon's own format): names after the
         // `maximum` line of xkb_keycodes, symbols before the end of xkb_symbols.
@@ -204,6 +219,6 @@ impl Keymap {
         out.push_str(&t[names_at..syms_at]);
         out.push_str(&syms);
         out.push_str(&t[syms_at..]);
-        Some((out, placed))
+        Some(out)
     }
 }

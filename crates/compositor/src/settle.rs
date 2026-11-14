@@ -18,13 +18,15 @@ const SETTLE_QUIET: Duration = Duration::from_millis(150);
 const ANIM_DETECT: Duration = Duration::from_secs(1);
 /// While animating, how long after the last input a screenshot waits (the app reacting).
 const ANIM_REACT: Duration = Duration::from_millis(300);
-/// A window from the last `run` is expected this long; until then the session is busy.
-const NEW_APP_WAIT: Duration = Duration::from_secs(3);
+/// A window from the last `run` is expected this long (a loaded machine can take seconds
+/// to start a GTK app); until then the session is [`Settle::Starting`].
+const NEW_APP_WAIT: Duration = Duration::from_secs(10);
 /// How long an unanswered configure (not acked, or acked but not committed) keeps a session
 /// busy. Bounded because clients may ack without committing when nothing changes for them.
 const CONFIGURE_WAIT: Duration = Duration::from_secs(1);
 
-/// Screenshot wait caps: once a window is up, and while waiting for the first window.
+/// Screenshot wait caps: once a window is up, and while waiting for a window (the first,
+/// or the last `run` app's).
 const SETTLE_CAP: Duration = Duration::from_secs(3);
 const MAP_CAP: Duration = Duration::from_secs(10);
 
@@ -83,6 +85,8 @@ impl Times {
 pub enum Settle {
     /// No toplevel has a buffer yet.
     NoWindow,
+    /// Another window is up, but the app from the last `run` hasn't shown one yet.
+    Starting,
     Busy,
     /// Done except that something keeps redrawing: as settled as it gets.
     Animating,
@@ -122,7 +126,10 @@ impl Session {
             || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
         // The app from the last `run` hasn't shown a window yet (another one is up).
         let starting = t.spawn.is_some_and(|(at, id)| at > t.map && now.duration_since(at) < NEW_APP_WAIT && self.is_running(id));
-        if drawing || !acked || starting {
+        if starting {
+            return Settle::Starting;
+        }
+        if drawing || !acked {
             return Settle::Busy;
         }
         // Input counts as activity: the app hasn't necessarily reacted (committed) yet.
@@ -148,7 +155,7 @@ impl Session {
                 Settle::Animating => Some(false),
                 // Nothing that could ever draw: don't wait.
                 Settle::NoWindow if self.running_apps() == 0 => Some(true),
-                Settle::NoWindow => (waited >= MAP_CAP).then_some(false),
+                Settle::NoWindow | Settle::Starting => (waited >= MAP_CAP).then_some(false),
                 Settle::Busy => (waited >= SETTLE_CAP).then_some(false),
             }
         };

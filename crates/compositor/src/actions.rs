@@ -4,7 +4,10 @@
 //! returns how long to wait; the server resumes it from its timer, so sleeping never blocks
 //! other sessions or requests.
 
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use guilab_proto::{Action, Button, InputInfo, TreeNode};
 use smithay::{
@@ -15,9 +18,10 @@ use smithay::{
 };
 
 use crate::{
+    settle::Settle,
     handlers::surface_id,
     input::{InputEvent, InputSource},
-    keys::{KeyPos, char_keysym},
+    keys::{Extra, KeyPos, char_keysym},
     session::Session,
 };
 
@@ -29,8 +33,9 @@ const STEP: Duration = Duration::from_millis(16);
 const X_FOCUS_WAIT: Duration = Duration::from_millis(100);
 /// Longest wait for a clicked-away menu to close before keys (see `popup_may_close`).
 const MENU_WAIT: Duration = Duration::from_millis(500);
-/// Pause between keymap swaps when typing into an X client (see `type_text`).
-const X_KEYMAP_GAP: Duration = Duration::from_millis(100);
+/// Longest wait for an X client to react to typed keys before the next keymap swap (see
+/// `type_text`).
+const X_KEYMAP_WAIT: Duration = Duration::from_secs(2);
 /// Logical pixels per wheel notch (libinput's convention).
 const WHEEL_PX: f64 = 15.0;
 
@@ -39,7 +44,10 @@ enum Step {
     Ev(InputEvent),
     Sleep(Duration),
     /// Switch the seat keymap (text, extra keysyms placed on spare keycodes).
-    Keymap(String, Vec<(Keysym, Keycode)>),
+    Keymap(String, Vec<Extra>),
+    /// Wait until the session settles (the app reacted to the input), at most
+    /// `X_KEYMAP_WAIT` from when the wait began (set when it does).
+    AwaitSettle(Option<Instant>),
 }
 
 pub struct Chain {
@@ -108,6 +116,15 @@ impl Session {
             match step {
                 Step::Sleep(d) => return Ok(Some(d)),
                 Step::Ev(ev) => self.inject(ev, chain.source),
+                Step::AwaitSettle(since) => {
+                    let now = Instant::now();
+                    let since = since.unwrap_or(now);
+                    let done = matches!(self.settle_state(now), Settle::Settled | Settle::Animating);
+                    if !done && now.duration_since(since) < X_KEYMAP_WAIT {
+                        chain.steps.push_front(Step::AwaitSettle(Some(since)));
+                        return Ok(Some(STEP));
+                    }
+                }
                 Step::Keymap(text, placed) => {
                     let kb = self.seat.get_keyboard().ok_or("no keyboard")?;
                     kb.set_keymap_from_string(self, text).map_err(|e| format!("typing keymap: {e}"))?;
@@ -186,50 +203,39 @@ impl Session {
     }
 
     /// Plans typing `text`. Characters missing from the keymap are typed through a seat
-    /// keymap extended with them (keys.rs). The extended keymap stays active afterwards
-    /// (its other keys are unchanged): swapping straight back raced with X clients, which
-    /// can read the swap-back before looking up the keys typed just before it.
+    /// keymap extended with them on spare keycodes, two per key (plain and Shift; keys.rs).
+    /// X clients can look up keys in a keymap that came later than the keys (Xlib fetches
+    /// the new keymap lazily, at the next lookup, which on a busy machine can be after
+    /// several more swaps). So a swap keeps every key typed since the previous swap as it
+    /// was and places new characters on other keys, and with an X window focused it first
+    /// waits for the session to settle (the app drew the keys typed so far). The extended
+    /// keymap stays active afterwards for the same reason.
     fn type_text(&mut self, text: &str, src: InputSource, later: &mut Vec<Step>) -> Result<(), String> {
         self.need_focus(src)?;
         let syms: Vec<Keysym> = text.chars().map(|c| char_keysym(c).ok_or_else(|| format!("can't type {c:?}"))).collect::<Result<_, _>>()?;
         let x11 = self.seat.get_keyboard().and_then(|k| k.current_focus()).is_some_and(|f| f.is_x11());
-        let spare = self.keymap.spare_count();
         let held = self.seat.get_keyboard().map(|kb| kb.pressed_keys()).unwrap_or_default();
-        let mut active = self.input.extra_keys.clone();
+        let shift = self.keymap.find(Keysym::Shift_L).map(|k| k.code);
+        let mut cur = self.input.extra_keys.clone();
+        // Keys typed with the current keymap that a swap must keep (unknown for the
+        // previous chain's: all of them).
+        let mut used: Vec<Keycode> = cur.iter().map(|e| e.code).collect();
         let mut swaps = 0;
         let mut i = 0;
         while i < syms.len() {
-            // The longest run whose missing keysyms fit on the spare keycodes.
-            let mut extra: Vec<Keysym> = Vec::new();
-            let mut j = i;
-            while j < syms.len() {
-                let s = syms[j];
-                if self.keymap.find_typable(s).is_none() && !extra.contains(&s) {
-                    if extra.len() == spare {
-                        break;
-                    }
-                    extra.push(s);
+            let pos = |s: Keysym, cur: &[Extra]| -> Option<KeyPos> {
+                if let Some(k) = self.keymap.find_typable(s) {
+                    return Some(k.clone());
                 }
-                j += 1;
-            }
-            if j == i {
-                return Err("no spare keycodes to type non-keyboard characters".into());
-            }
-            if !extra.iter().all(|s| active.iter().any(|(a, _)| a == s)) {
-                let (text, placed) = self.keymap.extended(&extra).ok_or("couldn't build a keymap for these characters")?;
-                // Let X clients look up the previous run's keys before its keymap goes.
-                if swaps > 0 && x11 {
-                    later.push(Step::Sleep(X_KEYMAP_GAP));
-                }
-                later.push(Step::Keymap(text, placed.clone()));
-                active = placed;
-                swaps += 1;
-            }
-            for s in &syms[i..j] {
-                let k = match self.keymap.find_typable(*s) {
-                    Some(k) => k.clone(),
-                    None => KeyPos { code: active.iter().find(|(p, _)| p == s).unwrap().1, mods: Vec::new() },
-                };
+                let e = cur.iter().find(|e| e.sym == s)?;
+                let mods = if e.shifted { vec![shift?] } else { Vec::new() };
+                Some(KeyPos { code: e.code, mods })
+            };
+            // Type what the current keymap can.
+            let mut typed = false;
+            while i < syms.len()
+                && let Some(k) = pos(syms[i], &cur)
+            {
                 // Modifiers already held aren't touched.
                 let mods: Vec<Keycode> = k.mods.iter().copied().filter(|m| !held.contains(m)).collect();
                 let ev = |code, pressed| Step::Ev(InputEvent::Key { code, pressed });
@@ -237,8 +243,44 @@ impl Session {
                 later.push(ev(k.code, true));
                 later.push(ev(k.code, false));
                 later.extend(mods.iter().rev().map(|m| ev(*m, false)));
+                if !used.contains(&k.code) {
+                    used.push(k.code);
+                }
+                typed = true;
+                i += 1;
             }
-            i = j;
+            if i == syms.len() {
+                break;
+            }
+            // Swap: keep the used keys, put the next missing characters on the others.
+            let mut next = Vec::new();
+            for keep_used in [true, false] {
+                let kept: Vec<Extra> = if keep_used { cur.iter().filter(|e| used.contains(&e.code)).copied().collect() } else { Vec::new() };
+                let free: Vec<Keycode> = self.keymap.spare().iter().map(|&c| Keycode::new(c)).filter(|c| !kept.iter().any(|e| e.code == *c)).collect();
+                let mut slots = free.iter().map(|&code| (code, false)).chain(free.iter().filter(|_| shift.is_some()).map(|&code| (code, true)));
+                next = kept;
+                for &s in &syms[i..] {
+                    if self.keymap.find_typable(s).is_some() || next.iter().any(|e| e.sym == s) {
+                        continue;
+                    }
+                    let Some((code, shifted)) = slots.next() else { break };
+                    next.push(Extra { sym: s, code, shifted });
+                }
+                if next.iter().any(|e| e.sym == syms[i]) {
+                    break;
+                }
+            }
+            if !next.iter().any(|e| e.sym == syms[i]) {
+                return Err("no spare keycodes to type non-keyboard characters".into());
+            }
+            let text = self.keymap.extended(&next).ok_or("couldn't build a keymap for these characters")?;
+            if x11 && (swaps > 0 || typed) {
+                later.push(Step::AwaitSettle(None));
+            }
+            later.push(Step::Keymap(text, next.clone()));
+            cur = next;
+            used.clear();
+            swaps += 1;
         }
         Ok(())
     }

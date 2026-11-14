@@ -399,7 +399,9 @@ impl HostState {
     /// - after a button press or release: a click moves focus, and the keys typed right
     ///   after it must be routed by the new focus; egui also detects one click per pass;
     /// - before a press that follows motion: egui needs a pass with the pointer there
-    ///   (hover) first, or the click is lost when it comes with the pointer's first move.
+    ///   (hover) first, or the click is lost when it comes with the pointer's first move;
+    /// - touches likewise (a touch start in a pass of its own, then up to its end): where a
+    ///   touch goes (app or UI) depends on the UI state after the input before it.
     pub fn take_input(&mut self) -> Vec<HostInput> {
         let mut moved = false;
         let mut end = self.events.len();
@@ -410,6 +412,14 @@ impl HostState {
                     break;
                 }
                 HostInput::Egui(egui::Event::PointerMoved(_)) => moved = true,
+                HostInput::Touch(Touch { phase: egui::TouchPhase::Start, .. }) => {
+                    end = i.max(1);
+                    break;
+                }
+                HostInput::Touch(Touch { phase: egui::TouchPhase::End | egui::TouchPhase::Cancel, .. }) => {
+                    end = i + 1;
+                    break;
+                }
                 _ => {}
             }
         }
