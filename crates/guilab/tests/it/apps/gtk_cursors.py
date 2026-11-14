@@ -44,15 +44,16 @@ def activate(app):
         areas[name] = label
     win.set_child(box)
 
-    def report():
-        for name, w in areas.items():
-            ok, r = w.compute_bounds(win)
-            if not ok or r.get_width() == 0:
-                return True
+    # Once laid out in its first frame.
+    def report(*_):
+        bounds = {name: w.compute_bounds(win) for name, w in areas.items()}
+        if not all(ok and r.get_width() > 0 for ok, r in bounds.values()):
+            return GLib.SOURCE_CONTINUE
+        for name, (_, r) in bounds.items():
             out("pos", name, int(r.get_x()), int(r.get_y()), int(r.get_width()), int(r.get_height()))
         out("ready")
-        return False
-    GLib.timeout_add(100, report)
+        return GLib.SOURCE_REMOVE
+    win.add_tick_callback(report)
     win.present()
 
 

@@ -122,14 +122,16 @@ def activate(app):
     win.set_child(box)
     win.present()
 
-    def report():
-        for name, w in widgets.items():
-            ok, b = w.compute_bounds(win)
-            if ok:
-                out("pos", name, round(b.get_x()), round(b.get_y()), round(b.get_width()), round(b.get_height()))
+    # Once laid out in its first frame (not after a fixed delay: a busy machine is slow).
+    def report(*_):
+        bounds = {name: w.compute_bounds(win) for name, w in widgets.items()}
+        if not all(ok and b.get_width() > 0 for ok, b in bounds.values()):
+            return GLib.SOURCE_CONTINUE
+        for name, (_, b) in bounds.items():
+            out("pos", name, round(b.get_x()), round(b.get_y()), round(b.get_width()), round(b.get_height()))
         out("ready")
-        return False
-    GLib.timeout_add(500, report)
+        return GLib.SOURCE_REMOVE
+    win.add_tick_callback(report)
 
     if "--floats" in sys.argv:
         for name, w, h in (("A", 300, 200), ("B", 200, 100)):

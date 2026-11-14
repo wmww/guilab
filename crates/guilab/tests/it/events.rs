@@ -334,7 +334,8 @@ fn window_events() {
     assert!(lab.run(&["log"]).contains("closed by its app: \"second window\""));
     // Window changes are passive: reported with the next command. `kill` waits for the app
     // to exit, so it reports the close itself.
+    let t = Instant::now();
     let (_, _, err) = lab.status(&["kill"]);
-    assert!(err.contains("window") && err.contains("closed ("), "{err}\nlog:\n{}", lab.run(&["log"]));
+    assert!(err.contains("window") && err.contains("closed ("), "{err}\nkill took {:?}; log:\n{}", t.elapsed(), lab.run(&["log"]));
     assert!(kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap"));
 }

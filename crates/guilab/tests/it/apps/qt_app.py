@@ -34,13 +34,17 @@ label.customContextMenuRequested.connect(lambda p: menu.popup(label.mapToGlobal(
 
 
 def report():
+    # Once shown and laid out.
+    if not (win.windowHandle() and win.windowHandle().isExposed()) or win.width() <= 1:
+        QTimer.singleShot(30, report)
+        return
     for name, w in (("edit", edit), ("label", label)):
         p = w.mapTo(win, QPoint(0, 0))
         out("pos", name, p.x(), p.y(), w.width(), w.height())
     out("ready")
 
 
-QTimer.singleShot(500, report)
+QTimer.singleShot(30, report)
 if "--menu" in sys.argv:
     QTimer.singleShot(500, lambda: menu.popup(win.mapToGlobal(QPoint(win.width() - 20, win.height() - 20))))
 sys.exit(app.exec())

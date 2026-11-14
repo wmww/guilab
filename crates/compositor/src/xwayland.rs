@@ -154,6 +154,14 @@ impl Session {
         Rectangle::new(at, size.into())
     }
 
+    /// Whether a managed X window mapped now would tile: a normal window while no other
+    /// window is tiled.
+    fn x_would_tile(&self, x: &X11Surface) -> bool {
+        let floats = x.is_transient_for().is_some() || x.is_modal() || x.window_type().is_some_and(|t| t != WmWindowType::Normal);
+        // Not in the space yet: a fresh Window stands for it.
+        self.should_tile(&Window::new_x11_window(x.clone()), !floats)
+    }
+
     /// Configures a managed X window per the policy and puts it in the space there.
     pub(crate) fn x_place(&mut self, w: &Window) {
         let Some(x) = w.x11_surface() else { return };
@@ -210,13 +218,8 @@ impl XwmHandler for Session {
     fn new_override_redirect_window(&mut self, _: XwmId, _: X11Surface) {}
 
     fn map_window_request(&mut self, _: XwmId, x: X11Surface) {
-        if let Err(e) = x.set_mapped(true) {
-            tracing::warn!("x11 map: {e}");
-            return;
-        }
         let w = Window::new_x11_window(x.clone());
-        let floats = x.is_transient_for().is_some() || x.is_modal() || x.window_type().is_some_and(|t| t != WmWindowType::Normal);
-        let tiled = self.should_tile(&w, !floats);
+        let tiled = self.x_would_tile(&x);
         tracing::debug!(xid = x.window_id(), class = x.class(), tiled, "placing X window");
         w.user_data().insert_if_missing(WindowState::default);
         w.user_data().get::<WindowState>().unwrap().tiled.set(tiled);
@@ -225,6 +228,10 @@ impl XwmHandler for Session {
         } else {
             let base = self.x_rect(&w, &x);
             self.cascade(&w, base);
+        }
+        if let Err(e) = x.set_mapped(true) {
+            tracing::warn!("x11 map: {e}");
+            return;
         }
         self.x_place(&w);
         self.focus_window(&w);
@@ -265,6 +272,12 @@ impl XwmHandler for Session {
                     let _ = x.configure(Rectangle::new(geo.loc, geo.size));
                 }
                 self.x_place(&w);
+            }
+            // Not mapped yet. One that will tile gets the output size now: smithay maps the
+            // client window (into its frame) before `map_window_request`, so the app would
+            // first lay out at the size it asked for, then again at ours.
+            None if self.x_would_tile(&x) => {
+                let _ = x.configure(self.output_rect());
             }
             None => {
                 if let Some(v) = nx {

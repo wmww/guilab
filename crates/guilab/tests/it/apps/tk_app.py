@@ -38,11 +38,16 @@ dbtn.pack(pady=5)
 
 
 def report():
+    # Once mapped and laid out (the WM sizes the window before mapping it).
+    root.update_idletasks()
+    if not root.winfo_ismapped() or root.winfo_width() <= 1:
+        root.after(30, report)
+        return
     for name, w in (("entry", entry), ("menu", mbtn), ("dialog", dbtn)):
         out("pos", name, w.winfo_rootx() - root.winfo_rootx(), w.winfo_rooty() - root.winfo_rooty(), w.winfo_width(), w.winfo_height())
     out("ready")
 
 
-root.after(500, report)
+root.after(30, report)
 entry.focus_set()
 root.mainloop()

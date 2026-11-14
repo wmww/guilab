@@ -181,7 +181,13 @@ impl Lab {
 impl Drop for Lab {
     fn drop(&mut self) {
         let _ = self.cmd(&["server", "--stop"]).output();
-        let _ = std::fs::remove_dir_all(&self.rt);
+        // A failed test keeps its runtime dir: `guilab/server.log` (run the tests with e.g.
+        // `GUILAB_LOG=debug`), app logs, screenshots.
+        if std::thread::panicking() {
+            eprintln!("kept {} for inspection", self.rt.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.rt);
+        }
     }
 }
 
