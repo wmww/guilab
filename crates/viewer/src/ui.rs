@@ -21,7 +21,10 @@ use std::collections::HashMap;
 use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
 use guilab_markup::{Annotated, Chat, FeedItem, Sketch, Tool};
 
-use crate::host::{CursorImage, Gesture, HostCursor, HostInput};
+use crate::{
+    host::{CursorImage, Gesture, HostCursor, HostInput},
+    sizing::{self, Resizing},
+};
 
 /// A session as the UI sees it.
 pub struct SessionView<'a> {
@@ -124,6 +127,8 @@ pub enum Action {
     Freeze { session: String },
     /// The human sent a message (text, composited drawings with their text annotations).
     Message { session: String, text: String, images: Vec<Annotated> },
+    /// Change the session's output (View menu, handles, "Lock size to window").
+    Resize { session: String, size: Option<(u32, u32)>, scale: Option<f64> },
     /// File > Save screenshot: ask where, then save `image` (the open drawing with its
     /// marks), or the session's live output if None. Report back with [`ViewerUi::notice`].
     SaveScreenshot { session: String, image: Option<std::sync::Arc<egui::ColorImage>> },
@@ -138,12 +143,25 @@ struct PerSession {
     /// Next event seq the feed wants (see [`ViewerUi::feed_cursor`]).
     feed_next: u64,
     viz: crate::viz::Overlay,
+    sizing: Sizing,
+}
+
+/// Session sizing state (View menu).
+#[derive(Default)]
+struct Sizing {
+    /// "Lock size to window": the session's logical size follows the view; no zoom/pan.
+    follow: bool,
+    /// The last size "follow" asked for, and when (egui time).
+    sent: Option<((u32, u32), f64)>,
+    /// The View menu's size and scale fields (synced to the session while it's closed).
+    edit_size: (u32, u32),
+    edit_scale: f64,
 }
 
 impl PerSession {
     fn new(key: &str) -> PerSession {
         let id = egui::Id::new(("session", key));
-        PerSession { key: key.into(), zoom: Zoom::default(), sketch: Sketch::new(id.with("sketch")), chat: Chat::new(id.with("chat")), feed_next: 0, viz: Default::default() }
+        PerSession { key: key.into(), zoom: Zoom::default(), sketch: Sketch::new(id.with("sketch")), chat: Chat::new(id.with("chat")), feed_next: 0, viz: Default::default(), sizing: Sizing::default() }
     }
 }
 
@@ -205,6 +223,10 @@ pub struct ViewerUi {
     /// The app's cursor image, when the pointer is over an app that gets input and the app
     /// uses an image cursor (egui's cursor is then `Default`; the viewer shows this instead).
     app_image: Option<std::sync::Arc<CursorImage>>,
+    /// The session view rect in the last frame (points).
+    last_view: Option<Rect>,
+    /// A resize handle drag, in this session.
+    resizing: Option<(String, Resizing)>,
 }
 
 /// Where the chat panel goes (View menu).
@@ -391,7 +413,9 @@ impl ViewerUi {
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
             let drawing = p.sketch.active();
-            self.view(ui, s, &mut p.zoom, view, resp.contains_pointer(), &p.sketch, inputs, &mut out);
+            self.last_view = Some(view);
+            self.follow_window(s, &mut p.sizing, view, now, &mut out, ui.ctx());
+            self.view(ui, s, &mut p, view, resp.contains_pointer(), inputs, &mut out);
             if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
                 p.viz.update(log, now);
                 let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 185.0);
@@ -464,14 +488,34 @@ impl ViewerUi {
         out
     }
 
+    /// "Lock size to window": asks for the output size whose logical size fills the view,
+    /// throttled. Not while an agent holds the lock (that freezes the size).
+    fn follow_window(&self, s: &SessionView, sz: &mut Sizing, view: Rect, now: f64, out: &mut Vec<Action>, ctx: &egui::Context) {
+        if !sz.follow || s.locked {
+            sz.sent = None;
+            return;
+        }
+        let want = sizing::fit_pixels(view, s.scale);
+        if want == s.size {
+            return;
+        }
+        let due = sz.sent.is_none_or(|(w, t)| now - t >= sizing::THROTTLE && (w != want || now - t >= 1.0));
+        if due {
+            out.push(Action::Resize { session: s.name.to_string(), size: Some(want), scale: None });
+            sz.sent = Some((want, now));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(sizing::THROTTLE));
+        }
+    }
+
     /// File / Edit / View, for the current session.
     fn menu_bar(&mut self, ui: &mut egui::Ui, sessions: &[SessionView], out: &mut Vec<Action>) {
         let cur = self.current.clone();
         let mut chat_place = self.chat_place;
-        let p = cur.as_deref().and_then(|c| {
-            let key = sessions.iter().find(|s| s.name == c)?.key;
-            Some(self.per(c, key))
-        });
+        let sv = cur.as_deref().and_then(|c| sessions.iter().find(|s| s.name == c));
+        let last_view = self.last_view;
+        let menu_open = guilab_markup::menu::MenuBar::is_open(ui.ctx(), "menubar");
+        let p = sv.map(|s| self.per(s.name, s.key));
         egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(ui.visuals().panel_fill)).show(ui, |ui| {
             guilab_markup::menu::MenuBar::new("menubar").show(ui, |bar| {
                 let Some(p) = p else {
@@ -496,6 +540,7 @@ impl ViewerUi {
                     }
                 });
                 bar.menu("View", |m| {
+                    let fixed = p.sizing.follow;
                     let z = &mut p.zoom;
                     // Steppers: they keep the menu open.
                     m.custom(
@@ -503,21 +548,26 @@ impl ViewerUi {
                             ui.label("Zoom");
                         },
                         |ui| {
-                            if ui.add(egui::Button::new("+").min_size(vec2(26.0, 22.0))).clicked() {
-                                z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
-                                z.fit = false;
-                            }
-                            if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(56.0, 22.0))).on_hover_text("Actual size (100%)").clicked() {
-                                *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
-                            }
-                            if ui.add(egui::Button::new("−").min_size(vec2(26.0, 22.0))).clicked() {
-                                z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
-                                z.fit = false;
-                            }
+                            ui.add_enabled_ui(!fixed, |ui| {
+                                if ui.add(egui::Button::new("+").min_size(vec2(26.0, 22.0))).clicked() {
+                                    z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
+                                    z.fit = false;
+                                }
+                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(56.0, 22.0))).on_hover_text("Actual size (100%)").clicked() {
+                                    *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                                }
+                                if ui.add(egui::Button::new("−").min_size(vec2(26.0, 22.0))).clicked() {
+                                    z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
+                                    z.fit = false;
+                                }
+                            });
                         },
                     );
-                    if m.item("Fit to window", None, !z.fit) {
+                    if m.item("Fit to window", None, !z.fit && !fixed) {
                         *z = Zoom::default();
+                    }
+                    if let Some(sv) = sv {
+                        session_size(m, sv, &mut p.sizing, z, last_view, menu_open, &name, out);
                     }
                     m.separator();
                     m.heading("Chat");
@@ -534,8 +584,22 @@ impl ViewerUi {
 
     #[allow(clippy::too_many_arguments)]
     /// `drawing`: the sketch owns the pointer over the image; nothing goes to the app.
-    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, sketch: &Sketch, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+    fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, p: &mut PerSession, view: Rect, hovered: bool, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
+        let (z, sketch) = (&mut p.zoom, &p.sketch);
         let drawing = sketch.active();
+        // "Lock size to window": always fit, no zoom or pan.
+        let fixed = p.sizing.follow;
+        if fixed {
+            z.fit = true;
+        }
+        if self.resizing.as_ref().is_some_and(|(n, _)| n != s.name) {
+            self.resizing = None;
+        }
+        // Handles: not while the agent holds the session, following the window or drawing.
+        let handles = !s.locked && !fixed && !sketch.drawing_open() && s.texture.is_some();
+        if !handles && let Some((_, r)) = self.resizing.take() {
+            z.fit = r.was_fit;
+        }
         // Drags on the image pan: the Move tool (off marks), or a frozen screenshot with no
         // drawing tool.
         let pan_tool = sketch.tool == Tool::Move || (sketch.tool == Tool::Interact && sketch.drawing_open());
@@ -547,6 +611,10 @@ impl ViewerUi {
             let fit = (view.width() / px.x).min(view.height() / px.y).min(cap);
             z.zoom = fit.max(MIN_ZOOM);
             z.pan = Vec2::ZERO;
+        }
+        // While a handle drags, the image's opposite side stays put.
+        if let Some((_, r)) = &self.resizing {
+            z.pan = r.place(px * z.zoom).center() - view.center();
         }
         let image = |z: &Zoom| {
             let size = px * z.zoom;
@@ -569,6 +637,9 @@ impl ViewerUi {
         let layer = ui.layer_id();
         let ours = |p: Pos2| view.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer);
         let zoom_at = |z: &mut Zoom, img: &mut Rect, p: Pos2, factor: f32| {
+            if fixed {
+                return;
+            }
             let new = (z.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
             let c = view.center();
             z.pan = (p - c) - (p - c - z.pan) * (new / z.zoom);
@@ -655,6 +726,10 @@ impl ViewerUi {
             }
             match ev {
                 Event::PointerMoved(p) => {
+                    if let Some((_, r)) = &mut self.resizing {
+                        r.moved(p);
+                        continue;
+                    }
                     if let Some(last) = self.panning {
                         z.pan += p - last;
                         z.fit = false;
@@ -664,6 +739,7 @@ impl ViewerUi {
                     }
                     if let Some((start, _)) = self.middle
                         && (p - start).length() > DRAG_SLOP
+                        && !fixed
                     {
                         self.middle = None;
                         z.pan += p - start;
@@ -684,6 +760,13 @@ impl ViewerUi {
                 Event::PointerButton { pos, button, pressed, .. } => {
                     let code = linux_button(button);
                     if !pressed {
+                        if button == PointerButton::Primary
+                            && let Some((_, r)) = self.resizing.take()
+                        {
+                            out.push(Action::Resize { session: s.name.to_string(), size: Some(r.size), scale: None });
+                            z.fit = r.was_fit;
+                            continue;
+                        }
                         if self.panning.is_some() && (button == PointerButton::Middle || self.held_buttons.is_empty()) {
                             self.panning = None;
                             continue;
@@ -705,17 +788,26 @@ impl ViewerUi {
                         }
                         continue;
                     }
-                    if !ours(pos) || self.panning.is_some() {
+                    if !ours(pos) || self.panning.is_some() || self.resizing.is_some() {
                         continue;
                     }
                     let on_image = img.contains(pos);
+                    if handles
+                        && button == PointerButton::Primary
+                        && self.held_buttons.is_empty()
+                        && let Some(edge) = sizing::handle_at(img, view, pos)
+                    {
+                        self.resizing = Some((s.name.to_string(), Resizing::new(edge, pos, img, s.size, z.fit)));
+                        z.fit = false;
+                        continue;
+                    }
                     if button == PointerButton::Middle && self.held_buttons.is_empty() {
                         self.middle = Some((pos, to_session(img, pos)));
                         continue;
                     }
                     // Off the image, or with the Move tool anywhere but on a mark: pan.
                     if !on_image || (pan_tool && button == PointerButton::Primary && sketch.mark_at(pos).is_none()) {
-                        if self.held_buttons.is_empty() {
+                        if self.held_buttons.is_empty() && !fixed {
                             self.panning = Some(pos);
                         }
                         continue;
@@ -743,7 +835,7 @@ impl ViewerUi {
                                 egui::MouseWheelUnit::Line => 40.0,
                                 egui::MouseWheelUnit::Page => view.height(),
                             };
-                            if delta != Vec2::ZERO {
+                            if delta != Vec2::ZERO && !fixed {
                                 z.pan += delta * k;
                                 z.fit = false;
                                 img = image(z);
@@ -812,6 +904,27 @@ impl ViewerUi {
             }
         }
         painter.rect_stroke(img, 0.0, egui::Stroke::new(1.0, Color32::from_gray(60)), egui::StrokeKind::Outside);
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        let hot_handle = match &self.resizing {
+            Some((_, r)) => Some(r.edge),
+            None if handles && hovered && self.panning.is_none() => pointer.and_then(|p| sizing::handle_at(img, view, p)),
+            None => None,
+        };
+        if handles {
+            sizing::paint_handles(&painter, ui.visuals(), img, view, hot_handle);
+        }
+        if let Some((_, r)) = &mut self.resizing {
+            painter.rect_stroke(r.target(), 0.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
+            if let Some(p) = pointer {
+                sizing::readout(ui.ctx(), ui.visuals(), view, p, r.size);
+            }
+            if r.due(now) {
+                out.push(Action::Resize { session: s.name.to_string(), size: Some(r.size), scale: None });
+                r.sent = Some((r.size, now));
+            } else if r.sent.is_some_and(|(sz, _)| sz != r.size) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(sizing::THROTTLE));
+            }
+        }
         self.image_rect = Some(img);
         self.pixel_ratio = z.zoom;
 
@@ -821,7 +934,9 @@ impl ViewerUi {
         self.app_image = None;
         let over_img = hovered && ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| img.contains(p));
         let ctx = ui.ctx();
-        if self.panning.is_some() {
+        if let Some(e) = hot_handle {
+            ctx.set_cursor_icon(e.cursor());
+        } else if self.panning.is_some() {
             ctx.set_cursor_icon(CursorIcon::Grabbing);
         } else if pan_tool && hovered {
             ctx.set_cursor_icon(CursorIcon::Grab); // the canvas shows Move over marks
@@ -841,6 +956,78 @@ impl ViewerUi {
     }
 }
 
+
+/// Scale presets in the View menu.
+const SCALES: [f64; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
+
+/// The View menu's session size section: resize to / lock to the window, size and scale.
+#[allow(clippy::too_many_arguments)]
+fn session_size(m: &mut guilab_markup::menu::MenuUi, s: &SessionView, sz: &mut Sizing, z: &mut Zoom, view: Option<Rect>, menu_open: bool, name: &str, out: &mut Vec<Action>) {
+    if !menu_open || sz.follow || s.locked {
+        // Opening (or not editable): show the session's current values.
+        sz.edit_size = s.size;
+        sz.edit_scale = s.scale;
+    }
+    let free = !s.locked;
+    let resize = |out: &mut Vec<Action>, size: Option<(u32, u32)>, scale: Option<f64>| out.push(Action::Resize { session: name.to_string(), size, scale });
+    m.separator();
+    m.heading("Session size");
+    if m.item("Resize to window", None, free && view.is_some()) {
+        resize(out, view.map(|v| sizing::fit_pixels(v, s.scale)), None);
+        *z = Zoom::default();
+    }
+    if m.check(sz.follow, "Lock size to window", true) {
+        sz.follow = !sz.follow;
+        *z = Zoom::default();
+    }
+    let edit_size = free && !sz.follow;
+    m.custom(
+        |ui| {
+            ui.add_enabled(edit_size, egui::Label::new("Size"));
+        },
+        |ui| {
+            ui.add_enabled_ui(edit_size, |ui| {
+                let set = ui.button("Set").on_hover_text("Output size in pixels");
+                let range = sizing::MIN_PX..=sizing::MAX_PX;
+                let h = ui.add(egui::DragValue::new(&mut sz.edit_size.1).range(range.clone()).speed(4));
+                ui.label("×");
+                let w = ui.add(egui::DragValue::new(&mut sz.edit_size.0).range(range).speed(4));
+                let enter = (w.lost_focus() || h.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (set.clicked() || enter) && sz.edit_size != s.size {
+                    resize(out, Some(sz.edit_size), None);
+                }
+            });
+        },
+    );
+    m.custom(
+        |ui| {
+            ui.add_enabled(free, egui::Label::new("Scale"));
+        },
+        |ui| {
+            ui.add_enabled_ui(free, |ui| {
+                let mut pick = None;
+                let custom = ui.add(egui::DragValue::new(&mut sz.edit_scale).range(0.25..=8.0).speed(0.01).max_decimals(2)).on_hover_text("Other scale");
+                if (custom.drag_stopped() || custom.lost_focus()) && sz.edit_scale != s.scale {
+                    pick = Some(sz.edit_scale);
+                }
+                for sc in SCALES.iter().rev() {
+                    if ui.selectable_label(s.scale == *sc, format!("{sc}")).clicked() && s.scale != *sc {
+                        pick = Some(*sc);
+                    }
+                }
+                if let Some(sc) = pick {
+                    sz.edit_scale = sc;
+                    // Following the window keeps the logical size; otherwise the pixel size.
+                    let size = sz.follow.then_some(view).flatten().map(|v| sizing::fit_pixels(v, sc));
+                    resize(out, size, Some(sc));
+                }
+            });
+        },
+    );
+    if s.locked {
+        m.note("The agent is using the app; its size is frozen");
+    }
+}
 
 /// One session tab: rounded top corners, an accent line on the selected one.
 fn session_tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {

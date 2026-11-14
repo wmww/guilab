@@ -11,6 +11,7 @@
 
 pub mod gfx;
 pub mod host;
+pub mod sizing;
 pub mod source;
 pub mod ui;
 pub mod viz;

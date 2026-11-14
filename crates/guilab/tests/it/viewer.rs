@@ -331,3 +331,112 @@ fn click_then_type() {
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     assert!(out.contains("human message: \"hello\""), "{out}{err}");
 }
+
+impl Lab {
+    /// Waits until the session's output size satisfies `pred`; returns it.
+    fn wait_output(&self, secs: u64, pred: impl Fn(u64, u64) -> bool) -> (u64, u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            let o = self.json(&["output"]);
+            let (w, h) = (o["width"].as_u64().unwrap(), o["height"].as_u64().unwrap());
+            if pred(w, h) {
+                return (w, h);
+            }
+            assert!(Instant::now() < deadline, "output stayed {w}x{h}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// View menu sizing: "Resize to window" sets the session's logical size to the view;
+/// "Lock size to window" keeps it there as the window resizes, except while an agent holds
+/// the lock (the agent may still resize); unlocking fits it again.
+/// Layout (1200x800 host window, one session): View menu at 111,12, its "Resize to
+/// window" row at y=127, "Lock size to window" at y=153; the view is the window minus the
+/// 38 px toolbar, 24 px menu bar and 180 px chat panel.
+#[test]
+fn size_to_window() {
+    let Some((h, sock, t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600", "--scale", "1.5"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let step = |actions: &[&str]| {
+        h.input(&t, actions);
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    step(&["move", "111", "12", "click"]);
+    step(&["move", "150", "127", "click"]);
+    // Logical size = the view (1162x596 points), at scale 1.5.
+    v.wait_output(5, |w, hh| (w, hh) == (1743, 894));
+    let log = v.run(&["log", "--kind", "output"]);
+    assert!(log.contains("output is now 1743x894 scale 1.5 (the human resized it)"), "{log}");
+
+    step(&["move", "111", "12", "click"]);
+    step(&["move", "150", "153", "click"]);
+    h.run(&["-t", &t, "output", "-s", "1000x700"]);
+    v.wait_output(5, |w, hh| (w, hh) == (1443, 744));
+    // An agent's lock freezes it; the agent can still resize.
+    let vt = v.lock();
+    h.run(&["-t", &t, "output", "-s", "1100x750"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(v.wait_output(1, |_, _| true), (1443, 744));
+    v.run(&["-t", &vt, "output", "-s", "640x480"]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(v.wait_output(1, |_, _| true), (640, 480));
+    v.run(&["-t", &vt, "unlock"]);
+    v.wait_output(5, |w, hh| (w, hh) == (1593, 819));
+}
+
+/// Dragging the bottom-right resize handle resizes the output by the dragged distance.
+#[test]
+fn resize_handle() {
+    let Some((h, sock, t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "600x400"]);
+    v.run(&["run", "--", "sleep", "600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let m = mapping(&h, &t, &v);
+    assert!((m.scale - 1.0).abs() < 0.01, "a 600x400 session shows 1:1 ({})", m.scale);
+    let (x, y) = ((m.origin.0 + 600.0 + 5.0).round() as i64, (m.origin.1 + 400.0 + 5.0).round() as i64);
+    let s = |v: i64| v.to_string();
+    h.input(&t, &["move", &s(x), &s(y), "sleep", "100", "down", "move", &s(x + 100), &s(y + 50), "300", "sleep", "100", "up"]);
+    v.wait_output(5, |w, hh| (w, hh) == (700, 450));
+    // The human's moves never reached the app.
+    let log = v.run(&["log", "--kind", "button"]);
+    assert!(!log.contains("pressed"), "{log}");
+}
+
+/// At matching fractional scales (host and session 1.5) a session that fits shows pixel
+/// for pixel: the viewer adds no blur.
+#[test]
+fn pixel_exact_at_fractional_scale() {
+    let h = Lab::new();
+    let info = h.json(&["new", "host", "-s", "1500x900", "--scale", "1.5"]);
+    if !h.info().renderer.starts_with("gles") || !gtk4() {
+        return;
+    }
+    let sock = info["wayland_display"].as_str().unwrap().to_string();
+    let (v, _log) = viewed(&[]);
+    v.run(&["output", "-s", "750x450", "--scale", "1.5"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let (vs, hs) = (v.path("v.png"), h.path("h.png"));
+    std::thread::sleep(Duration::from_millis(500));
+    v.run(&["screenshot", "-o", &vs]);
+    std::thread::sleep(Duration::from_millis(300));
+    h.run(&["screenshot", "-o", &hs]);
+    let (vw, vh, vp, vc) = crate::read_png(&vs);
+    let (hw, hh, hp, hc) = crate::read_png(&hs);
+    let (vw, vh, hw, hh) = (vw as usize, vh as usize, hw as usize, hh as usize);
+    fn at(p: &[u8], c: usize, w: usize, x: usize, y: usize) -> &[u8] {
+        &p[(y * w + x) * c..][..3]
+    }
+    let found = (0..=hh - vh).flat_map(|y| (0..=hw - vw).map(move |x| (x, y))).find(|&(ox, oy)| {
+        (0..vh).step_by(7).all(|y| (0..vw).step_by(5).all(|x| at(&vp, vc, vw, x, y) == at(&hp, hc, hw, ox + x, oy + y)))
+    });
+    let (ox, oy) = found.expect("the session isn't shown pixel for pixel");
+    let differ = (0..vh).flat_map(|y| (0..vw).map(move |x| (x, y))).filter(|&(x, y)| at(&vp, vc, vw, x, y) != at(&hp, hc, hw, ox + x, oy + y)).count();
+    assert_eq!(differ, 0, "{differ} pixels differ at offset {ox},{oy}");
+}

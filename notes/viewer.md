@@ -33,6 +33,12 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 - Pointer leave: the UI tracks which session last got motion (`pointer_in`) and sends `Input::Leave` when the pointer leaves the image, a tool takes over, the lock blocks, the tab changes or the window loses the pointer. Cursors: see below.
 - Wheel vs touchpad: axis events with value120/discrete or source Wheel become egui `Line` units (notches), else `Point`. Forwarded wheel = 15 logical px per notch (like agent `scroll`); smooth scroll is scaled so content follows the fingers.
 
+## Sizing (sizing.rs, ui.rs)
+- `Action::Resize { size, scale }` → server `requests::set_output(.., key: None)` (ignored while locked; logs `output` with `human: true` only if something changed). The agent path uses the same function with its key.
+- `sizing::fit_pixels(view, scale)`: floor(view points) × scale, rounded. "Lock size to window" (`Sizing::follow`) runs `follow_window` each frame before `view()`; zoom forced to fit, zoom/pan inputs ignored (`fixed`).
+- Handles: `handle_at` (10 pt band outside the image, only where it fits in the view); a drag (`Resizing`, in `ViewerUi` like `panning`) freezes the zoom and sets the pan each frame so the anchor (opposite edge/corner) stays put while the frames catch up; restores fit on release. Input loop: handle presses come before the off-image pan.
+- At matching host/session scales a fitting session is pixel-exact (tested at 1.5: `viewer::pixel_exact_at_fractional_scale`). Fractional scaling checked by eye with GTK4, Qt6 (PySide6) and Chromium at 1.25/1.5 incl. live changes: crisp.
+
 ## Cursors
 - Over the app with input going through: the app's own cursor. The compositor (`cursor.rs`) gives `AppCursor`: Named (cursor-shape protocol), Hidden, or Image (a `wl_pointer.set_cursor` surface rendered to RGBA at the output scale by `Gpu::render_surface`, lazily, once per `cursor_seq` change; animated cursors get frame callbacks each tick, and cursor commits don't count for settle). The server converts it to `HostCursor` once per change (`Shown::cursor`).
 - Host side (`HostState::set_cursor`): named → `wp_cursor_shape_v1`; image → an shm buffer on our own cursor surface, viewport destination = image size / its scale (not the viewer's zoom: real cursors aren't zoomed); hidden → null surface. `set_cursor` needs the *enter* serial (smithay rejects others outside a grab).

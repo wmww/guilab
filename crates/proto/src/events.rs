@@ -136,7 +136,14 @@ pub enum EventData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
-    Output { width: u32, height: u32, scale: f64 },
+    Output {
+        width: u32,
+        height: u32,
+        scale: f64,
+        /// The human changed it in the viewer (else an agent's `output`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        human: bool,
+    },
     Lock { forced: bool },
     Unlock,
     /// The human revoked the agent's lock (viewer).

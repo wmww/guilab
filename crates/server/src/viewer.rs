@@ -412,6 +412,18 @@ impl Server {
                     slot.session.inject(ev, InputSource::Human);
                 }
                 Action::Revoke { session } => self.revoke_lock(&session),
+                Action::Resize { session, size, scale } => {
+                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
+                    // The agent's lock freezes the output (for the human).
+                    if slot.lock.current.is_some() {
+                        continue;
+                    }
+                    slot.last_active = Instant::now();
+                    let size = size.map(|(w, h)| (w as i32, h as i32));
+                    if let Err(e) = crate::requests::set_output(&mut slot.session, size, scale, None) {
+                        tracing::warn!("viewer: resizing {session}: {e:#}");
+                    }
+                }
                 Action::Share { session, on } => self.share(&session, on),
                 Action::SaveScreenshot { session, image } => {
                     let (w, h, mut rgba) = match image {

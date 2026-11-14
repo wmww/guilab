@@ -126,6 +126,12 @@ impl Bar<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Mark {
+    Radio(bool),
+    Check(bool),
+}
+
 /// The inside of an open menu.
 pub struct MenuUi<'a> {
     pub ui: &'a mut Ui,
@@ -149,10 +155,25 @@ impl MenuUi<'_> {
 
     /// An item with a radio mark.
     pub fn radio(&mut self, selected: bool, label: &str) -> bool {
-        self.row(label, None, Some(selected), true)
+        self.row(label, None, Some(Mark::Radio(selected)), true)
     }
 
-    fn row(&mut self, label: &str, shortcut: Option<&str>, mark: Option<bool>, enabled: bool) -> bool {
+    /// An item with a check box. Returns whether it was clicked (the caller toggles).
+    pub fn check(&mut self, checked: bool, label: &str, enabled: bool) -> bool {
+        self.row(label, None, Some(Mark::Check(checked)), enabled)
+    }
+
+    /// A dim, non-interactive line of text (e.g. why items are disabled).
+    pub fn note(&mut self, text: &str) {
+        let ui = &mut *self.ui;
+        let font = FontId::proportional(12.0);
+        let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x;
+        self.natural = self.natural.max(2.0 * ITEM_PAD + w);
+        let (rect, _) = ui.allocate_exact_size(vec2(self.width, 20.0), Sense::hover());
+        ui.painter().text(pos2(rect.min.x + ITEM_PAD, rect.center().y), Align2::LEFT_CENTER, text, font, ui.visuals().weak_text_color());
+    }
+
+    fn row(&mut self, label: &str, shortcut: Option<&str>, mark: Option<Mark>, enabled: bool) -> bool {
         let ui = &mut *self.ui;
         let v = ui.visuals().clone();
         let font = FontId::proportional(14.0);
@@ -165,11 +186,23 @@ impl MenuUi<'_> {
         }
         let color = if enabled { v.text_color() } else { v.weak_text_color() };
         let mut x = rect.min.x + ITEM_PAD;
-        if let Some(on) = mark {
+        if let Some(mark) = mark {
             let c = pos2(x + 6.0, rect.center().y);
-            ui.painter().circle_stroke(c, 6.0, Stroke::new(1.0, v.weak_text_color()));
-            if on {
-                ui.painter().circle_filled(c, 3.5, color);
+            match mark {
+                Mark::Radio(on) => {
+                    ui.painter().circle_stroke(c, 6.0, Stroke::new(1.0, v.weak_text_color()));
+                    if on {
+                        ui.painter().circle_filled(c, 3.5, color);
+                    }
+                }
+                Mark::Check(on) => {
+                    let r = Rect::from_center_size(c, vec2(12.0, 12.0));
+                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, v.weak_text_color()), egui::StrokeKind::Inside);
+                    if on {
+                        let pts = vec![c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.8), c + vec2(3.8, -3.0)];
+                        ui.painter().add(egui::Shape::line(pts, Stroke::new(1.8, color)));
+                    }
+                }
             }
             x += 20.0;
         }

@@ -256,14 +256,10 @@ impl Server {
             Command::Ps => Response::ok(s.ps()),
             Command::Tree => Response::ok(s.tree()),
             Command::Output { size, scale } => {
-                if size.is_some() || scale.is_some() {
-                    if let Err(e) = s.set_output(size.map(|[w, h]| (w as i32, h as i32)), scale) {
-                        return Some(Response::err(format!("{e:#}")));
-                    }
-                    let o = s.output_info();
-                    s.log.push(EventData::Output { width: o.width, height: o.height, scale: o.scale }, Some(key));
-                    let note = if o.scale == 1.0 { format!("{}×{}", o.width, o.height) } else { format!("{}×{} @{}x", o.width, o.height, o.scale) };
-                    s.viz.push(true, guilab_proto::viz::VizKind::Note(note));
+                if (size.is_some() || scale.is_some())
+                    && let Err(e) = set_output(s, size.map(|[w, h]| (w as i32, h as i32)), scale, Some(key))
+                {
+                    return Some(Response::err(format!("{e:#}")));
                 }
                 Response::ok(s.output_info())
             }
@@ -769,3 +765,20 @@ fn copy_images(dir: &Path, prefix: &str, seq: u64, images: &[std::path::PathBuf]
     Ok(out)
 }
 
+/// Changes a session's output and logs it. `key`: the agent's delivery key; None = the
+/// human (viewer).
+pub(crate) fn set_output(s: &mut Session, size: Option<(i32, i32)>, scale: Option<f64>, key: Option<&str>) -> anyhow::Result<()> {
+    let before = s.output_info();
+    s.set_output(size, scale)?;
+    let o = s.output_info();
+    if (o.width, o.height, o.scale) == (before.width, before.height, before.scale) {
+        return Ok(());
+    }
+    s.log.push(EventData::Output { width: o.width, height: o.height, scale: o.scale, human: key.is_none() }, key);
+    // The overlay notes agent changes; the human sees their own.
+    if key.is_some() {
+        let note = if o.scale == 1.0 { format!("{}×{}", o.width, o.height) } else { format!("{}×{} @{}x", o.width, o.height, o.scale) };
+        s.viz.push(true, guilab_proto::viz::VizKind::Note(note));
+    }
+    Ok(())
+}

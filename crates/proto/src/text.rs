@@ -397,11 +397,12 @@ impl Fmt {
                 None => format!("window {id} closed"),
             },
             EventData::Title { id, title } => format!("window {id} title is now {}", quote(title.as_deref().unwrap_or(""))),
-            EventData::Output { width, height, scale } => {
+            EventData::Output { width, height, scale, human } => {
+                let by = if *human { " (the human resized it)" } else { "" };
                 if *scale == 1.0 {
-                    format!("output is now {width}x{height}")
+                    format!("output is now {width}x{height}{by}")
                 } else {
-                    format!("output is now {width}x{height} scale {scale}")
+                    format!("output is now {width}x{height} scale {scale}{by}")
                 }
             }
             EventData::Lock { forced: false } => "session locked".into(),
