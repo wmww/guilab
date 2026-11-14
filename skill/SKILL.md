@@ -49,7 +49,7 @@ Key repeat is off. `scrollpx` distances get scaled by toolkits (GTK scrolls abou
 
 ## Other controls
 
-`guilab -t TOKEN output -s 800x600 --scale 1.5` resizes live (the token is needed only while locked). `guilab clip get` / `clip set TEXT` reads or sets the clipboard. `guilab log` shows the session's full history. Every command has `--help` and `--json`.
+`guilab -t TOKEN output -s 800x600 --scale 1.5` resizes live (the token is needed only while locked). The human can resize the session in the viewer too, but not while you hold the lock; you see their changes as `output` events. `guilab clip get` / `clip set TEXT` reads or sets the clipboard. `guilab log` shows the session's full history. Every command has `--help` and `--json`.
 
 ## Working with a human
 
