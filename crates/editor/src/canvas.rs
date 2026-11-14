@@ -249,12 +249,14 @@ impl Editor {
 
         // Keys (not while a text field has focus).
         if self.tool != Tool::Interact && keys_free && self.typing.is_none() && (doc.is_some() || self.busy()) {
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            // Esc and Delete are taken only when they do something, so the host can use them
+            // otherwise (e.g. Esc to close).
+            if self.busy() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.cancel_gesture(&mut out);
             }
-            let del = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace));
-            if del
-                && self.tool == Tool::Move
+            let deletable = self.tool == Tool::Move && !self.busy() && !matches!(self.hover, Hit::None);
+            if deletable
+                && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace))
                 && let Some(d) = doc.as_deref_mut()
                 && let Some(e) = self.delete_hovered(d)
             {

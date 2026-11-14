@@ -425,3 +425,47 @@ fn text_matches_cpu_render() {
         "screen {on_screen:?} vs cpu {on_cpu:?}"
     );
 }
+
+/// A host that makes the doc only after the drag ended (a slow capture): the mark waits
+/// in the editor and is committed into the doc when it arrives.
+#[test]
+fn late_doc_gets_pending_mark() {
+    use crate::{Canvas, Editor, Xf};
+    use guilab_image::{Body, Doc};
+    let mut h = Headless::new(vec2(800.0, 600.0), 1.0);
+    guilab_kit::theme::install(&h.ctx);
+    let host = DemoHost::new([400, 300], 1.0);
+    let mut ed = Editor::new("e", host.editor.fonts().clone());
+    ed.tool = Tool::Arrow;
+    let xf = Xf { offset: vec2(0.0, 0.0), zoom: 1.0 };
+    let mut doc: Option<Doc> = None;
+    let mut begun = 0;
+    let mut edits = Vec::new();
+    let frame = |h: &mut Headless, ed: &mut Editor, doc: &mut Option<Doc>, events: Vec<Event>, begun: &mut u32, edits: &mut Vec<Edit>| {
+        h.run(events, 0.1, |ui| {
+            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), assets: &host.store, xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true });
+            *begun += out.begin as u32;
+            edits.extend(out.edits);
+        });
+    };
+    let (a, b) = (egui::pos2(50.0, 50.0), egui::pos2(150.0, 120.0));
+    frame(&mut h, &mut ed, &mut doc, vec![ev::moved(a), ev::press(a)], &mut begun, &mut edits);
+    frame(&mut h, &mut ed, &mut doc, vec![ev::moved(b)], &mut begun, &mut edits);
+    frame(&mut h, &mut ed, &mut doc, vec![ev::release(b)], &mut begun, &mut edits);
+    frame(&mut h, &mut ed, &mut doc, vec![], &mut begun, &mut edits);
+    assert!(edits.is_empty(), "nothing to commit into yet");
+    doc = Some(Doc::from_body(Body::screenshot(host.live, [400, 300], 1.0)));
+    frame(&mut h, &mut ed, &mut doc, vec![], &mut begun, &mut edits);
+    assert_eq!(begun, 1);
+    assert_eq!(edits.len(), 1);
+    assert_eq!(doc.unwrap().body().elements[1].kind, Kind::Arrow(pt(50.0, 50.0), pt(150.0, 120.0)));
+}
+
+#[test]
+fn second_insert_cascades() {
+    let mut t = T::new();
+    t.host.insert(sample_svg());
+    t.host.insert(sample_svg());
+    let dsts: Vec<_> = t.elements().iter().filter_map(|e| if let Kind::Svg { dst, .. } = e.kind { Some(dst.min) } else { None }).collect();
+    assert_eq!(dsts, vec![pt(220.0, 172.0), pt(240.0, 192.0)]);
+}

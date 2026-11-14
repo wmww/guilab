@@ -263,7 +263,12 @@ impl Editor {
     pub fn insert(&mut self, doc: &mut Doc, kind: Picture, natural: Size, center: Pt, fit: IRect) -> Edit {
         let k = ((fit.w as f32 * 0.9) / natural.w.max(1.0)).min((fit.h as f32 * 0.9) / natural.h.max(1.0)).min(1.0);
         let (w, h) = ((natural.w * k).max(1.0).round(), (natural.h * k).max(1.0).round());
-        let dst = Rect::new((center.x - w / 2.0).round(), (center.y - h / 2.0).round(), w, h);
+        let mut dst = Rect::new((center.x - w / 2.0).round(), (center.y - h / 2.0).round(), w, h);
+        // Cascade off pictures already at that spot, so a second insert doesn't hide the first.
+        let step = (20.0 * doc.body().scale).round();
+        while doc.body().elements.iter().any(|e| matches!(&e.kind, Kind::Raster { dst: d, .. } | Kind::Svg { dst: d, .. } if d.min == dst.min)) {
+            dst = dst.translate(pt(step, step));
+        }
         let kind = match kind {
             Picture::Raster(asset) => Kind::Raster { asset, dst, src: None },
             Picture::Svg(asset) => Kind::Svg { asset, dst },
