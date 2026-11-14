@@ -146,6 +146,15 @@ struct CursorSurface {
     buffer: Option<ShmBuffer>,
 }
 
+/// Whether the host takes our dmabufs (see `HostState::start_probe`).
+enum Probe {
+    Untried,
+    /// Sent; the buffer stays alive until the answer.
+    Pending { since: Instant, _buf: GbmBuffer },
+    Ok,
+    Failed,
+}
+
 /// How frames reach the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferKind {
@@ -205,6 +214,7 @@ pub struct HostState {
     gbm: Option<GbmDevice<DrmDeviceFd>>,
     node: Option<DrmNode>,
     force_shm: bool,
+    probe: Probe,
 
     /// Window size in logical (surface) pixels, once configured.
     pub size: Option<(u32, u32)>,
@@ -308,6 +318,7 @@ impl HostState {
             gbm,
             node,
             force_shm,
+            probe: Probe::Untried,
             size: None,
             scale: 1.0,
             closed: false,
@@ -433,13 +444,41 @@ impl HostState {
         Ok((c.surface.clone(), (img.hotspot.0 as f64 / k).round() as i32, (img.hotspot.1 as f64 / k).round() as i32))
     }
 
-    /// Picks dmabuf or shm once the host's dmabuf feedback is in (or can't come).
-    fn ensure_present(&mut self, renderer: &GlesRenderer) -> anyhow::Result<()> {
+    /// Picks dmabuf or shm once the host's dmabuf feedback is in (or can't come) and, for
+    /// dmabuf, the host accepted a probe buffer. Ok(false): not decided yet.
+    fn ensure_present(&mut self, renderer: &GlesRenderer) -> anyhow::Result<bool> {
         if self.present.is_some() {
-            return Ok(());
+            return Ok(true);
         }
         let (w, h) = self.buffer_size();
-        if let Some(mods) = self.dmabuf_modifiers(renderer) {
+        let mods = self.dmabuf_modifiers(renderer);
+        // The host may reject a format/modifier it advertised; `create_immed` would then be
+        // a protocol error that closes the connection. So first create one buffer the
+        // asynchronous way and see.
+        let mods = match (&mods, &self.probe) {
+            (Some(m), Probe::Untried) => {
+                self.probe = match self.start_probe(m) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::info!("viewer dmabuf probe: {e:#}; using shm");
+                        Probe::Failed
+                    }
+                };
+                if matches!(self.probe, Probe::Pending { .. }) {
+                    return Ok(false);
+                }
+                None
+            }
+            (Some(_), Probe::Pending { since, .. }) if since.elapsed() < Duration::from_secs(1) => return Ok(false),
+            (Some(_), Probe::Pending { .. }) => {
+                tracing::info!("host didn't answer the dmabuf probe; using shm");
+                self.probe = Probe::Failed;
+                None
+            }
+            (Some(m), Probe::Ok) => Some(m.clone()),
+            _ => None,
+        };
+        if let Some(mods) = mods {
             let gbm = self.gbm.clone().unwrap();
             let alloc = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING);
             self.present = Some(Present::Dmabuf { swapchain: Swapchain::new(alloc, w, h, Fourcc::Argb8888, mods), busy: Vec::new() });
@@ -450,7 +489,23 @@ impl HostState {
             self.buffer_kind = Some(BufferKind::Shm);
         }
         tracing::info!("viewer presents via {:?}", self.buffer_kind.unwrap());
-        Ok(())
+        Ok(true)
+    }
+
+    /// Sends a small dmabuf to the host with `zwp_linux_buffer_params_v1.create`; the
+    /// answer (`created`/`failed`) settles `self.probe`.
+    fn start_probe(&mut self, mods: &[Modifier]) -> anyhow::Result<Probe> {
+        let gbm = self.gbm.clone().context("no gbm device")?;
+        let mut alloc = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING);
+        let buf = smithay::backend::allocator::Allocator::create_buffer(&mut alloc, 64, 64, Fourcc::Argb8888, mods).map_err(|e| anyhow!("allocating: {e}"))?;
+        let dmabuf = buf.export().map_err(|e| anyhow!("exporting: {e}"))?;
+        let params = self.dmabuf.create_params(&self.qh).map_err(|e| anyhow!("params: {e}"))?;
+        let modifier = u64::from(dmabuf.format().modifier);
+        for (i, (fd, (offset, stride))) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())).enumerate() {
+            params.add(fd.as_fd(), i as u32, offset, stride, modifier);
+        }
+        params.create(64, 64, Fourcc::Argb8888 as u32, zwp_linux_buffer_params_v1::Flags::empty());
+        Ok(Probe::Pending { since: Instant::now(), _buf: buf })
     }
 
     /// Modifiers for ARGB8888 dmabufs the host can read and we can render to, if the host
@@ -499,7 +554,9 @@ impl HostState {
             self.first_frame_wanted.get_or_insert_with(Instant::now);
             return Ok(false);
         }
-        self.ensure_present(renderer)?;
+        if !self.ensure_present(renderer)? {
+            return Ok(false);
+        }
         let (w, h) = self.buffer_size();
         let size = (w as i32, h as i32);
         let surface = self.window.wl_surface().clone();
@@ -518,7 +575,8 @@ impl HostState {
                     for (i, (fd, (offset, stride))) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())).enumerate() {
                         params.add(fd.as_fd(), i as u32, offset, stride, modifier);
                     }
-                    let (buf, _) = params.create_immed(w as i32, h as i32, Fourcc::Argb8888 as u32, zwp_linux_buffer_params_v1::Flags::empty(), &qh);
+                    let (buf, params) = params.create_immed(w as i32, h as i32, Fourcc::Argb8888 as u32, zwp_linux_buffer_params_v1::Flags::empty(), &qh);
+                    params.destroy();
                     slot.userdata().insert_if_missing(|| OwnedBuffer(buf));
                 }
                 let buf = &slot.userdata().get::<OwnedBuffer>().unwrap().0;
@@ -894,8 +952,19 @@ impl DmabufHandler for HostState {
         proxy.destroy();
         self.dirty = true;
     }
-    fn created(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, _: WlBuffer) {}
-    fn failed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1) {}
+    // Only the probe uses the asynchronous `create`.
+    fn created(&mut self, _: &Connection, _: &QueueHandle<Self>, params: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, buffer: WlBuffer) {
+        buffer.destroy();
+        params.destroy();
+        self.probe = Probe::Ok;
+        self.dirty = true;
+    }
+    fn failed(&mut self, _: &Connection, _: &QueueHandle<Self>, params: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1) {
+        tracing::info!("host rejected the dmabuf probe; using shm");
+        params.destroy();
+        self.probe = Probe::Failed;
+        self.dirty = true;
+    }
     fn released(&mut self, _: &Connection, _: &QueueHandle<Self>, buffer: &WlBuffer) {
         if let Some(Present::Dmabuf { busy, .. }) = &mut self.present
             && let Some(i) = busy.iter().position(|s| s.userdata().get::<OwnedBuffer>().is_some_and(|b| &b.0 == buffer))
