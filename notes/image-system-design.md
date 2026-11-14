@@ -2,7 +2,7 @@
 
 The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
 
-**Status:** phase 1 (`crates/image`) is built and tested; the core sections below describe the code as it is. Phases 2–7 not started.
+**Status:** phases 1 (`crates/image`) and 3 (agent side: server store, CLI, protocol) are built and tested; the core, server and CLI sections below describe the code as it is. Phases 2, 4–7 not started.
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -153,7 +153,7 @@ Drags produce one `Replace` per drag, at release. The editor shows the in-progre
 Agents read and write the same lines. Tested on 6 fresh opus agents over two rounds. Each got a docs excerpt, a `poll` message with a listing, and 7–8 tasks: read the marks, render crops, replace, drop, scale a pen, build from scratch with raster `from`, SVG file and inline SVG, multi-line text, uncrop, stdin. All 6 answered every task correctly, and their answers were nearly identical. Their doubts are resolved here:
 - Round 1 → round 2: one crop syntax everywhere, `scale` explained, a text box comment, the inline SVG rule, what `--from` keeps, `--drop` as one comma list.
 - Round 2, now stated in the docs: an explicit `size` is absolute pixels (only the default scales); `raster … from R` defaults to R's size; raster pixels map 1:1 to canvas pixels at the default size; later elements draw on top; stdin lines go where `-` stands and may be numbered; a pen's rect form scales each axis separately and only works when replacing; dropping and replacing the same number is an error.
-- The skill doc's "Images" text, with these answers worked in, is `notes/image-format-doc.md`.
+- The skill doc's "Images" section (`skill/SKILL.md`) is that tested text, with these answers worked in. Keep its wording when editing: each sentence answers a question a tester asked. `doc_examples_parse` parses its listing lines.
 
 ### Listing
 ```
@@ -326,70 +326,54 @@ enum End { Slot(SlotId), View }   // resolved every frame: ChatOut.slots, or the
 ### Input routing
 When a doc is open or a drawing tool is selected, the editor owns primary-button pointer input over the view. The host applies `CanvasOut.pan` to the doc's zoom, or to the session's zoom on the live view. The host keeps middle-drag, Ctrl+scroll and drags outside the image. `keys_to_egui` = `CanvasOut.wants_keys` || a menu is open. `Sketch::mark_at`, which the view called back into, goes away.
 
-## Server glue (`server/src/images.rs`)
-- `Server.images: Images { store: Store, fonts: Arc<Fonts>, last_capture: HashMap<session, (frame_seq, size, AssetId)> }`. The tick calls `store.sweep` once a second. `end_session` → `drop_group`.
-- `capture(slot) -> ImageId`: `read_rgba` made opaque, `Raster::from_capture`, then a screenshot body. If the session's `frame_seq` and size haven't changed since the last capture, the last raster is reused (agents screenshot unchanged screens often). Agent `screenshot` and viewer `Action::Capture` both use it.
-- `render_file(id, opts) -> (PathBuf, Rendered)`: writes `s/<session>/img/<id>[-c<x>_<y>_<w>x<h>][-m<w>x<h>][-nomarks].png` with the render mark, and reuses the file if it already exists (images are immutable). `-o PATH` writes there instead.
-- `make(patch, cwd) -> ImageId`: parse with core and apply.
-- `freeze(drafts) -> Vec<ImageRef>`. `ImageRef::new(&Image)` builds the listing snapshot and the marks bbox.
-- Feed items come from the log: human messages, agent messages, screenshots and `ImageMade`, all carrying `ImageRef` ids. They're rendered by the viewer from the store. An expired id shows a placeholder.
+## Server glue (`server/src/images.rs`, built)
+- `Server.images: Images { store, fonts, last_capture }`, one `Group` per session (`Slot::group`). The tick sweeps once a second; `end_session` drops the group.
+- `capture(session, group, cursor, by_agent, crop) -> ImageId`: `Session::capture` (opaque RGBA, cursor drawn in if asked), `Raster::from_capture`, a screenshot body. While the session's `frame_seq` and size are unchanged (and no cursor), the last raster is reused. Agent `screenshot`, the viewer's `Freeze`, `debug message --draw` and the message `screen` all use it.
+- `render_file(img, opts, dir, out)`: `s/<session>/img/<id>[-c<x>_<y>_<w>x<h>][-m<w>x<h>][-nomarks].png` (render mark included), reused if it exists; `-o PATH` always writes.
+- `make` (core `make`, `Made::Agent`), `attach(spec)` (an id, or an absolute path: `load_file` → one picture element at natural size; a rendering is refused with "attach the image itself: --image ID"), `drawing(base, marks)` (viewer marks on a copy of the frozen base, `Made::Human`, parent = base), `image_ref` (listing snapshot + marks bbox).
+- Every image a message (either way) references is held until the session ends, and so is each `Freeze` base (the drawing may be sent much later; a discarded one stays held until session end, which is cheap thanks to raster reuse).
+- Viewer glue until phase 6: `Freeze` captures the base into the store and passes its id as the markup sketch's tag; `Annotated` carries `tag`, `marks`, `scale`; on send the server converts each markup `Mark` to an `Element` (coordinates rounded to whole pixels; text `width` kept only if the core layout wraps there) and ignores the markup composites. The feed renders message images from the store (at most 1600 px). Faint agent screenshots in the feed are phase 7; `image make` shows as a gray log line.
 
-## CLI and protocol
+## CLI and protocol (built)
 ```rust
-// proto
-pub struct ImageRef { pub id: String, pub size: [u32; 2], pub listing: String, pub marks: Option<[i32; 4]> }
-Command::Screenshot { path: Option<PathBuf>, settle: bool, crop: Option<String>, max: Option<[u32; 2]> }   // Access::Read
-Command::Image { id: String, path: Option<PathBuf>, crop: Option<String>, max: Option<[u32; 2]>,
-                 marks: bool, list: bool, points: bool }                                                   // Access::Read
-Command::ImageMake { from: Option<String>, canvas: Option<[u32; 2]>, color: Option<String>, crop: Option<String>,
-                     drop: Vec<u32>, elements: Vec<String>, cwd: PathBuf }                                 // Access::Read
+// proto (PROTO 3)
+pub struct ImageRef { pub id: String, pub size: [u32; 2], pub listing: String, pub marks: Option<[i32; 4]> }  // fetch(), elements()
+Command::Screenshot { path, settle, cursor, crop: Option<String>, max: Option<[u32; 2]> }   // Access::Read
+Command::Image { id, path, crop /* "X,Y WxH" | "none" */, max, marks, list, points }      // Access::Read
+Command::ImageMake { from, canvas, color, crop, drop: Vec<u32>, elements: Vec<String>, cwd }  // Access::Read; not logged as a command (ImageMade is)
+Command::Work/Done { .., images: Vec<String> }      // ids, or absolute paths (the CLI absolutizes anything with / or . or an existing file)
+HumanOp::Message { text, images: Vec<String>, draw: Vec<String> }   // draw: element lines on a capture taken now
 // replies
-ShotInfo { image: String, path: PathBuf, width: u32, height: u32, settled: bool, shows: [i32; 4], zoom: f32 }
-ImageInfo { id: String, listing: Option<String>, render: Option<RenderInfo { path, width, height, shows: [i32; 4], zoom: f32 }> }
+ShotInfo { image, header, path, width, height /* PNG */, shows: [i32; 4], zoom, settled, animating, cropped }
+ImageInfo { id, listing: Option<String>, render: Option<RenderInfo { path, width, height, shows, zoom }> }   // RenderInfo::mapping() = the "PNG shows" line
 // events
-EventData::Message { text, images: Vec<ImageRef> }      // human; `annotations` and the Annotation type are removed
-EventData::<agent message from agent-status> { .., images: Vec<ImageRef> }
-EventData::Screenshot { image: ImageRef, path: PathBuf }   // log tier; the feed shows it faint
-EventData::ImageMade { image: ImageRef }                   // log tier; the feed shows it faint
-HumanOp::Message { text, images: Vec<String> }           // an id or an absolute file path (tests); no notes
+EventData::Message { text, images: Vec<ImageRef>, screen: Option<String> }   // screen: capture with pointer, only when there are no images
+EventData::AgentMessage { text, images: Vec<ImageRef> }
+EventData::Screenshot { image: String, path }       // log tier
+EventData::ImageMade { image: String }              // log tier, kind image_made (group agent)
 ```
-Crop strings and element lines go to the server unparsed. Core parses them, so every error comes from one parser. The CLI only reads stdin for `-`.
+Crop strings and element lines go to the server unparsed; core parses them. The CLI only reads stdin for `-` (once, reused for every `-`).
 
 Output (stdout; `--json` gives the structs):
 ```
-$ guilab screenshot --crop '200,100 800x600'
-/run/user/1000/guilab/s/demo/img/k3f9-c200_100_800x600.png
-image k3f9 1280x720, crop 200,100 800x600 (PNG shows canvas 200,100 800x600 at 1x)
+$ guilab screenshot --crop '100,50 200x100' --max 100x100
+/run/…/s/demo/img/k3f9-m100x100.png
+image k3f9 400x300 scale 2, crop 100,50 200x100
+PNG shows canvas 100,50 200x100 at 0.5x, so PNG pixel x,y is canvas 100 + x/0.5, 50 + y/0.5
 
-$ guilab image w8dn --crop '240,160 1100x704' --max 800x800
-/run/…/img/w8dn-c240_160_1100x704-m800x800.png
-PNG shows canvas 240,160 1100x704 at 0.73x (canvas = 240 + x/0.73, 160 + y/0.73)
-
-$ guilab image make --from w8dn --drop 3,4 'yellow arrow 900,200 to 260,180'
-image p4n2 1600x1000 scale 2, parent w8dn, crop 200,100 1200x700
+$ guilab image make --from w8dn 'yellow arrow 900,200 to 260,180'
+image p4n2 1600x1000 scale 2, parent w8dn
   1 raster rq4m 0,0 1600x1000 (screenshot 14:04:50)
   …
-preview: /run/…/img/p4n2.png (PNG shows canvas 200,100 1200x700 at 1x)
+preview: /run/…/img/p4n2.png
+PNG shows canvas 0,0 1600x1000 at 1x
 send it: guilab done "..." --image p4n2
 ```
-- `--max WxH` only shrinks. `--no-marks` renders pictures only. `image ID` with no flags renders the image's own crop at full size.
-- A human message in `poll` and in deliveries:
-  ```
-  14:05:31 human message: "the spacing here is off"
-    image w8dn 1600x1000 scale 2, parent h2kc (your screenshot), crop 200,100 1200x700
-      1 raster rq4m 0,0 1600x1000 (screenshot 14:04:50)
-      2 blue box 260,180 520x90
-      …
-    (see the marks: guilab image w8dn --crop '240,160 1100x704')
-    (reply with: guilab done "...")
-  ```
-  The one-line form (`describe`) shows `[image w8dn: 6 elements]`. The fetch hint is the marks bbox plus a 20 px margin, clamped to the canvas. Deliveries never attach PNGs: pull, not push.
-- `work -m … --image X`/`done … --image X`: X is an image id or a file path. A file becomes a new image (one raster element), and a guilab rendering is refused with a pointer to its id.
-- `debug message --image ID|PATH`. `--note` is removed. Tests build drawn images with `image make` and send them by id.
-- Skill doc: `notes/image-format-doc.md` (the tested text), plus "pull a human drawing, at least cropped to its marks; run the hint". The `poll` hint says the same. The fetch-hint bbox covers every non-base element, text boxes included, even outside the crop.
+- The "PNG shows" line is omitted for a screenshot that's the whole canvas at 1x; `image` always prints it.
+- A human message in `poll` and deliveries: the message line, each image's listing indented, `(see what the marks point at: guilab image ID --crop '…')` (or `(see it: guilab image ID)` without marks), then for image-less messages `(their screen as they sent it, with their pointer: image ID; see it: guilab image ID)`, then the `guilab done` hint. One-line forms (`describe`, `--follow`, `log`): `[image w8dn: 6 elements]`, `[their screen: image ID]`, agent messages `[image ID]`.
+- The fetch hint is the bbox of every non-base element (text boxes included, even outside the crop) plus 20 px, clamped to the canvas.
 
 ## Interface points with work in flight
-- **agent-status** (`work`/`done`, delivery model): phase 3 changes its `--image PATH` to `ID|PATH` and its event's `images: Vec<PathBuf>` to `Vec<ImageRef>`. The `agent-SEQ-N` file copies go away. Nothing else depends on its delivery changes: image text rides inside the message event's lines.
 - **viewer-cursors**: the editor reports `CanvasOut.cursor`, and the session view applies it over the image, so a tool cursor, never the arrow, shows while a tool takes input.
 - **viewer-sizing**: the open doc has its own `doc_zoom` (fit to its crop) and ignores "lock size to window". Resize handles show on the live view only. Flights use the doc rect from that zoom.
 - **ui-toolkit-pass**: phase 2 creates `guilab-kit` and moves existing widgets into it. The full sweep of hardcoded values and the portal light/dark wiring stay in that issue, done against kit.
@@ -401,16 +385,13 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 |---|---|---|---|
 | 1 | **(done)** **Core**: `guilab-image` with model, ids, store and expiry, format print/parse/patch, geometry, display list, renderer, edit ops, load_file and the render mark. Unit tests: round-trip of every listing line, the doc examples parse, patch rules, hit and key-point order, pixel tests (box edge, glyphs drawn, SVG drawn, crop/max mapping), refusal of a marked PNG, budget and expiry. No consumers yet. | none | new crate, root Cargo.toml |
 | 2 | **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
-| 3 | **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in agent/screenshot/made events, viewer feed shows agent images (rendered via core into today's `Chat`), skill doc "Images", integration tests `tests/it/images.rs`. Human messages stay on the old path until phase 6 (the old viewer bakes marks, so they must not enter the store). | 1, agent-status landed | proto, server, guilab, viewer (feed only), skill |
+| 3 | **(done)** **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in message/agent events, feed renders from the store, skill doc "Images", `tests/it/images.rs`. Also (beyond the original plan): human messages already go through the store (the current viewer's marks are rebuilt as elements on the frozen base, so nothing baked enters it), `Annotation` is gone, `debug message --draw`, and the `screen` id on image-less messages. Tested end to end on 2 fresh agents. | 1 | proto, server, guilab, viewer, markup, skill |
 | 4 | **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
 | 5 | **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
-| 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured, Message with drafts → freeze, human `Message` with `ImageRef`, poll text with listing and hint, Annotation removed, the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` → the poll shows a listing with a box) and the skill doc. Retest the poll wording on 2 fresh agents. | 3, 4, 5 | viewer, server, proto, skill |
+| 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured (replaces `Freeze` + sketch tag), Message with drafts → freeze (replaces the markup-mark conversion in `server/src/viewer.rs`), the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` already checks the listing) and the skill doc. | 3, 4, 5 | viewer, server, skill |
 | 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
 
-**Parallelism** (at most 3 worktrees; agent-side and viewer-polish hold 2 right now):
-- Once viewer-polish lands: **P2**.
-- Once P1, P2 and agent-status have landed: **P3 ∥ P4 ∥ P5** (3 worktrees). They don't overlap: P3 is server/proto/CLI plus the viewer feed loader, and P4/P5 are new crates.
-- **P6** alone (it touches everything). **P7** alone (viewer UI). `ui-toolkit-pass` comes after P7 or alongside P4/P5 if it stays out of `viewer/src/ui*`.
+**Parallelism** (at most 3 worktrees): P2 once viewer-polish lands; then **P4 ∥ P5** (new crates, no overlap). **P6** alone (it touches everything). **P7** alone (viewer UI). `ui-toolkit-pass` comes after P7 or alongside P4/P5 if it stays out of `viewer/src/ui*`.
 
 ## Open questions
 See the end of the issue (`image-system.md`). Defaults are used unless the user decides otherwise.

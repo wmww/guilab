@@ -1,5 +1,5 @@
 //! The text format: listings out, element lines in, in the same syntax (see
-//! `notes/image-format-doc.md`). Output is the canonical subset of the input grammar, so
+//! the skill doc, `skill/SKILL.md` "Images"). Output is the canonical subset of the input grammar, so
 //! print → parse → print is identical.
 
 use std::fmt::Write as _;

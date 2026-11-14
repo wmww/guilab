@@ -1,5 +1,7 @@
-# Human messages lack the context they refer to
+# Human messages lack some of the context they refer to
 
-Short messages ("also that black color", "still no black??") were misread by an agent twice: it didn't know what the human was looking at. The poll output already includes the human input before the message (where they clicked, where the pointer rests), and the skill doc says to read it and take a screenshot.
+Short messages ("also that black color") need to know what the human was looking at. Built: a message without images carries `screen`, an image of the session with the pointer drawn in, captured when it's sent, and `poll` points the agent at it (two fresh agents resolved "this gap is way too big" correctly from it plus the pointer position).
 
-Idea: attach lightweight context to each message from the viewer: the selected tool, the last hovered window/region, the current tab, maybe a thumbnail of what the session showed when they started typing. Do it together with or after `image-system.md` (a screenshot attached to every message would be an image id there).
+Still open, if agents keep misreading short messages:
+- Capture when the human starts typing rather than at send (the app may change meanwhile, e.g. the agent's own restart).
+- Viewer context: the selected tool, the current tab, an open drawing they were looking at but didn't attach.

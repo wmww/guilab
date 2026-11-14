@@ -205,7 +205,7 @@ fn listing_round_trips() {
 
 #[test]
 fn doc_examples_parse() {
-    let doc = include_str!("../../../notes/image-format-doc.md");
+    let doc = include_str!("../../../skill/SKILL.md");
     // Every numbered line of every listing block in the doc.
     let mut n = 0;
     for l in doc.lines() {
@@ -218,6 +218,7 @@ fn doc_examples_parse() {
     assert!(n >= 5, "found {n} lines");
     for t in [
         "blue box 10,10 200x50",
+        "svg <svg width=\"20\" height=\"20\"><circle cx=\"10\" cy=\"10\" r=\"9\" fill=\"red\"/></svg> 40,40",
         "5 red text 640,410 \"much too big\"",
         "ellipse 10,10 20x20",
         "arrow 412,300 -> 640,410",
