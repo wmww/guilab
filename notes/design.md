@@ -71,6 +71,8 @@ Start with basic functionality. Don't build UI or features we aren't sure we nee
 
 UI quality: egui means building our own small toolkit (menus, toolbars, dialogs…). Build each widget to feel like a normal desktop app, not subtly off: hover/pressed/disabled states, keyboard navigation and shortcuts, menus that close on outside click or Escape, consistent spacing, correct cursors. Make these pieces composable and reusable with sensible abstractions, scoped to this app (no general framework). Use a third-party egui crate only if it's genuinely good.
 
+Flat look: no thin borders or separator lines between parts of the UI (panels, bars, toolbars, menus, text boxes, thumbnails). Separate areas by background shade and spacing instead. Outlines only for state (e.g. selected, focused, the open image's slot).
+
 Theming: all colors, spacing, sizes, rounding, fonts and timings come from one theme module (`guilab-kit` `Theme`: named tokens, light and dark variants). Widgets never hardcode them, so a later theming pass changes values in one place. No user-settable themes. Light/dark follows the desktop's preference (the XDG portal `org.freedesktop.appearance color-scheme`, which GTK/libadwaita also use), defaulting to dark if unavailable, with a System/Light/Dark choice in the View menu.
 
 Layout:

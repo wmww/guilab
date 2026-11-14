@@ -5,3 +5,4 @@ The toolkit and theming parts are done (`guilab-kit`: theme tokens light/dark fo
 - Keyboard access to the menu bar itself (e.g. F10): keys go to the session app unless egui has focus, so there's no free key yet. Decide whether to reserve one.
 - Tooltips are egui's (placed below the pointer). Restyle if they look off next to the new UI.
 - Verify by using the viewer through guilab itself (screenshots + input), both themes.
+- Flat look (design.md): remove every thin border and separator line (kit widgets, egui's default widget/panel strokes in the theme, viewer, editor, chat); keep outlines only for state. Check by screenshot in both themes.
