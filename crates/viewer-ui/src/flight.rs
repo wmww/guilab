@@ -370,37 +370,31 @@ fn narrow(a: [Pos2; 2], b: [Pos2; 2], n: Vec2) -> (Pos2, Pos2) {
     (at(lo), at(hi.max(lo)))
 }
 
-/// A slot scrolled out of `area`: a soft band of light inside `area`'s edge, where it is.
+/// A slot scrolled out of `area`: a soft band of light along `area`'s edge, where it is.
 pub fn edge_glow(p: &Painter, slot: Rect, area: Rect, color: Color32) {
-    let depth = 14.0;
-    let (x0, x1) = (slot.min.x.max(area.min.x), slot.max.x.min(area.max.x));
-    let (y0, y1) = (slot.min.y.max(area.min.y), slot.max.y.min(area.max.y));
-    // Which edge: the axis it's off on.
-    let (band, edge_first) = if slot.max.y <= area.min.y {
-        (Rect::from_min_max(pos2(x0, area.min.y), pos2(x1, area.min.y + depth)), [true, false])
+    let (depth, feather) = (18.0, 24.0);
+    // The edge it's off on: a point on the edge line, the direction along it and inward.
+    let (edge, along, inward, span) = if slot.max.y <= area.min.y {
+        (area.min.y, vec2(1.0, 0.0), vec2(0.0, 1.0), (slot.min.x, slot.max.x))
     } else if slot.min.y >= area.max.y {
-        (Rect::from_min_max(pos2(x0, area.max.y - depth), pos2(x1, area.max.y)), [false, true])
+        (area.max.y, vec2(1.0, 0.0), vec2(0.0, -1.0), (slot.min.x, slot.max.x))
     } else if slot.max.x <= area.min.x {
-        (Rect::from_min_max(pos2(area.min.x, y0), pos2(area.min.x + depth, y1)), [true, false])
+        (area.min.x, vec2(0.0, 1.0), vec2(1.0, 0.0), (slot.min.y, slot.max.y))
     } else {
-        (Rect::from_min_max(pos2(area.max.x - depth, y0), pos2(area.max.x, y1)), [false, true])
+        (area.max.x, vec2(0.0, 1.0), vec2(-1.0, 0.0), (slot.min.y, slot.max.y))
     };
-    if !band.is_positive() {
-        return;
-    }
-    let vertical = slot.max.y <= area.min.y || slot.min.y >= area.max.y;
-    let (c0, c1) = if edge_first[0] { (color, Color32::TRANSPARENT) } else { (Color32::TRANSPARENT, color) };
+    let at = |s: f32| if along.x > 0.0 { pos2(s, edge) } else { pos2(edge, s) };
+    let c = color.gamma_multiply(1.6);
     let mut m = Mesh::default();
-    let corners = if vertical {
-        [(band.left_top(), c0), (band.right_top(), c0), (band.right_bottom(), c1), (band.left_bottom(), c1)]
-    } else {
-        [(band.left_top(), c0), (band.right_top(), c1), (band.right_bottom(), c1), (band.left_bottom(), c0)]
-    };
-    for (q, c) in corners {
-        m.vertices.push(vtx(q, c));
+    for (s, w) in [(span.0 - feather, 0.0), (span.0, 1.0), (span.1, 1.0), (span.1 + feather, 0.0)] {
+        m.vertices.push(vtx(at(s), c.gamma_multiply(w)));
+        m.vertices.push(vtx(at(s) + inward * depth, Color32::TRANSPARENT));
     }
-    m.indices.extend([0, 1, 2, 0, 2, 3]);
-    p.add(Shape::mesh(m));
+    for i in 0..3u32 {
+        let (l, r) = (i * 2, i * 2 + 2);
+        m.indices.extend([l, l + 1, r + 1, l, r + 1, r]);
+    }
+    p.with_clip_rect(area).add(Shape::mesh(m));
 }
 
 // ---- The workspace's side ----

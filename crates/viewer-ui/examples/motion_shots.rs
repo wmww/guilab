@@ -147,12 +147,43 @@ fn scenario(name: &str, dark: bool) -> Option<Run> {
                 r.snap();
             }
         }
+        // Chat on the right: same moves sideways.
+        "side" => {
+            r.d.ui.chat_place = guilab_viewer_ui::ChatPlace::Right;
+            r.d.idle(3);
+            r.tool(Tool::Box);
+            r.drag(pos2(200.0, 300.0), pos2(400.0, 400.0), false);
+            r.d.idle(30);
+            r.snap();
+            r.tool(Tool::Interact);
+            r.record(vec![]);
+            let p = r.slot(SlotId::Composer, r.draft(0));
+            r.click_rec(p);
+        }
+        // A past image whose slot scrolled out of the feed: the feed's edge glows, and
+        // closing flies to that edge, fading.
+        "scrolled" => {
+            let id = r.d.screenshot().unwrap();
+            r.d.push(Item::them("Agent", "12:00", "Here's the dialog now.").with([id]));
+            r.d.idle(30);
+            let feed = r.d.ui.workspace().unwrap().slots.iter().find(|(s, _, _)| matches!(s, SlotId::Feed { .. })).map(|(s, a, _)| (*s, *a)).unwrap();
+            let p = r.slot(feed.0, feed.1);
+            r.ev(vec![Event::PointerMoved(p)]);
+            r.ev(vec![press(p, true), press(p, false)]);
+            for i in 0..8 {
+                r.d.push(Item::activity("12:01", format!("guilab input click {i}")));
+            }
+            r.d.idle(30);
+            r.snap();
+            r.tool(Tool::Interact);
+            r.record(vec![]);
+        }
         _ => return None,
     }
     Some(r)
 }
 
-const ALL: [&str; 6] = ["draw", "close", "open", "switch", "past", "glow"];
+const ALL: [&str; 8] = ["draw", "close", "open", "switch", "past", "glow", "side", "scrolled"];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

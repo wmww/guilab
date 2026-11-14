@@ -1,8 +1,8 @@
 # Image system design
 
-The design of the image system (user spec: `issues/image-system.md`, `chat-image-flow.md`; the move tool's spec is the "Move tool" section) and the shared toolkit. It describes the code as built, plus phase 7's design.
+The design of the image system (user spec: `issues/image-system.md`; the move tool's spec is the "Move tool" section, the motion spec is in "Flights and glow") and the shared toolkit, as built.
 
-**Status:** phases 1–6 are built and tested (core, kit, agent side, editor, chat, viewer integration); those sections describe the code as it is. Phase 7 (motion: flights, glow, slot fades) is next; its design is the "Flights and glow" section.
+**Status:** phases 1–7 are built and tested (core, kit, agent side, editor, chat, viewer integration, motion).
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -18,14 +18,15 @@ The design of the image system (user spec: `issues/image-system.md`, `chat-image
 | `guilab-kit` (`crates/kit`) | egui | theme tokens (light/dark, motion), animation helpers, `History<Op>`, shared widgets (menu bar, toast, icon button, close badge, send button, tab, thumb frame) |
 | `guilab-editor` (`crates/editor`) | egui, kit, image | the image editor widget: toolbar, canvas, tools, move tool, key points, text editing, crop tool. Emits `Edit`s. |
 | `guilab-chat` (`crates/chat`) | egui, kit | feed and composer, generic over attachment keys. Knows nothing about images. |
-| `guilab-viewer` | + image, editor, chat, kit, proto | the glue: per-session workspace (drafts, open image, history, flights) |
+| `guilab-viewer-ui` | + image, editor, chat, kit, proto | the glue, pure egui: per-session workspace (drafts, open image, history, flights); headless `Demo` |
+| `guilab-viewer` | + viewer-ui, smithay | the window around it |
 | `guilab-server` | + image | owns the `Store`. Capture, render files, `image`/`image make`, freezing drafts, events |
 | `guilab-proto` | unchanged deps | carries image ids and listing *text* (snapshots). It doesn't depend on `guilab-image`, so its tests stay cheap. |
 
 Dependency edges (A → B = A uses B). There are no cycles, and nothing generic depends on guilab crates:
 ```
 editor → image, kit        chat → kit
-viewer → image, editor, chat, kit, proto
+viewer-ui → image, editor, chat, kit, proto        viewer → viewer-ui
 server → image, viewer, proto, compositor        guilab (CLI) → proto, server
 ```
 Reusability: editor + image + kit make a mobile image editor (the host supplies a `Store` and a pan/zoom view). Chat + kit make another agent harness's chat (the host supplies keys and thumbnails).
@@ -210,7 +211,7 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
-Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent, slot_empty/slot_open; sizes incl. feed_thumb_h, faint_scale/faint_opacity, thumb_aspect_max, composer_lines, jump_button, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`(`_on` a given painter), `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
+Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent, slot_empty/slot_open; sizes incl. feed_thumb_h, faint_scale/faint_opacity, thumb_aspect_max, composer_lines, jump_button, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`/`Fader`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`(`_on` a given painter), `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
 
 ## guilab-editor (built)
 ```rust
@@ -222,7 +223,7 @@ pub struct Canvas<'a> {
     pub xf: Xf,                       // host owns zoom/pan
     pub clip: Rect,                   // screen area the canvas paints and takes input in; empty = nothing
     pub new_doc: ([u32; 2], f32),     // canvas size and scale a new doc would have (live view)
-    pub visible: bool,                // false while a flight shows the image instead: no paint, no input
+    pub visible: bool,                // false: no paint, no input (the viewer: while the image flies in)
     pub input: bool,                  // false: paint, no input (the pass a press closes a menu, dialogs)
     pub toasts: Id,                   // toast stack over the view: the crop toast goes first, host toasts after canvas() stack above
 }
@@ -245,6 +246,7 @@ impl Editor {
     pub fn insert(&mut self, doc, id: AssetId, asset: Arc<Asset>, center: Pt, fit: IRect) -> Result<Edit, EditError>;  // kind and size from the asset
     pub fn delete_hovered(&mut self, doc) -> Option<Edit>;
     pub fn commit(&mut self, doc) -> CanvasOut;                    // finish typing/pending marks (before send): edits + refused
+    pub fn paint_body(&mut self, painter, body, assets, canvas: Rect);  // a body alone at a screen rect (flights); shares textures, keeps their filters
     pub fn reset(&mut self);                                       // host dropped the begun doc
     pub fn pick_color(&mut self, c); pub fn busy(&self) -> bool; pub fn hovered(&self) -> Hit;
 }
@@ -302,10 +304,10 @@ impl<K> Chat<K> {
 - **Composer**: a `field_frame` box; pending thumbnails at `feed_thumb_h` in a row above the text, each with a × badge (top right, inside the image). Enter sends, Shift+Enter is a newline (plain Enter consumed before the TextEdit, decided after it took the pass's typing). Send is enabled with text or pending. Send clears the text and its undo, keeps focus, and the sent keys leave the composer at once (no shrink). The text grows to `composer_lines`, then scrolls. Clicking the box's padding focuses the text.
 - **Undo split**: the text box keeps its own undo only for edits since it got focus; otherwise Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y in it become `ChatEvent::Undo`/`Redo` for the host (so "× then Ctrl+Z" restores the image even with the text focused). Unfocused, the host handles the keys itself.
 - **Slots**: extreme aspects are center-cropped to `thumb_aspect_max`. A new composer key grows in (width and scale, neighbors slide), a removed one shrinks out with its last texture (`Thumbs` should keep it alive for `slot_grow`), a key coming back (undo) grows back in place. Hover grows a shown thumbnail to `hover_grow` of full size (faint ones from their small size) on an `Order::Foreground` layer with a shadow, no relayout, shifted to stay on screen; the hit area follows the grown rect so its edge doesn't flicker; hovering the × keeps it grown. `Away` slots don't grow: they show `slot_empty` with an outline lit on hover, plus a 2 pt `slot_open` outline (fades in/out over `fade`) when `outlined`. State changes are instant (flights land without a pop) unless `cross_fade` was asked. Clicks on any slot, empty ones too, emit `Open` with the drawn rect; the host decides what a click on the open image's slot means (close).
-- **Hooks for phase 7**: `ChatOut.slots` = drawn rect of every slot laid out (grown, growing in, or empty), feed slots scrolled away included, with `feed_clip` to tell; `composer`. `Away` + `outlined` + `cross_fade` cover empty slots, the open-image outline and the copy-on-edit fade; flights and the glow are drawn by the host from those rects.
+- **Motion hooks**: `ChatOut.slots` = drawn rect of every slot laid out (grown, growing in, or empty), feed slots scrolled away included, with `feed_clip` to tell; `composer`. `Away` + `outlined` + `cross_fade` cover empty slots, the open-image outline and the copy-on-edit fade; flights and the glow are drawn by the host from those rects. A new composer key isn't laid out in its first frame (its row grows from 0).
 
-## Viewer glue (`crates/viewer/src/ui/`, built)
-`mod.rs` (`ViewerUi`: tabs, menus, panels, host keys), `view.rs` (session view: zoom/pan, input forwarding, the canvas, resize handles, cursors), `workspace.rs` (below), `thumbs.rs` (`ThumbSource`/`ThumbCache`: the chat's `Thumbs`, CPU renders by image id or by draft key + `Doc::rev`, at the height the chat asks; unused textures go after 3 s). Phase 7 adds `flight.rs`.
+## Viewer glue (`crates/viewer-ui/src/`, built)
+`lib.rs` (`ViewerUi`: tabs, menus, panels, host keys), `view.rs` (session view: zoom/pan, input forwarding, the canvas, resize handles, cursors), `workspace.rs` (below), `thumbs.rs` (`ThumbSource`/`ThumbCache`: the chat's `Thumbs`, CPU renders by image id or by draft key + `Doc::rev`, at the height the chat asks; unused textures go after 3 s; a slot a flight touches is `Away`), `flight.rs` (below), `demo.rs` (`Demo`, the headless server stand-in for tests and `motion_shots`).
 
 ```rust
 struct Workspace {                    // per session (PerSession)
@@ -315,7 +317,9 @@ struct Workspace {                    // per session (PerSession)
     open: Open,
     history: History<Op>,
     doc_zoom: Zoom,                   // the open image's own zoom/pan; never locked to the window
-    slots, shown,                     // last frame's slot rects and doc rect (phase 7 hooks)
+    slots, feed_clip, composer,       // the chat's slot rects and areas (this frame's once the chat ran)
+    view_place: Option<Place>,        // the open image in the view (last frame's until the view ran)
+    flights: Flights,
 }
 struct Draft { key: DraftKey, doc: Doc, parent: Option<ImageId> }   // the doc holds its assets
 enum Att { Draft(DraftKey), Image(ImageId) }
@@ -325,7 +329,7 @@ enum Op { Edit(DraftKey, Edit), Create { key, at }, Remove { key, at }, Copy { f
 - The server owns the `ViewerUi` (`Server::viewer_ui`, made with the server's `Fonts`), so drafts, the open image, chats and View choices survive hide/show; `ViewerUi::detach` on hide drops the old egui context's textures (thumbs, `Editor::forget_textures`). `ViewerUi::start` is the egui clock, kept across windows. `Viewer::draw(renderer, &mut ViewerUi, sessions, &Store, now)`: the store is read only.
 - Server → UI: `push_feed(Item<ImageId>)`, `captured(session, ticket, Result<Arc<Image>>, &Store)`, `inserted(session, Result<(AssetId, Arc<Asset>)>)`. UI → server (`Action`): `Capture { ticket }`, `Message { text, drafts: Vec<(parent, Doc)>, viewing }`, `Save { png: Option }` (the open image rendered and marked in the viewer; None = the server captures and renders), `Insert` (the server's file dialog; picks land in `Server::viewer_picks`, loaded by `Images::picture` on the tick).
 
-### Flows (`chat-image-flow.md`)
+### Flows
 - **Draw on the live app**: `CanvasOut.begin` → `Open::Capturing` + `Action::Capture`. The live texture keeps painting, and the canvas paints the frozen doc over it once it's there (same pixels): nothing visibly changes. The editor keeps marks drawn meanwhile and commits them into the doc; the first edits make the `Draft` (`Create` + `Edit`s in one history group), it's open, its composer slot is `Away { outlined }`, and `doc_zoom` starts as the session's zoom (same canvas, same fit rule), so nothing jumps. `abandon` (a stray click) drops it. "Use the app" closes the editor, also when the screenshot arrives after it was picked (end of `show`).
 - **Open** (`ChatEvent::Open`): a draft → `Open::Draft`; a store image → `Open::Past` on a scratch doc (the store image is never touched); `doc_zoom` fits; Interact switches to Move. A click on the open image's own slot closes it. Esc (editor idle) closes and selects "Use the app".
 - **Copy-on-edit**: the first edits while `Open::Past` move the scratch doc (already edited) into a new draft (`parent` = the past image): `Copy` + `Edit`s, `chat.cross_fade` on the feed slot, the copy grows into the composer, open. Undoing it shelves the draft and goes back to `Open::Past` on a fresh doc.
@@ -339,15 +343,21 @@ enum Op { Edit(DraftKey, Edit), Create { key, at }, Remove { key, at }, Copy { f
 - `editing` = a tool other than "Use the app", or anything but `Open::Live`: then pointer input never goes to the app; the canvas owns primary presses over the view (its claim is the whole view), the host keeps middle-drag, wheel/pinch, and drags off the image with drawing tools. `CanvasOut.pan` pans the shown zoom. `keys_to_egui` = last frame's `CanvasOut.wants_keys` || a menu is open.
 - Order in the central panel: raw input loop, live texture (not for an open image), `canvas()`, then the resize handles as `ui.interact` widgets (so the canvas leaves their presses alone; the raw loop skips presses on them), then the view's toasts after the editor's (`VIEW_TOASTS` stack: crop toast lowest, then "Agent using app", then notices). Handles only on the live app. The input overlay isn't painted while an image is open.
 
-### Flights and glow (`ui/flight.rs`, phase 7)
+### Flights and glow (`flight.rs`)
+User spec: whooshes everywhere an image moves between the editor and a chat slot, snappy and unobtrusive; the open image's slot shows empty and outlined, with light leading from it to the image, tracking pan/zoom; a past image's first edit doesn't whoosh back: its feed slot quietly fades back and the copy grows into the composer. Timing and easing only from `Theme.motion` (`whoosh` 0.22 s OutCubic, `fade`).
 ```rust
-struct Flight { att: Att, from: End, to: End, t0: f64, motion: Motion }
-enum End { Slot(SlotId), View }   // resolved every frame: ChatOut.slots, or the doc's on-screen crop rect
+struct Place { canvas: Rect, clip: Rect, alpha: f32 }     // screen rect of the whole canvas, where it shows, opacity
+struct Flight { att, slot: SlotId, dir: Dir::{Out, Home}, from: Option<Place>, t0, slot_seen, last }
+struct Flights { list, live: Fader, glow: Fader, glow_src, .. }   // one per workspace
 ```
-- The chat panel runs before the central panel, and flights and the glow paint last with an `Order::Foreground` layer painter (not an `Area`: that would register a widget and take presses from the canvas and chat below). So both ends are this frame's rects, and a flight follows layout changes and pans mid-air. The flying texture is the image's thumbnail texture, upgraded to the full one when it's bigger than the thumbnail.
-- While a flight touches the view, `Canvas.visible = false`. While it touches a slot, that slot is `Away`. When it lands, the view or slot takes over in the same frame, so nothing pops.
-- **Glow**: while an image is open and nothing is flying, soft rays (a feathered quad, `colors.glow`) go from its `Away` slot rect to the doc's on-screen rect. Both rects are re-resolved every frame, so the glow tracks pan and zoom. It's hidden when the slot is scrolled out of view (then the slot's edge glows instead).
-- Timing and easing come only from `Theme.motion`.
+- **Who flies**: the workspace decides per transition. `close` (Use the app, Esc, a click on the open slot, opening another image) → `fly_home` (from last frame's `view_place`); `open_slot` and `reveal` (undo opening a draft) → `fly_out`. Quiet (`Flights::quiet`, no flight): a drawing becoming a draft (the doc already covers the live app in place), copy-on-edit and its undo, × or send of the open image, undo/redo of a draft's creation. No slot laid out (chat off) → quiet.
+- **Ends are resolved every frame** (`Flights::places`): the slot end from this frame's slot rect (`Place::in_slot`: the shown region cover-fits the slot like the thumbnail's center crop, clipped to the feed or composer; a slot scrolled out gives a place at the edge with alpha 0, so the image fades as it gets there), the view end from the open image's `view_place`. Places lerp (canvas rect, clip, alpha) with the eased progress, so a flight follows scrolling, layout changes and pans mid-air. A slot that stops being laid out keeps its last place; an end never seen lands the flight at once.
+- **Interruptions**: a new flight of an image already in the air starts from where it was drawn last (`last`), full duration (turning around mid-air is continuous). A press in the view lands incoming flights before the canvas runs (`land_out`), so input is never held up; the chat stays clickable throughout. `detach` (hide) lands everything.
+- **The view**: the canvas is `visible: false` while its image flies in (the flight paints it). The live app's opacity is `Flights.live`: it fades out under an incoming image, and is back at once when the image flies home (it was under it all along). Switching images keeps it hidden.
+- **Painting** (`Workspace::paint_motion`, after the central panel, so both ends are this frame's): an `Order::Tooltip` layer painter (above the chat's hovered slots on Foreground; not an `Area`, which would take presses). The image paints with `Editor::paint_body` (vector marks, the canvas's raster textures without changing their filters, so landing in the view is exact), clipped to the place, with a shadow strongest mid-air. Light first: for each flight a beam from its slot to the flying image (it grows out of the slot and shrinks back into it); for the open image (not flying) a beam from its slot to its visible rect.
+- **Glow look** (`beam`, `halo`, `edge_glow`, color `colors.glow`): a soft fan from the slot's side facing the image to the image's facing side (narrowed toward the slot's span), brightest at the slot, feathered sides, three faint rays; fades as the rects meet, nothing when they overlap. A feathered halo around the slot (clipped to the chat). A slot scrolled out of the feed: a soft band along the feed's edge instead.
+- **Glow source** (`glow_source`): when the open image's slot changes with no flight (copy-on-edit, its undo), the source slides from the old slot to the new over `whoosh`; a slot missing for up to 3 frames holds the last source (a new composer slot is laid out a frame or two late). A quietly appearing glow fades in over `fade`; after an incoming flight it's on at once.
+- Checked by eye: `motion_shots` sheets in both themes (bottom and right chat, scrolled-out slot) and screenshot sequences of a real viewer on a nested host.
 
 ## Server glue (`server/src/images.rs`, built)
 - `Server.images: Images { store, fonts, last_capture }`, one `Group` per session (`Slot::group`). The tick sweeps once a second; `end_session` drops the group.
@@ -397,13 +407,7 @@ send it: guilab done "..." --image p4n2
 - The fetch hint is the bbox of every non-base element (text boxes included, even outside the crop) plus 20 px, clamped to the canvas.
 
 ## Phases
-Phases 1–6 are done (core, kit, agent side, editor, chat, integration). Each phase leaves main green (`cargo test --workspace`, clippy) and working end to end.
-
-| # | phase | needs | touches |
-|---|---|---|---|
-| 7 | **Motion and polish**: flights, glow, the slot fades and grow-ins timed with them, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
-
-What's left of `ui-toolkit-pass` comes after P7.
+Phases 1–7 are done (core, kit, agent side, editor, chat, integration, motion). What's left of `ui-toolkit-pass` comes next.
 
 ## Open questions
 See the end of the issue (`image-system.md`). Defaults are used unless the user decides otherwise.

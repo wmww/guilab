@@ -1,6 +1,6 @@
 # Viewer window: how it works and what to know
 
-`crates/viewer`, `crates/server/src/viewer.rs`; widgets from `crates/kit`, `crates/editor`, `crates/chat` (their design and the glue: `image-system-design.md`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
+`crates/viewer` (the window), `crates/viewer-ui` (the UI, pure egui), `crates/server/src/viewer.rs`; widgets from `crates/kit`, `crates/editor`, `crates/chat` (their design and the glue: `image-system-design.md`). Versions: sctk 0.20, egui/egui_glow 0.35 (glow 0.17), smithay pinned master.
 
 ## Shape
 - Our own sctk client on a separate `Connection` (not smithay's winit backend: its renderer dies with the window, and winit refuses a second `EventLoop` per process, so show/hide/show would be impossible).
@@ -53,7 +53,7 @@
 - The UI decides via egui's cursor; for an image cursor it sets `Default` and `ViewerUi::host_cursor` swaps in the image if nothing overrode it.
 - `screenshot --cursor` draws the same cursor at the pointer (named shapes from the xcursor theme, `XCURSOR_THEME`/`XCURSOR_SIZE`, default `default`→Adwaita), which is how tests check the host's cursor (`viewer::app_cursors`, app `gtk_cursors.py`).
 
-## Editor and chat (ui/)
+## Editor and chat (viewer-ui)
 - Panel order matters in egui: menu (top), tabs (top), toolbar (left, full height), chat (bottom or right), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.
 - The chat panel fills itself (`set_min_size(available)`): an egui panel stores its content's size, so content smaller than the panel shrinks it every frame. Likewise a bottom-aligned row (`left_to_right(Align::Max)`) fills its panel's previous height, so the chat's composer row is top-aligned (else the box never shrank after a send).
 - The UI only runs when the viewer draws. When it ran on input but couldn't present (waiting for a frame callback), `Viewer::draw` sets `host.dirty` so the new state still gets shown. The server sets `host.dirty` after `captured`/`inserted`/new feed items.
@@ -61,6 +61,8 @@
 - The text box uses a non-wrapping layouter (computing its width before the TextEdit sees the frame's typed text made it wrap). Enter-sends is decided after the text box took the pass's typing ("type hello key Return" in one pass sends "hello").
 
 ## Testing
+- UI behavior without a window: `guilab_viewer_ui::demo::Demo` runs `ViewerUi` headless (kit `Headless`) with a synthetic app frame and a store; `viewer-ui` unit tests and `examples/motion_shots.rs` use it. Prefer it for UI logic; the host tests below are for the window, input routing and presentation.
+- Screenshot sequences of a real viewer (motion): `guilab screenshot --no-settle` in a loop on the host session (~45 ms each) while one `input` chain runs.
 - Host = a second guilab server's session (tests: `tests/it/viewer.rs`; it pins the coordinate mapping by moving the host pointer and reading the viewed session's human motion event). Lab commands drop `WAYLAND_DISPLAY`, so a test can never open on the real desktop.
 - `draw_and_send` and `insert_image` click fixed viewer positions in a 1200x800 window (toolbar at x=19: box y=140, arrow y=236, text y=268 with one session (no tab bar); message box y=768; the newest feed image at 100,645). Layout changes move them. They wait on `ping`'s `drafts` before steps that race the viewer's input (hide, a send after `debug insert`). Other viewer tests find the host->session mapping by probing two points (the view may be zoomed).
 - egui gotchas: `consume_key` ignores Shift (use `consume_plain_enter` for Enter-sends); a TextEdit with a custom `.frame()` ignores `.margin()`.

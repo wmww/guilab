@@ -1,6 +1,6 @@
 # Image system: open questions
 
-The image system is built (phases 1–6; the model, text format, agent CLI and viewer glue are in `notes/image-system-design.md`, the tested agent doc in the skill doc's "Images"). What's left of the UI spec is `chat-image-flow.md` (animations).
+The image system is built (phases 1–7; the model, text format, agent CLI, viewer glue and motion are in `notes/image-system-design.md`, the tested agent doc in the skill doc's "Images").
 
 ## Open questions for the user
 Both are built as these defaults; change them if the user decides otherwise.
