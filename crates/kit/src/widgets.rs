@@ -28,18 +28,27 @@ pub fn flat_fill(t: &Theme, resp: &Response, selected: bool) -> Color32 {
 }
 
 /// A toast: a floating bar at the bottom center of `clip`, for status with a few buttons.
-/// `slot` 0 is lowest; higher slots stack above it.
-pub fn toast(ui: &Ui, id: Id, clip: Rect, slot: usize, add: impl FnOnce(&mut Ui)) -> Response {
+/// Toasts sharing a `stack` id (e.g. the view's) stack up in call order each pass, the first
+/// lowest, each above the real height of the ones below. So independent callers over the
+/// same area just call in the order they want, bottom first.
+pub fn toast(ui: &Ui, id: Id, stack: Id, clip: Rect, add: impl FnOnce(&mut Ui)) -> Response {
     let t = Theme::get(ui.ctx());
-    let y = clip.max.y - t.size.toast_bottom - slot as f32 * t.size.toast_slot;
-    egui::Area::new(id)
+    let ctx = ui.ctx();
+    let pass = ctx.cumulative_pass_nr();
+    let key = stack.with("toast-stack");
+    // (pass, bottom of the next toast)
+    let bottom = match ctx.data(|d| d.get_temp::<(u64, f32)>(key)) {
+        Some((p, y)) if p == pass => y,
+        _ => clip.max.y - t.size.toast_bottom,
+    };
+    let r = egui::Area::new(id)
         .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(pos2(clip.center().x, y))
+        .fixed_pos(pos2(clip.center().x, bottom))
         // egui sizes a new area at its default size for a pass, and that rect takes
         // presses in the next hit test: keep it small.
         .default_size(Vec2::ZERO)
         .order(egui::Order::Middle)
-        .show(ui.ctx(), |ui| {
+        .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(t.space.xl as i8, (t.space.md + 2.0) as i8)).corner_radius(t.radius.toast).show(ui, |ui| {
                 ui.style_mut().text_styles.insert(egui::TextStyle::Body, t.font.toast.clone());
                 ui.style_mut().text_styles.insert(egui::TextStyle::Button, t.font.toast.clone());
@@ -48,7 +57,11 @@ pub fn toast(ui: &Ui, id: Id, clip: Rect, slot: usize, add: impl FnOnce(&mut Ui)
                 ui.horizontal(add);
             });
         })
-        .response
+        .response;
+    // Above other middle-order areas (an editor's text field) even after they were clicked.
+    ctx.move_to_top(r.layer_id);
+    ctx.data_mut(|d| d.insert_temp(key, (pass, bottom - r.rect.height() - t.size.toast_gap)));
+    r
 }
 
 /// A square toolbar button: flat, filled on hover, press and selection; `icon` paints into

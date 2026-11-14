@@ -465,21 +465,19 @@ impl ViewerUi {
             }
             if drawing && let Some(rect) = self.image_rect {
                 let size = [s.size.0 as usize, s.size.1 as usize];
-                p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32 });
+                p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32, toasts: egui::Id::new(VIEW_TOASTS) });
             }
-            // Toasts above the drawing's own (slot 0).
-            let mut slot = usize::from(p.sketch.drawing_open());
+            // Toasts stack above the drawing's own.
             if !s.blocked() {
                 self.blocked_at = None;
             }
             let secs = t.motion.toast_secs;
             if let Some(at) = self.blocked_at {
                 let mut stop = false;
-                let r = guilab_kit::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
+                let r = guilab_kit::toast(ui, egui::Id::new("blocked-toast"), egui::Id::new(VIEW_TOASTS), view, |ui| {
                     ui.label("Agent using app");
                     stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
                 });
-                slot += 1;
                 if stop {
                     out.push(Action::Revoke { session: s.name.to_string() });
                     self.blocked_at = None;
@@ -498,7 +496,7 @@ impl ViewerUi {
                 self.notice = Some((text, now));
             }
             if let Some((text, at)) = &self.notice {
-                guilab_kit::toast(ui, egui::Id::new("notice-toast"), view, slot, |ui| {
+                guilab_kit::toast(ui, egui::Id::new("notice-toast"), egui::Id::new(VIEW_TOASTS), view, |ui| {
                     ui.label(text.as_str());
                 });
                 if now - at > secs {
@@ -1063,6 +1061,8 @@ impl ViewerUi {
 
 /// The menu bar's id.
 const MENU_BAR: &str = "menubar";
+/// The toast stack over the session view.
+const VIEW_TOASTS: &str = "view-toasts";
 
 /// The window edge `p` is on, if within `border` of it.
 pub fn window_edge(screen: Rect, border: f32, p: Pos2) -> Option<(i8, i8)> {

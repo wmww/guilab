@@ -46,7 +46,7 @@ fn draw_queue_send() {
     let mut chat = Chat::new("c");
     sketch.tool = Tool::Arrow;
     // Image 400x300 shown at half size at (100, 100).
-    let view = View { rect: Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 150.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0 };
+    let view = View { rect: Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 150.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0, toasts: egui::Id::new("toasts") };
     let run = |events: Vec<Event>, sketch: &mut Sketch| {
         frame(&ctx, events, |ui| {
             egui::CentralPanel::default().show(ui, |ui| sketch.canvas(ui, view));
@@ -115,7 +115,7 @@ fn move_tool_drags_marks() {
     let ctx = egui::Context::default();
     let mut sketch = Sketch::new("s");
     // Image 400x300 at 1:1 at (0, 0).
-    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0 };
+    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0, toasts: egui::Id::new("toasts") };
     let run = |events: Vec<Event>, sketch: &mut Sketch| {
         frame(&ctx, events, |ui| {
             egui::CentralPanel::default().show(ui, |ui| sketch.canvas(ui, view));
@@ -155,7 +155,7 @@ fn move_tool_drags_marks() {
 fn text_tool_single_click_wraps_and_stays_on_image() {
     let ctx = egui::Context::default();
     let mut sketch = Sketch::new("s");
-    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0 };
+    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0, toasts: egui::Id::new("toasts") };
     let run = |events: Vec<Event>, sketch: &mut Sketch| {
         frame(&ctx, events, |ui| {
             egui::CentralPanel::default().show(ui, |ui| sketch.canvas(ui, view));

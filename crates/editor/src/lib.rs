@@ -129,6 +129,9 @@ pub struct Canvas<'a> {
     /// false: paint, but take no pointer or key input (e.g. the pass where a press closes a
     /// menu, or while a dialog is up). Cancels a drag in progress like `visible`.
     pub input: bool,
+    /// The toast stack over this area (`guilab_kit::toast`). The canvas's own toasts go
+    /// first, so host toasts shown after `canvas()` with the same stack sit above them.
+    pub toasts: Id,
 }
 
 #[derive(Debug, Default)]

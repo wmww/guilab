@@ -443,7 +443,7 @@ fn late_doc_gets_pending_mark() {
     let mut edits = Vec::new();
     let frame = |h: &mut Headless, ed: &mut Editor, doc: &mut Option<Doc>, events: Vec<Event>, begun: &mut u32, edits: &mut Vec<Edit>| {
         h.run(events, 0.1, |ui| {
-            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true });
+            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true, toasts: egui::Id::new("toasts") });
             *begun += out.begin as u32;
             edits.extend(out.edits);
         });
@@ -492,7 +492,7 @@ fn doc_switch_drops_gesture() {
     let mut edits = Vec::new();
     let mut frame = |h: &mut Headless, doc: &mut Doc, events: Vec<Event>| {
         h.run(events, 0.1, |ui| {
-            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true }).edits);
+            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true, input: true, toasts: egui::Id::new("toasts") }).edits);
         });
     };
     let (p, q) = (egui::pos2(50.0, 75.0), egui::pos2(80.0, 75.0));
@@ -646,7 +646,7 @@ impl Bare {
                 if let Some(r) = *before {
                     *before_clicked |= ui.interact(r, egui::Id::new("before"), egui::Sense::click()).clicked();
                 }
-                let o = ed.canvas(ui, crate::Canvas { doc: doc.as_mut(), xf: *xf, clip: *clip, new_doc: ([400, 300], 1.0), visible: *visible, input: *input });
+                let o = ed.canvas(ui, crate::Canvas { doc: doc.as_mut(), xf: *xf, clip: *clip, new_doc: ([400, 300], 1.0), visible: *visible, input: *input, toasts: egui::Id::new("toasts") });
                 if let Some(r) = *after {
                     *after_dragged |= ui.interact(r, egui::Id::new("after"), egui::Sense::drag()).dragged();
                 }

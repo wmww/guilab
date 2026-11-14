@@ -198,7 +198,7 @@ impl Editor {
     /// middle-drag, wheel zoom and Undo for itself.
     pub fn canvas(&mut self, ui: &mut Ui, c: Canvas) -> CanvasOut {
         let mut out = CanvasOut::default();
-        let Canvas { mut doc, xf, clip, new_doc, visible, input } = c;
+        let Canvas { mut doc, xf, clip, new_doc, visible, input, toasts } = c;
         self.sync_doc(doc.as_ref().map(|d| d.id()));
         let t = Theme::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -387,7 +387,7 @@ impl Editor {
         {
             let mut show_all = false;
             let has_crop = d.body().crop.is_some();
-            guilab_kit::toast(ui, self.id.with("crop-bar"), clip, 0, |ui| {
+            guilab_kit::toast(ui, self.id.with("crop-bar"), toasts, clip, |ui| {
                 ui.label("Drag to crop");
                 show_all = ui.add_enabled(has_crop, egui::Button::new("Show all")).on_hover_text("Remove the crop").clicked();
             });

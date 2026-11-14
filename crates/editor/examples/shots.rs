@@ -208,7 +208,12 @@ fn scenarios(d: &mut Driver, filter: &str) {
         d.snap("14-crop-dragging");
         d.run(vec![ev::release(d.at(1450.0, 900.0))]);
         d.run(vec![]);
+        d.host.notice = Some("A host toast stacks above the editor's".into());
+        for _ in 0..4 {
+            d.run(vec![]);
+        }
         d.snap("15-crop-done");
+        d.host.notice = None;
         d.tool(Tool::Move);
         d.run(vec![]);
         d.mv(d.at(800.0, 500.0));

@@ -56,6 +56,8 @@ pub struct View {
     pub size: [usize; 2],
     /// Image pixels per logical pixel (marks are sized in logical pixels).
     pub scale: f32,
+    /// The toast stack over the view (`guilab_kit::toast`).
+    pub toasts: egui::Id,
 }
 
 struct Shot {
@@ -453,7 +455,7 @@ impl Sketch {
             self.text_editor(ui, xf, view.size);
         }
         if self.drawing.is_some() {
-            self.bar(ui, view.clip);
+            self.bar(ui, view.toasts, view.clip);
         }
         self.last_xf = Some(xf);
         if self.tool == Tool::Move {
@@ -522,10 +524,10 @@ impl Sketch {
     }
 
     /// The bar over an open drawing: what it is, and Queue / Discard.
-    fn bar(&mut self, ui: &mut Ui, clip: Rect) {
+    fn bar(&mut self, ui: &mut Ui, toasts: egui::Id, clip: Rect) {
         let mut queue = false;
         let mut discard = false;
-        guilab_kit::toast(ui, self.id.with("bar"), clip, 0, |ui| {
+        guilab_kit::toast(ui, self.id.with("bar"), toasts, clip, |ui| {
             ui.label("Drawing on a frozen screenshot");
             queue = ui.button("Queue").on_hover_text("Keep it for the next message").clicked();
             discard = ui.button("Discard").clicked();

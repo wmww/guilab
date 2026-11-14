@@ -25,6 +25,8 @@ pub struct DemoHost {
     /// Every edit the canvas reported, in order (tests read it).
     pub log: Vec<Edit>,
     pub scale: f32,
+    /// A host toast over the view, shown above the editor's own.
+    pub notice: Option<String>,
 }
 
 impl DemoHost {
@@ -44,6 +46,7 @@ impl DemoHost {
             last: CanvasOut::default(),
             log: Vec::new(),
             scale,
+            notice: None,
         }
     }
 
@@ -152,7 +155,7 @@ impl DemoHost {
 
         let out = self.editor.canvas(
             ui,
-            Canvas { doc: self.doc.as_mut(), xf: self.xf, clip, new_doc: (size, self.scale), visible: true, input: true },
+            Canvas { doc: self.doc.as_mut(), xf: self.xf, clip, new_doc: (size, self.scale), visible: true, input: true, toasts: egui::Id::new("demo-toasts") },
         );
         if out.begin {
             self.open();
@@ -168,6 +171,11 @@ impl DemoHost {
             }
             self.history.end_group();
             self.log.extend(out.edits.iter().cloned());
+        }
+        if let Some(n) = &self.notice {
+            guilab_kit::toast(ui, egui::Id::new("demo-notice"), egui::Id::new("demo-toasts"), clip, |ui| {
+                ui.label(n.as_str());
+            });
         }
         self.last = out;
     }

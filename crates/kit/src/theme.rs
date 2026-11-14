@@ -114,9 +114,9 @@ pub struct Sizes {
     pub feed_thumb_h: f32,
     /// Largest hover preview of an image.
     pub preview_max: Vec2,
-    /// Toasts: distance from the bottom, and height of one stacked slot.
+    /// Toasts: distance from the bottom, and the gap between stacked toasts.
     pub toast_bottom: f32,
-    pub toast_slot: f32,
+    pub toast_gap: f32,
     /// Resize handles: grab band outside the edge, bar length and width, gap to the edge.
     pub handle_band: f32,
     pub handle_len: f32,
@@ -269,7 +269,7 @@ fn sizes() -> Sizes {
         feed_thumb_h: 80.0,
         preview_max: vec2(720.0, 480.0),
         toast_bottom: 20.0,
-        toast_slot: 64.0,
+        toast_gap: 8.0,
         handle_band: 10.0,
         handle_len: 28.0,
         handle_w: 4.0,

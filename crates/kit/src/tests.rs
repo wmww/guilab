@@ -84,3 +84,41 @@ fn themes_follow_preference() {
     let _ = ctx.run_ui(raw, |_| {});
     assert!(!Theme::get(&ctx).dark, "follows the system");
 }
+
+/// Toasts in one stack sit above each other in call order, each by its real height; another
+/// stack starts again at the bottom, and every pass starts over.
+#[test]
+fn toasts_stack() {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let clip = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+    let stack = egui::Id::new("view");
+    let mut rects = Vec::new();
+    for _ in 0..4 {
+        rects.clear();
+        frame(&ctx, vec![], |ui| {
+            rects.push(crate::toast(ui, egui::Id::new("a"), stack, clip, |ui| {
+                ui.label("one line");
+            }).rect);
+            rects.push(crate::toast(ui, egui::Id::new("b"), stack, clip, |ui| {
+                ui.vertical(|ui| {
+                    ui.label("two");
+                    ui.label("lines");
+                });
+            }).rect);
+            rects.push(crate::toast(ui, egui::Id::new("c"), stack, clip, |ui| {
+                ui.label("top");
+            }).rect);
+            rects.push(crate::toast(ui, egui::Id::new("d"), egui::Id::new("other"), clip, |ui| {
+                ui.label("elsewhere");
+            }).rect);
+        });
+    }
+    let t = Theme::get(&ctx);
+    let [a, b, c, d] = [rects[0], rects[1], rects[2], rects[3]];
+    assert!((a.max.y - (600.0 - t.size.toast_bottom)).abs() < 1.0, "{a:?}");
+    assert!(b.height() > a.height() + 5.0, "{a:?} {b:?}");
+    assert!((b.max.y - (a.min.y - t.size.toast_gap)).abs() < 1.0, "{a:?} {b:?}");
+    assert!((c.max.y - (b.min.y - t.size.toast_gap)).abs() < 1.0, "{b:?} {c:?}");
+    assert!((d.max.y - a.max.y).abs() < 1.0, "{d:?}");
+}

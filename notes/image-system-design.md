@@ -224,6 +224,7 @@ pub struct Canvas<'a> {
     pub new_doc: ([u32; 2], f32),     // canvas size and scale a new doc would have (live view)
     pub visible: bool,                // false while a flight shows the image instead: no paint, no input
     pub input: bool,                  // false: paint, no input (the pass a press closes a menu, dialogs)
+    pub toasts: Id,                   // toast stack over the view: the crop toast goes first, host toasts after canvas() stack above
 }
 pub struct CanvasOut {
     pub edits: Vec<Edit>,             // already applied to doc; the host records them (one history group per frame)
