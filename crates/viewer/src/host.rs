@@ -214,7 +214,11 @@ pub struct HostState {
     shm: Shm,
     dmabuf: DmabufState,
     window: Window,
-    qh: QueueHandle<HostState>,
+    pub(crate) qh: QueueHandle<HostState>,
+    pub(crate) clipboard: crate::clipboard::HostClipboard,
+    /// Serial of the last keyboard enter, key or button press (setting the selection
+    /// needs one).
+    pub(crate) input_serial: Option<u32>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
     gestures: Option<ZwpPointerGesturesV1>,
@@ -327,6 +331,8 @@ impl HostState {
             output_state: OutputState::new(g, &qh),
             gestures: g.bind::<ZwpPointerGesturesV1, _, _>(&qh, 1..=3, ()).ok(),
             cursor_shapes: CursorShapeManager::bind(g, &qh).ok(),
+            clipboard: crate::clipboard::HostClipboard::new(g, &qh),
+            input_serial: None,
             compositor,
             viewporter,
             cursor_surface: None,
@@ -849,6 +855,7 @@ impl SeatHandler for HostState {
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: WlSeat, cap: Capability) {
         self.seat.get_or_insert_with(|| seat.clone());
+        self.clipboard.add_seat(qh, &seat);
         if cap == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
         }
@@ -889,7 +896,9 @@ impl SeatHandler for HostState {
 }
 
 impl KeyboardHandler for HostState {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: &WlSurface, _: u32, _: &[u32], _: &[Keysym]) {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: &WlSurface, serial: u32, _: &[u32], _: &[Keysym]) {
+        self.input_serial = Some(serial);
+        self.flush_clipboard();
         self.focused = true;
         self.events.push(HostInput::Egui(egui::Event::WindowFocused(true)));
         self.dirty = true;
@@ -902,7 +911,8 @@ impl KeyboardHandler for HostState {
         self.events.push(HostInput::Egui(egui::Event::WindowFocused(false)));
         self.dirty = true;
     }
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, ev: KeyEvent) {
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, serial: u32, ev: KeyEvent) {
+        self.input_serial = Some(serial);
         self.key(ev, true);
     }
     fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, _: KeyEvent) {}
@@ -991,6 +1001,7 @@ impl PointerHandler for HostState {
                 PointerEventKind::Press { button, .. } | PointerEventKind::Release { button, .. } => {
                     if let PointerEventKind::Press { serial, .. } = ev.kind {
                         self.press_serial = serial;
+                        self.input_serial = Some(serial);
                     }
                     let pressed = matches!(ev.kind, PointerEventKind::Press { .. });
                     if let Some(button) = egui_button(button) {

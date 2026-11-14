@@ -476,3 +476,35 @@ fn touch_through() {
     }).count();
     assert!(red > 50, "no box drawn along its left edge ({red} red px)");
 }
+
+/// The host clipboard and the shown session's are bridged (text): host → session always,
+/// session → host while the viewer has focus.
+#[test]
+fn clipboard_bridge() {
+    let Some((h, sock, t)) = host() else { return };
+    if !gtk4() {
+        return;
+    }
+    let (v, log) = viewed(&[]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let m = mapping(&h, &t, &v);
+    let (ex, ey) = center(&std::fs::read_to_string(&log).unwrap(), "entry", 1.0);
+    let x = (m.origin.0 + ex.parse::<f64>().unwrap() * m.scale).round() as i64;
+    let y = (m.origin.1 + ey.parse::<f64>().unwrap() * m.scale).round() as i64;
+    h.input(&t, &["move", &x.to_string(), &y.to_string(), "click"]);
+    h.run(&["-t", &t, "clip", "set", "from host"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while v.try_run(&["clip", "get"]).1.trim() != "from host" {
+        assert!(Instant::now() < deadline, "host text never reached the session");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    h.input(&t, &["key", "ctrl+v"]);
+    wait_log(&log, "entry 'from host'", 5); // pasting is asynchronous
+    h.input(&t, &["type", " + app", "key", "ctrl+a", "key", "ctrl+c"]);
+    wait_log(&log, "entry 'from host + app'", 5);
+    while h.try_run(&["clip", "get"]).1.trim() != "from host + app" {
+        assert!(Instant::now() < deadline, "the app's copy never reached the host: {}", h.try_run(&["clip", "get"]).1);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -40,6 +40,10 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 - Handles: `handle_at` (10 pt band outside the image, only where it fits in the view); a drag (`Resizing`, in `ViewerUi` like `panning`) freezes the zoom and sets the pan each frame so the anchor (opposite edge/corner) stays put while the frames catch up; restores fit on release. Input loop: handle presses come before the off-image pan.
 - At matching host/session scales a fitting session is pixel-exact (tested at 1.5: `viewer::pixel_exact_at_fractional_scale`). Fractional scaling checked by eye with GTK4, Qt6 (PySide6) and Chromium at 1.25/1.5 incl. live changes: crisp.
 
+## Clipboard (clipboard.rs, server viewer.rs)
+- `HostClipboard` (sctk data device, text mimes): `set_clipboard` takes the host selection with the last input serial (keyboard enter, key or button press; queued until there is one), `take_clipboard` returns text read (on a thread) from a new selection someone else made. Our own selection's echo is ignored while our source is alive (it's cancelled before someone else's selection arrives).
+- Server `ClipBridge` (per shown viewer, current session only): host text → `clip_set`; `Session::clip_seq` changes → `clip_get` (pipe read on a thread) → host, only while the host window is focused; `last` stops ping-pong. Test: `viewer::clipboard_bridge`.
+
 ## Window decorations
 - The host decides (xdg-decoration; sctk reports `DecorationMode::Client` without it, e.g. GNOME). With client-side decorations (`HostState::csd`; `GUILAB_VIEWER_CSD=1` in the server's env forces it, for testing on our SSD-only host) the menu bar's free part (`MenuBar::show` returns it) becomes a title bar: drag = `xdg_toplevel.move`, double-click = maximize toggle, minimize/maximize/close buttons; a 5 pt border resizes (`border_presses` turns a press there into `xdg_toplevel.resize`, using the last press serial). Tested against guilab as host: move (floating viewer), close, cursors.
 

@@ -31,6 +31,7 @@ impl Session {
         let mimes: Vec<String> = TEXT_MIMES.iter().map(|s| s.to_string()).collect();
         set_data_device_selection(&self.dh, &self.seat, mimes.clone(), SelData::Text(Arc::from(text)));
         self.clip_mimes = None;
+        self.clip_seq += 1;
         crate::xwayland::announce_selection(self, SelectionTarget::Clipboard, Some(mimes));
         self.flush();
     }

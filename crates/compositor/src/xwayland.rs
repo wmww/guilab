@@ -359,6 +359,7 @@ impl XwmHandler for Session {
         match selection {
             SelectionTarget::Clipboard => {
                 self.clip_mimes = Some(mime_types.clone());
+                self.clip_seq += 1;
                 set_data_device_selection(&self.dh, &self.seat, mime_types, SelData::X11);
             }
             SelectionTarget::Primary => set_primary_selection(&self.dh, &self.seat, mime_types, SelData::X11),

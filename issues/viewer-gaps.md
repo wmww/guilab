@@ -1,9 +1,4 @@
 # Viewer gaps
 
-Known limits of the step-6 viewer (see notes/viewer.md):
-- No key repeat for held keys: sessions' seats have repeat rate 0 (so agent chains don't repeat), which also applies to keys the human holds in the viewer. Options: per-source repeat (synthesize repeats in the viewer as press events? not valid Wayland), or switch the seat's repeat info while the human types.
-- A server on pixman (no render node) can't show the viewer. Could try a GLES renderer on a Mesa software EGL device (llvmpipe) for the viewer and upload session frames from CPU.
-- No client-side decorations: on hosts without server-side decorations (GNOME) the window has no title bar.
-- Host touch input isn't forwarded; the host clipboard isn't bridged to sessions.
-- If the host rejects a dmabuf `create_immed` with a protocol error, the viewer closes instead of falling back to shm.
-- Leaving the session image (without a button held) sends nothing, so app hover highlights stay until the pointer comes back.
+- A server on pixman (no render node) can't show the viewer. Idea: a GLES renderer on a Mesa software EGL device (llvmpipe, `EGLDevice::enumerate` with `EGL_MESA_device_software`, surfaceless) just for the viewer, presenting via shm, with session frames uploaded from `read_rgba` when `frame_seq` changes (an egui texture `set`) instead of the GPU mirror.
+- Client-side decorations: the title bar can't show the host's real window state for minimize (no such state in xdg-shell) and our resize border is only 5 pt wide (no shadow margin outside the window). Untested on a real CSD-only host (GNOME); tested against guilab with `GUILAB_VIEWER_CSD=1`.

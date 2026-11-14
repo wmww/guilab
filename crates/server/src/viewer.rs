@@ -55,9 +55,71 @@ pub(crate) struct Shown {
     /// `show` requests waiting for the first frame.
     waiters: Vec<UnixStream>,
     deadline: Instant,
+    clip: ClipBridge,
     /// Per session (by tag): the app cursor as of `Session::cursor_seq`.
     cursors: std::collections::HashMap<String, (u64, HostCursor)>,
     next_cursor_id: u64,
+}
+
+/// Text clipboard bridging between the host and the shown session: host changes go to
+/// the session; the session's changes go to the host while the viewer has keyboard focus
+/// (so an agent's `clip set` or copy doesn't overwrite the human's desktop clipboard
+/// behind their back).
+#[derive(Default)]
+struct ClipBridge {
+    /// Per session (tag): the `clip_seq` already handled.
+    seen: std::collections::HashMap<String, u64>,
+    /// The text last moved either way (so it isn't bounced back).
+    last: Option<String>,
+    /// A session clipboard read in progress (its pipe is read on a thread).
+    reading: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ClipBridge {
+    fn bridge(&mut self, viewer: &mut Viewer, session: &mut Session) {
+        if let Some(text) = viewer.host.take_clipboard()
+            && self.last.as_ref() != Some(&text)
+        {
+            session.clip_set(text.clone());
+            self.seen.insert(session.tag.clone(), session.clip_seq);
+            self.last = Some(text);
+        }
+        let read = self.reading.lock().ok().and_then(|mut r| r.take());
+        if let Some(text) = read
+            && self.last.as_ref() != Some(&text)
+        {
+            viewer.host.set_clipboard(text.clone());
+            self.last = Some(text);
+        }
+        let seq = session.clip_seq;
+        let old = self.seen.insert(session.tag.clone(), seq);
+        // First sight of a session, no change, or the human isn't in the viewer.
+        if old.is_none_or(|o| o == seq) || !viewer.host.focused {
+            return;
+        }
+        match session.clip_get() {
+            Ok(guilab_compositor::ClipRead::Text(t)) => {
+                if self.last.as_ref() != Some(&t) {
+                    viewer.host.set_clipboard(t.clone());
+                    self.last = Some(t);
+                }
+            }
+            Ok(guilab_compositor::ClipRead::Pipe(fd)) => {
+                let out = self.reading.clone();
+                let _ = std::thread::Builder::new().name("session-clipboard-read".into()).spawn(move || {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    if std::fs::File::from(fd).take(4 << 20).read_to_end(&mut buf).is_ok()
+                        && let Ok(t) = String::from_utf8(buf)
+                        && let Ok(mut o) = out.lock()
+                    {
+                        *o = Some(t);
+                    }
+                });
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 impl Shown {
@@ -279,7 +341,7 @@ impl Server {
         };
         let shown_on = display.display().to_string();
         tracing::info!("viewer shown on {shown_on}");
-        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, token: Some(token), display, waiters, deadline, cursors: Default::default(), next_cursor_id: 0 }));
+        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, token: Some(token), display, waiters, deadline, clip: ClipBridge::default(), cursors: Default::default(), next_cursor_id: 0 }));
     }
 
     /// Closes the viewer (if any). `why`: an error for `show` requests still waiting.
@@ -329,6 +391,9 @@ impl Server {
                 }
                 if let Some(tab) = self.viewer_tab.take() {
                     s.viewer.select(&tab);
+                }
+                if let Some(slot) = s.viewer.current().and_then(|c| self.sessions.get_mut(c)) {
+                    s.clip.bridge(&mut s.viewer, &mut slot.session);
                 }
                 for (name, slot) in &self.sessions {
                     let log = &slot.session.log;

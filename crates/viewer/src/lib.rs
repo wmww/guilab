@@ -9,6 +9,7 @@
 //! The server owns sessions; each draw it passes [`SessionFrame`]s in and applies the
 //! [`ui::Action`]s that come back.
 
+mod clipboard;
 pub mod gfx;
 pub mod host;
 pub mod sizing;

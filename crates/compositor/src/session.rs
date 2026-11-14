@@ -175,6 +175,8 @@ pub struct Session {
     pub click_in_grab: bool,
     /// Mime types of a client-owned clipboard selection (None: empty or ours).
     pub clip_mimes: Option<Vec<String>>,
+    /// Bumped whenever the clipboard gets a new owner or content (the viewer bridges it).
+    pub clip_seq: u64,
     /// Icon surface of an active drag.
     pub dnd_icon: Option<WlSurface>,
     pub xw: Xw,
@@ -352,6 +354,7 @@ impl Session {
             under_pointer: None,
             click_in_grab: false,
             clip_mimes: None,
+            clip_seq: 0,
             dnd_icon: None,
             xw: Xw::default(),
             log: EventLog::default(),

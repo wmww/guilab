@@ -193,6 +193,7 @@ impl SelectionHandler for Session {
         let mimes = source.map(|s| s.mime_types());
         if ty == SelectionTarget::Clipboard {
             self.clip_mimes = mimes.clone();
+            self.clip_seq += 1;
         }
         crate::xwayland::announce_selection(self, ty, mimes);
     }
