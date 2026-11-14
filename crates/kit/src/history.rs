@@ -106,6 +106,11 @@ impl<Op> History<Op> {
         }
     }
 
+    /// Every recorded op (done, undone, and an open group's), in no particular order.
+    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+        self.done.iter().chain(&self.undone).flat_map(|s| &s.0).chain(self.group.iter().flat_map(|(ops, _)| ops))
+    }
+
     pub fn clear(&mut self) {
         self.done.clear();
         self.undone.clear();

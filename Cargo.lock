@@ -826,15 +826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "guilab-markup"
-version = "0.1.0"
-dependencies = [
- "egui",
- "guilab-kit",
- "png",
-]
-
-[[package]]
 name = "guilab-proto"
 version = "0.1.0"
 dependencies = [
@@ -872,8 +863,10 @@ dependencies = [
  "egui",
  "egui_glow",
  "glow",
+ "guilab-chat",
+ "guilab-editor",
+ "guilab-image",
  "guilab-kit",
- "guilab-markup",
  "guilab-proto",
  "libc",
  "rustix 1.1.6",

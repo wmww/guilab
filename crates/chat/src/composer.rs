@@ -196,14 +196,15 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                     });
                     ui.add_space(sm * row);
                 }
-                // The text and the send button, bottom-aligned so the button stays at the last line.
-                ui.with_layout(Layout::left_to_right(Align::Max), |ui| {
+                // The text and the send button at its last line. (A bottom-aligned row would
+                // fill the panel's previous height, so the box could never shrink.)
+                ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                     let button = t.size.send_button;
                     let w = ui.available_width() - button - md;
                     let line = ui.text_style_height(&egui::TextStyle::Body);
                     let pad = sm + 2.0;
                     let max_h = line * t.size.composer_lines + 2.0 * pad;
-                    ui.allocate_ui_with_layout(vec2(w, max_h), Layout::top_down(Align::Min), |ui| {
+                    let text = ui.allocate_ui_with_layout(vec2(w, max_h), Layout::top_down(Align::Min), |ui| {
                         egui::ScrollArea::vertical().id_salt(id.with("text-scroll")).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                             let edit = egui::TextEdit::multiline(&mut chat.draft)
                                 .id(text_id)
@@ -216,8 +217,12 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                             changed = ui.add(edit).changed();
                         });
                     });
+                    let text_h = text.response.rect.height();
                     let can_send = !chat.draft.trim().is_empty() || !pending.is_empty();
-                    click = guilab_kit::send_button(ui, can_send).clicked();
+                    ui.vertical(|ui| {
+                        ui.add_space((text_h - button).max(0.0));
+                        click = guilab_kit::send_button(ui, can_send).clicked();
+                    });
                 });
             });
             framed.response.rect

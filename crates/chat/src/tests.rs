@@ -105,6 +105,7 @@ fn send_rules() {
     assert_eq!(t.events(), vec![ChatEvent::Send { text: "hi".into() }]);
 
     // An image alone can be sent, with the button too.
+    let empty_h = t.host.last.composer.height();
     let k = t.host.attach(400, 250, 0);
     t.settle();
     t.click(t.send_button());
@@ -116,6 +117,8 @@ fn send_rules() {
     t.run(vec![]);
     t.run(vec![]);
     assert!(t.host.last.slots.iter().all(|(s, _, _)| *s != SlotId::Composer));
+    t.settle();
+    assert_eq!(t.host.last.composer.height(), empty_h, "the box shrinks back");
 }
 
 #[test]

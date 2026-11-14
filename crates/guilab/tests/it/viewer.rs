@@ -360,7 +360,7 @@ impl Lab {
 /// the lock (the agent may still resize); unlocking fits it again.
 /// Layout (1200x800 host window, one session): View menu at 111,12, its "Resize to
 /// window" row at y=127, "Lock size to window" at y=153; the view is the window minus the
-/// 38 px toolbar, 24 px menu bar and 180 px chat panel.
+/// 38 px toolbar, 24 px menu bar and 240 px chat panel.
 #[test]
 fn size_to_window() {
     let Some((h, sock, t)) = host() else { return };
@@ -373,15 +373,15 @@ fn size_to_window() {
     };
     step(&["move", "111", "12", "click"]);
     step(&["move", "150", "127", "click"]);
-    // Logical size = the view (1162x596 points), at scale 1.5.
-    v.wait_output(5, |w, hh| (w, hh) == (1743, 894));
+    // Logical size = the view (1162x536 points), at scale 1.5.
+    v.wait_output(5, |w, hh| (w, hh) == (1743, 804));
     let log = v.run(&["log", "--kind", "output"]);
-    assert!(log.contains("output is now 1743x894 scale 1.5 (the human resized it)"), "{log}");
+    assert!(log.contains("output is now 1743x804 scale 1.5 (the human resized it)"), "{log}");
 
     step(&["move", "111", "12", "click"]);
     step(&["move", "150", "153", "click"]);
     h.run(&["-t", &t, "output", "-s", "1000x700"]);
-    v.wait_output(5, |w, hh| (w, hh) == (1443, 744));
+    v.wait_output(5, |w, hh| (w, hh) == (1443, 654));
     // An agent's lock freezes it; the agent can still resize.
     let vt = v.lock();
     h.run(&["-t", &t, "output", "-s", "1100x750"]);
@@ -391,7 +391,7 @@ fn size_to_window() {
     let log = v.run(&["log", "--kind", "output"]);
     assert_eq!(log.matches("the human resized it").count(), 2, "resized while locked: {log}");
     v.run(&["-t", &vt, "unlock"]);
-    v.wait_output(5, |w, hh| (w, hh) == (1593, 819));
+    v.wait_output(5, |w, hh| (w, hh) == (1593, 729));
 }
 
 /// Dragging the bottom-right resize handle resizes the output by the dragged distance.

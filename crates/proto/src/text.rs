@@ -365,13 +365,16 @@ impl Fmt {
                 }
                 s
             }
-            EventData::Message { text, images, screen } => {
+            EventData::Message { text, images, screen, viewing } => {
                 let mut s = format!("human message: {}", quote(text));
                 for i in images {
                     s += &format!(" {}", image_tag(i));
                 }
                 if let Some(id) = screen {
                     s += &format!(" [their screen: image {id}]");
+                }
+                if let Some(id) = viewing {
+                    s += &format!(" [open in their editor: image {id}]");
                 }
                 s
             }
@@ -493,7 +496,7 @@ impl Fmt {
     /// A wake event in full, on several lines if it has attachments.
     fn wake_lines(&self, e: &Event) -> Vec<String> {
         match &e.data {
-            EventData::Message { text, images, screen } => {
+            EventData::Message { text, images, screen, viewing } => {
                 let mut v = vec![format!("{} human message: {}", self.clock(e.t), quote(text))];
                 for i in images {
                     v.extend(i.listing.lines().map(|l| format!("  {l}")));
@@ -504,6 +507,9 @@ impl Fmt {
                 }
                 if let Some(id) = screen {
                     v.push(format!("  (their screen as they sent it, with their pointer: image {id}; see it: guilab image {id})"));
+                }
+                if let Some(id) = viewing {
+                    v.push(format!("  (they had image {id} open in their editor, not attached; see it: guilab image {id})"));
                 }
                 v.push("  (you're marked working on it; reply when finished with: guilab done \"...\")".into());
                 v
@@ -652,7 +658,7 @@ mod tests {
             listing: "image w8dn 800x600, parent h2kc (screenshot)\n  1 raster r7qa 0,0 800x600 (screenshot 14:04:50)\n  2 red box 10,10 50x40".into(),
             marks: Some([0, 0, 82, 72]),
         };
-        let mut msg = ev(7_200_000, EventData::Message { text: "fix this".into(), images: vec![img], screen: None });
+        let mut msg = ev(7_200_000, EventData::Message { text: "fix this".into(), images: vec![img], screen: None, viewing: None });
         msg.tier = Some(Tier::Wake);
         let d = Delivery {
             since: Some(3_600_000),

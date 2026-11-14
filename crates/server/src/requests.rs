@@ -15,6 +15,7 @@ use guilab_proto::{
 
 use crate::{
     DEFAULT_TTL, Server,
+    human::MsgImage,
     images::Images,
     lock::Took,
     pending::{Pending, Reply, Wait},
@@ -385,27 +386,29 @@ impl Server {
                 slot.set_done(key);
                 Response::ok(DoneInfo { unlocked: unlock })
             }
+            // The human's actions (tests act as the human): the same API as the viewer's.
             SessionCmd::Human { op } => match op {
                 HumanOp::Message { text, images, draw } => {
                     let mut imgs: Vec<MsgImage> = images.into_iter().map(MsgImage::Spec).collect();
                     if !draw.is_empty() {
                         imgs.push(MsgImage::Draw(draw));
                     }
-                    match human_message(&mut self.images, slot, text, imgs) {
+                    match self.human_message(name, text, imgs, None) {
                         Ok(()) => Response::ok(()),
                         Err(e) => Response::err(e),
                     }
                 }
                 HumanOp::Input { actions } => {
-                    if slot.lock.is_locked() {
-                        return Reply::Now(Response::err("the session is locked: human input is blocked"));
+                    // Each step of the chain is checked again as it runs (pending.rs).
+                    if let Err(e) = crate::human::may_input(&slot.lock, false) {
+                        return Reply::Now(Response::err(e));
                     }
                     if let Err(e) = s.check_chain(&actions) {
                         return Reply::Now(Response::err(e));
                     }
                     return Reply::Later(Wait::Input { chain: Chain::new(actions, InputSource::Human), resume_at: Instant::now(), started: false });
                 }
-                HumanOp::Revoke => match self.revoke_lock(name) {
+                HumanOp::Revoke => match self.human_revoke(name) {
                     Ok(()) => Response::ok(()),
                     Err(e) => Response::err(e),
                 },
@@ -468,47 +471,6 @@ impl Server {
         Ok(name)
     }
 
-}
-
-/// An image attached to a human message.
-pub(crate) enum MsgImage {
-    /// An image id, or an absolute path of a file that becomes an image.
-    Spec(String),
-    /// A drawing from the current viewer: the frozen screenshot's image id and the marks.
-    Drawing { base: String, marks: Vec<guilab_image::Element> },
-    /// Element lines to draw on a screenshot taken now (`debug message --draw`).
-    Draw(Vec<String>),
-}
-
-/// Logs a human message (wakes polls). Its images are held while the session lives. A
-/// message without images gets the current screen with the pointer drawn in, since it
-/// refers to what they look at (or point at).
-pub(crate) fn human_message(images: &mut Images, slot: &mut Slot, text: String, imgs: Vec<MsgImage>) -> Result<(), String> {
-    let mut refs = Vec::new();
-    for (i, m) in imgs.into_iter().enumerate() {
-        let img = match m {
-            MsgImage::Spec(spec) => images.attach(&spec, Made::Human, slot.group),
-            MsgImage::Drawing { base, marks } => images.drawing(&base, marks, slot.group),
-            MsgImage::Draw(lines) => images.capture(&mut slot.session, slot.group, false, false, None).and_then(|base| {
-                let req = MakeReq { from: Some(base.to_string()), elements: lines, cwd: "/".into(), ..Default::default() };
-                let id = guilab_image::make(&mut images.store, &images.fonts, &req, Made::Human, slot.group)?;
-                images.get(id.as_str())
-            }),
-        }
-        .map_err(|e| format!("image {}: {e}", i + 1))?;
-        images.hold(&img);
-        refs.push(images.image_ref(&img));
-    }
-    let screen = if refs.is_empty() {
-        let id = images.capture(&mut slot.session, slot.group, true, false, None)?;
-        let img = images.get(id.as_str())?;
-        images.hold(&img);
-        Some(id.to_string())
-    } else {
-        None
-    };
-    slot.session.log.push(EventData::Message { text, images: refs, screen }, None);
-    Ok(())
 }
 
 /// A poll showed the agent human messages: it's on them now (the human sees it was picked

@@ -85,13 +85,16 @@ pub enum EventData {
     /// The agent finished and waits for the human (`guilab done`).
     Done,
     /// Human -> agent message. `screen`: what the session showed when it was sent, for
-    /// messages without images (they refer to what the human looks at).
+    /// messages without images (they refer to what the human looks at). `viewing`: an image
+    /// open in their editor as they sent it, not attached.
     Message {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screen: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        viewing: Option<String>,
     },
     /// Human pointer motion, coalesced: points `[x, y, ms after t]` in output pixels.
     Motion { path: Vec<[i32; 3]> },
@@ -387,7 +390,7 @@ mod tests {
 
     #[test]
     fn tiers() {
-        let msg = EventData::Message { text: "hi".into(), images: vec![], screen: None };
+        let msg = EventData::Message { text: "hi".into(), images: vec![], screen: None, viewing: None };
         let key = EventData::Key { key: "a".into(), pressed: true, text: Some("a".into()) };
         assert_eq!(default_tier(&msg), Tier::Wake);
         assert_eq!(default_tier(&key), Tier::Passive);
@@ -408,7 +411,7 @@ mod tests {
             E::AgentMessage { text: String::new(), images: vec![] },
             E::Work { status: String::new() },
             E::Done,
-            E::Message { text: String::new(), images: vec![], screen: None },
+            E::Message { text: String::new(), images: vec![], screen: None, viewing: None },
             E::Motion { path: vec![] },
             E::Button { button: String::new(), pressed: true, x: 0, y: 0, window: None },
             E::Key { key: String::new(), pressed: true, text: None },

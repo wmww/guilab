@@ -3,11 +3,12 @@
 //! - [`source`], [`host`], [`gfx`]: generic. egui in a window on a host Wayland display,
 //!   drawn by a smithay `GlesRenderer` that lives on a render node (not on the window), so
 //!   the window can come and go while the renderer stays. Nothing guilab-specific.
-//! - [`ui`] and [`Viewer`]: guilab's UI on top (tabs, session view, lock controls, and the
-//!   drawing toolbar and chat panel from `guilab-markup`).
+//! - [`ui`] and [`Viewer`]: guilab's UI on top (tabs, session view, lock controls, the image
+//!   editor and the chat).
 //!
-//! The server owns sessions; each draw it passes [`SessionFrame`]s in and applies the
-//! [`ui::Action`]s that come back.
+//! The server owns sessions, the image store and the [`ViewerUi`] (kept while the window is
+//! hidden); each draw it passes [`SessionFrame`]s in and applies the [`ui::Action`]s that
+//! come back.
 
 mod clipboard;
 pub mod gfx;
@@ -30,10 +31,10 @@ use smithay::backend::{
 };
 
 pub use egui;
-pub use guilab_markup::{self as markup, Annotated, FeedItem, Status, Who};
+pub use guilab_chat::{Item as FeedItem, Status};
 pub use host::{BufferKind, Connected, CursorImage, HostCursor, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
-pub use ui::{Action, Input, Prefs};
+pub use ui::{Action, Input, ViewerUi};
 
 /// A session for one draw.
 pub struct SessionFrame<'a> {
@@ -56,14 +57,12 @@ pub struct SessionFrame<'a> {
     /// Average color around the pointer in the session's frame.
     pub under_pointer: Option<[u8; 3]>,
     /// What the agent is working on (None while it waits for the human).
-    pub agent: Option<guilab_markup::Status>,
+    pub agent: Option<Status>,
 }
 
 pub struct Viewer {
     pub host: HostState,
     gfx: gfx::Gfx,
-    ui: ui::ViewerUi,
-    start: Instant,
     next_repaint: Option<Instant>,
     /// Signature of what the last frame showed (sessions, locks, current frame seq).
     shown: u64,
@@ -93,8 +92,6 @@ impl Viewer {
         Ok(Viewer {
             host,
             gfx,
-            ui: Default::default(),
-            start: Instant::now(),
             next_repaint: None,
             shown: 0,
             pending: Default::default(),
@@ -109,9 +106,9 @@ impl Viewer {
         self.gfx.destroy(renderer);
     }
 
-    fn signature(&self, sessions: &[SessionFrame]) -> u64 {
+    fn signature(ui: &ViewerUi, sessions: &[SessionFrame]) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        let cur = self.ui.current();
+        let cur = ui.current();
         for s in sessions {
             (s.name, s.locked, s.size, s.scale.to_bits()).hash(&mut h);
             match &s.cursor {
@@ -129,67 +126,13 @@ impl Viewer {
 
     /// Whether to run the UI now: the host is ready for a frame and something changed, or
     /// there's new input (handled right away even if the frame has to wait).
-    pub fn wants_draw(&mut self, now: Instant, sessions: &[SessionFrame]) -> bool {
+    pub fn wants_draw(&mut self, ui: &ViewerUi, now: Instant, sessions: &[SessionFrame]) -> bool {
         self.host.tick_repeat(now);
-        if self.ui.notices().lock().is_ok_and(|n| !n.is_empty()) || portal::color_scheme() != self.scheme {
+        if ui.notices().lock().is_ok_and(|n| !n.is_empty()) || portal::color_scheme() != self.scheme {
             self.host.dirty = true;
         }
-        let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
+        let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || Self::signature(ui, sessions) != self.shown;
         (self.host.can_draw() && changed) || self.host.has_input()
-    }
-
-    /// View menu choices (kept by the server across hide/show).
-    pub fn prefs(&self) -> Prefs {
-        self.ui.prefs()
-    }
-
-    pub fn set_prefs(&mut self, p: Prefs) {
-        self.ui.set_prefs(p);
-        self.host.dirty = true;
-    }
-
-    /// How often the human tried to use a locked app (UI passes).
-    pub fn blocked_tries(&self) -> u64 {
-        self.ui.blocked_tries
-    }
-
-    /// The session tab shown (as of the last frame).
-    pub fn current(&self) -> Option<&str> {
-        self.ui.current()
-    }
-
-    /// Switches to a session's tab.
-    pub fn select(&mut self, name: &str) {
-        self.ui.select(name);
-        self.host.dirty = true;
-    }
-
-    /// The next event seq the session's feed wants (0 = nothing shown yet).
-    pub fn feed_next(&mut self, name: &str, key: &str) -> u64 {
-        self.ui.feed_next(name, key)
-    }
-
-    /// Adds feed items (events before `next`) for a session.
-    pub fn push_feed(&mut self, name: &str, key: &str, items: Vec<FeedItem>, next: u64) {
-        let any = !items.is_empty();
-        self.ui.push_feed(name, key, items, next);
-        self.host.dirty |= any;
-    }
-
-    /// Where other threads post messages for the human (shown as toasts).
-    pub fn notices(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-        self.ui.notices()
-    }
-
-    /// Answers [`Action::Freeze`].
-    pub fn set_screenshot(&mut self, name: &str, image: egui::ColorImage, tag: String) {
-        self.ui.set_screenshot(name, image, tag);
-        self.host.dirty = true;
-    }
-
-    /// Releases the human's held buttons and keys (on hide).
-    pub fn release_all(&mut self) -> Vec<Action> {
-        self.ui.release_all()
     }
 
     /// With client-side decorations: a press on the window's border starts a resize (and
@@ -218,7 +161,7 @@ impl Viewer {
 
     /// Touches that start on the app's image go to the app (the UI forwards them); the
     /// first other one drives egui's pointer (buttons, menus), the rest are dropped.
-    fn route_touches(&mut self, inputs: Vec<HostInput>) -> Vec<HostInput> {
+    fn route_touches(&mut self, ui: &ViewerUi, inputs: Vec<HostInput>) -> Vec<HostInput> {
         use egui::{Event, PointerButton, TouchPhase};
         let mut out = Vec::with_capacity(inputs.len());
         for i in inputs {
@@ -228,7 +171,7 @@ impl Viewer {
             };
             let button = |pressed| HostInput::Egui(Event::PointerButton { pos: t.pos, button: PointerButton::Primary, pressed, modifiers: Default::default() });
             match t.phase {
-                TouchPhase::Start if self.ui.touch_to_app(&self.gfx.ctx, t.pos) => {
+                TouchPhase::Start if ui.touch_to_app(&self.gfx.ctx, t.pos) => {
                     self.touch_app.push(t.id);
                     out.push(i);
                 }
@@ -254,14 +197,15 @@ impl Viewer {
     }
 
     /// Runs the UI and presents a frame if the host is ready. Returns the human's actions.
-    pub fn draw(&mut self, renderer: &mut GlesRenderer, sessions: &[SessionFrame], now: Instant) -> anyhow::Result<Vec<Action>> {
+    /// `store`: the server's images, read for thumbnails and opening images.
+    pub fn draw(&mut self, renderer: &mut GlesRenderer, ui: &mut ViewerUi, sessions: &[SessionFrame], store: &guilab_image::Store, now: Instant) -> anyhow::Result<Vec<Action>> {
         let inputs = self.host.take_input();
-        let inputs = self.route_touches(inputs);
+        let inputs = self.route_touches(ui, inputs);
         let inputs = self.border_presses(inputs);
         let keyboard_left = std::mem::take(&mut self.host.keyboard_left);
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
-        let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !self.ui.keys_to_egui(&self.gfx.ctx);
+        let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !ui.keys_to_egui(&self.gfx.ctx);
         let events: Vec<egui::Event> = inputs
             .iter()
             .filter_map(|i| match i {
@@ -274,8 +218,8 @@ impl Viewer {
         // they're the session's.
         let mut inputs: Vec<HostInput> = inputs.into_iter().filter(|i| to_session || !matches!(i, HostInput::Key(_))).collect();
 
-        let cur = self.ui.current().or(sessions.first().map(|s| s.name)).map(str::to_string);
-        let nearest = self.ui.nearest();
+        let cur = ui.current().or(sessions.first().map(|s| s.name)).map(str::to_string);
+        let nearest = ui.nearest();
         let mut tex = None;
         if let Some(s) = sessions.iter().find(|s| Some(s.name) == cur.as_deref()) {
             if let Some((id, size)) = s.texture {
@@ -307,7 +251,7 @@ impl Viewer {
         let ppp = self.host.scale as f32;
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32))),
-            time: Some(now.duration_since(self.start).as_secs_f64()),
+            time: Some(now.duration_since(ui.start).as_secs_f64()),
             modifiers: self.host.modifiers,
             focused: self.host.focused,
             events,
@@ -317,21 +261,20 @@ impl Viewer {
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
         let mut actions = Vec::new();
-        self.ui.gestures = self.host.has_gestures();
-        self.ui.csd = self.host.csd;
-        self.ui.maximized = self.host.maximized;
-        let ui_state = &mut self.ui;
-        let out = self.gfx.ctx.run_ui(raw, |ui| {
+        ui.gestures = self.host.has_gestures();
+        ui.csd = self.host.csd;
+        ui.maximized = self.host.maximized;
+        let out = self.gfx.ctx.run_ui(raw, |egui_ui| {
             // Input is consumed in the first pass only (egui may run several).
-            actions.extend(ui_state.show(ui, &views, std::mem::take(&mut inputs), keyboard_left));
+            actions.extend(ui.show(egui_ui, &views, std::mem::take(&mut inputs), keyboard_left, store));
         });
-        if self.ui.current().map(str::to_string) != cur || self.ui.nearest() != nearest {
+        if ui.current().map(str::to_string) != cur || ui.nearest() != nearest {
             self.host.dirty = true; // the mirror is stale (new tab, or its filter changed)
         }
-        for op in self.ui.take_window_ops() {
+        for op in ui.take_window_ops() {
             self.host.window_op(op);
         }
-        let cursor = self.ui.host_cursor(out.platform_output.cursor_icon);
+        let cursor = ui.host_cursor(out.platform_output.cursor_icon);
         self.host.set_cursor(cursor);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         self.next_repaint = (delay < Duration::from_secs(3600)).then(|| now + delay);
@@ -350,7 +293,7 @@ impl Viewer {
         }
         if drawn {
             self.frames += 1;
-            self.shown = self.signature(sessions);
+            self.shown = Self::signature(ui, sessions);
         } else {
             // The UI ran on input without presenting; its new state still has to be shown.
             self.host.dirty = true;

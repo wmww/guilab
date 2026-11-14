@@ -11,13 +11,12 @@ use std::{
 };
 
 use calloop::{RegistrationToken, channel};
-use guilab_compositor::{AppCursor, InputEvent, InputSource, Session, render::Renderer};
+use guilab_compositor::{AppCursor, InputEvent, Session, render::Renderer};
+use guilab_image::ImageId;
 use guilab_proto::{EventData, Response, ViewerInfo, text::Fmt};
 use guilab_viewer::{
-    Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Status, Viewer, Who,
-    CursorImage, HostCursor,
+    Action, BufferKind, Connected, CursorImage, FeedItem, HostCursor, HostEvent, HostSource, Input, SessionFrame, Status, Viewer,
     egui::{ColorImage, CursorIcon as EguiCursor},
-    markup,
 };
 use smithay::{
     backend::renderer::gles::GlesRenderer,
@@ -25,11 +24,10 @@ use smithay::{
     input::{keyboard::Keycode, pointer::CursorIcon},
 };
 
-use crate::{
-    Server,
-    images::Images,
-    requests::{MsgImage, human_message},
-};
+use crate::{Server, human::MsgImage, images::Images};
+
+/// The agent's status line notes it's been quiet after this many seconds.
+const QUIET_NOTE: u64 = 120;
 
 /// Feed items loaded when the viewer first shows a session.
 const FEED_BACKLOG: usize = 300;
@@ -237,7 +235,7 @@ impl Server {
                 .into(),
                 frames: s.viewer.frames,
                 window: s.viewer.host.size.map_or([0, 0], |(w, h)| [w, h]),
-                dropped: s.dropped + s.viewer.blocked_tries(),
+                dropped: s.dropped + self.viewer_ui.blocked_tries,
             }),
             _ => None,
         }
@@ -246,7 +244,7 @@ impl Server {
     /// The session tab the viewer shows, if it's up.
     pub(crate) fn viewer_current(&self) -> Option<String> {
         match &self.viewer {
-            ViewerState::Shown(s) => s.viewer.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned()),
+            ViewerState::Shown(_) => self.viewer_ui.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned()),
             _ => None,
         }
     }
@@ -330,11 +328,10 @@ impl Server {
                 },
             }
         };
-        let mut viewer = match viewer {
+        let viewer = match viewer {
             Ok(v) => v,
             Err(e) => return fail(&mut self.out, waiters, format!("{e:#}")),
         };
-        viewer.set_prefs(self.viewer_prefs);
         let source = HostSource::new(c.conn, c.queue);
         let token = self.handle.insert_source(source, |ev, queue, srv: &mut Server| match ev {
             HostEvent::Dispatch => match &mut srv.viewer {
@@ -374,9 +371,9 @@ impl Server {
                 if let Some(why) = why {
                     tracing::info!("viewer closed: {why}");
                 }
-                self.viewer_prefs = s.viewer.prefs();
-                let releases = s.viewer.release_all();
+                let releases = self.viewer_ui.release_all();
                 self.apply_viewer_actions(releases);
+                self.viewer_ui.detach();
                 if let Some(t) = s.token.take() {
                     self.handle.remove(t);
                 }
@@ -406,19 +403,29 @@ impl Server {
                     return self.hide_viewer(Some("timed out waiting for the host to show the window"));
                 }
                 if let Some(tab) = self.viewer_tab.take() {
-                    s.viewer.select(&tab);
+                    self.viewer_ui.select(&tab);
+                    s.viewer.host.dirty = true;
                 }
-                if let Some(slot) = s.viewer.current().and_then(|c| self.sessions.get_mut(c)) {
+                if let Some(slot) = self.viewer_ui.current().and_then(|c| self.sessions.get_mut(c)) {
                     s.clip.bridge(&mut s.viewer, &mut slot.session);
                 }
                 for (name, slot) in &self.sessions {
                     let log = &slot.session.log;
-                    let next = s.viewer.feed_next(name, &slot.session.tag);
+                    let next = self.viewer_ui.feed_next(name, &slot.session.tag);
                     if next == log.end() {
                         continue;
                     }
                     let items = feed_items(log, next, &self.images);
-                    s.viewer.push_feed(name, &slot.session.tag, items, log.end());
+                    s.viewer.host.dirty |= !items.is_empty();
+                    self.viewer_ui.push_feed(name, &slot.session.tag, items, log.end());
+                }
+                // Pictures the human picked to insert.
+                let picks = std::mem::take(&mut *self.viewer_picks.lock().unwrap_or_else(|e| e.into_inner()));
+                for (name, path) in picks {
+                    let Some(slot) = self.sessions.get(&name) else { continue };
+                    let pic = self.images.picture(&path, slot.group);
+                    self.viewer_ui.inserted(&name, pic);
+                    s.viewer.host.dirty = true;
                 }
                 // What's under the pointer decides the overlay's light/dark colors.
                 let under: Vec<Option<[u8; 3]>> = self.sessions.values_mut().map(|slot| slot.session.color_under_pointer()).collect();
@@ -427,7 +434,7 @@ impl Server {
                 // pixman frames reach the viewer as CPU images (the current session's only).
                 let mut cpu_image = None;
                 if s.soft.is_some() {
-                    let cur = s.viewer.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned());
+                    let cur = self.viewer_ui.current().map(str::to_string).or_else(|| self.sessions.keys().next().cloned());
                     if let Some(slot) = cur.as_deref().and_then(|c| self.sessions.get_mut(c)) {
                         let (tag, seq) = (slot.session.tag.clone(), slot.session.frame_seq);
                         let cached = s.cpu_frames.get(&tag).filter(|(q, _)| *q == seq).map(|(_, i)| i.clone());
@@ -459,10 +466,10 @@ impl Server {
                             cursor: HostCursor::Icon(EguiCursor::Default),
                             viz: slot.session.viz(),
                             under_pointer: None,
-                            agent: slot.working.as_ref().map(|w| Status {
-                                text: w.status.clone(),
-                                elapsed: w.since.elapsed().as_secs(),
-                                quiet: slot.last_agent.elapsed().as_secs(),
+                            agent: slot.working.as_ref().map(|w| {
+                                // Long compiles are normal: quiet only adds a dim note.
+                                let quiet = slot.last_agent.elapsed().as_secs();
+                                Status { text: w.status.clone(), elapsed: w.since.elapsed().as_secs(), note: (quiet >= QUIET_NOTE).then(|| format!("no guilab activity for {}m", quiet / 60)) }
                             }),
                         }
                     })
@@ -473,12 +480,12 @@ impl Server {
                         f
                     })
                     .collect();
-                if !s.viewer.wants_draw(now, &frames) {
+                if !s.viewer.wants_draw(&self.viewer_ui, now, &frames) {
                     return;
                 }
                 let res = {
-                    let viewer = &mut s.viewer;
-                    with_renderer(&self.gpu, s.soft.as_deref_mut(), |r| viewer.draw(r, &frames, now))
+                    let (viewer, ui, store) = (&mut s.viewer, &mut self.viewer_ui, &self.images.store);
+                    with_renderer(&self.gpu, s.soft.as_deref_mut(), |r| viewer.draw(r, ui, &frames, store, now))
                 };
                 drop(frames);
                 let actions = match res {
@@ -497,99 +504,71 @@ impl Server {
         }
     }
 
-    /// Applies the human's viewer actions. Input is dropped while the session is locked,
-    /// except releases (so nothing stays stuck).
+    /// Applies the human's viewer actions through the human API (`human.rs`).
     pub(crate) fn apply_viewer_actions(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
                 Action::Input { session, input } => {
-                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    if !input.is_release() && slot.lock.is_locked() {
-                        if let ViewerState::Shown(s) = &mut self.viewer
-                            && matches!(input, Input::Button { .. } | Input::Key { .. } | Input::Scroll { .. } | Input::PinchBegin { .. } | Input::SwipeBegin { .. } | Input::TouchDown { .. })
-                        {
-                            s.dropped += 1;
-                        }
-                        continue;
-                    }
-                    // The human using a session keeps it alive.
-                    slot.last_active = Instant::now();
-                    let touch = matches!(input, Input::TouchDown { .. } | Input::TouchMotion { .. } | Input::TouchUp { .. });
+                    let Some(slot) = self.sessions.get(&session) else { continue };
+                    let release = input.is_release();
+                    let counts = matches!(input, Input::Button { .. } | Input::Key { .. } | Input::Scroll { .. } | Input::PinchBegin { .. } | Input::SwipeBegin { .. } | Input::TouchDown { .. });
                     let ev = to_event(&slot.session, input);
-                    slot.session.inject(ev, InputSource::Human);
-                    if touch {
-                        slot.session.inject(InputEvent::TouchFrame, InputSource::Human);
+                    if self.human_input(&session, ev, release).is_err()
+                        && counts
+                        && let ViewerState::Shown(s) = &mut self.viewer
+                    {
+                        s.dropped += 1;
                     }
                 }
                 Action::Revoke { session } => {
                     // Not locked any more (the agent let go meanwhile): nothing to stop.
-                    let _ = self.revoke_lock(&session);
+                    let _ = self.human_revoke(&session);
                 }
                 Action::Resize { session, size, scale } => {
-                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    // The agent's lock freezes the output (for the human).
-                    if slot.lock.is_locked() {
-                        continue;
-                    }
-                    slot.last_active = Instant::now();
-                    let size = size.map(|(w, h)| (w as i32, h as i32));
-                    if let Err(e) = crate::requests::set_output(&mut slot.session, size, scale, None) {
-                        tracing::warn!("viewer: resizing {session}: {e:#}");
+                    if let Err(e) = self.human_resize(&session, size, scale) {
+                        tracing::debug!("viewer: resizing {session}: {e}");
                     }
                 }
-                Action::SaveScreenshot { session, image } => {
-                    let (w, h, mut rgba) = match image {
-                        Some(i) => (i.size[0] as u32, i.size[1] as u32, i.pixels.iter().flat_map(|c| c.to_array()).collect::<Vec<u8>>()),
-                        None => {
-                            let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                            match slot.session.read_rgba() {
-                                Ok(shot) => shot,
-                                Err(e) => {
-                                    tracing::warn!("viewer: screenshot to save: {e:#}");
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-                    rgba.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
-                    let ViewerState::Shown(s) = &self.viewer else { continue };
-                    save_dialog(session, w, h, rgba, s.viewer.notices());
-                }
-                Action::Freeze { session } => {
-                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    // The drawing's base goes into the store now; it's held, since the drawing
-                    // may be sent much later.
-                    let shot = self.images.capture(&mut slot.session, slot.group, false, false, None).and_then(|id| {
-                        let img = self.images.get(id.as_str())?;
-                        self.images.hold(&img);
-                        let r = guilab_image::render(&img.body, &self.images.store, &self.images.fonts, &Default::default()).map_err(|e| e.to_string())?;
-                        let [w, h] = r.size();
-                        Ok((ColorImage::from_rgba_premultiplied([w as usize, h as usize], r.premultiplied()), id.to_string()))
-                    });
-                    let (shot, id) = match shot {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!("viewer: screenshot for drawing: {e}");
-                            continue;
-                        }
-                    };
+                Action::Capture { session, ticket } => {
+                    let img = self.human_capture(&session);
+                    self.viewer_ui.captured(&session, ticket, img, &self.images.store);
                     if let ViewerState::Shown(s) = &mut self.viewer {
-                        s.viewer.set_screenshot(&session, shot, id);
+                        s.viewer.host.dirty = true;
                     }
                 }
-                Action::Message { session, text, images } => {
-                    let Some(slot) = self.sessions.get_mut(&session) else { continue };
-                    slot.last_active = Instant::now();
-                    let drawings = images
-                        .into_iter()
-                        .map(|a| MsgImage::Drawing { marks: a.marks.iter().map(|m| element(&self.images, m, a.scale)).collect(), base: a.tag })
-                        .collect();
-                    if let Err(e) = human_message(&mut self.images, slot, text, drawings) {
+                Action::Message { session, text, drafts, viewing } => {
+                    let imgs = drafts.into_iter().map(|(parent, doc)| MsgImage::Draft { parent, doc }).collect();
+                    if let Err(e) = self.human_message(&session, text, imgs, viewing) {
                         tracing::warn!("viewer: sending message: {e}");
+                        self.viewer_ui.notices().lock().map(|mut n| n.push(format!("Couldn't send: {e}"))).ok();
                     }
                 }
+                Action::Save { session, png } => {
+                    let png = match png {
+                        Some(p) => p,
+                        None => match self.screenshot_png(&session) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("viewer: screenshot to save: {e}");
+                                continue;
+                            }
+                        },
+                    };
+                    save_dialog(session, png, self.viewer_ui.notices());
+                }
+                Action::Insert { session } => open_dialog(session, self.viewer_picks.clone()),
             }
         }
+    }
+
+    /// A screenshot of the session as a PNG (into the store, so the file is marked as a
+    /// rendering of its image).
+    fn screenshot_png(&mut self, session: &str) -> Result<Vec<u8>, String> {
+        let slot = self.sessions.get_mut(session).ok_or("no such session")?;
+        let id = self.images.capture(&mut slot.session, slot.group, false, false, None)?;
+        let img = self.images.get(id.as_str())?;
+        let r = guilab_image::render(&img.body, &self.images.store, &self.images.fonts, &Default::default()).map_err(|e| e.to_string())?;
+        Ok(r.png(Some(img.id)))
     }
 }
 
@@ -619,15 +598,17 @@ pub(crate) fn insert_channel(handle: &calloop::LoopHandle<'static, Server>) -> a
     Ok(tx)
 }
 
-/// Feed items for the log's messages (both ways), agent commands and status changes from
-/// seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
-fn feed_items(log: &guilab_proto::log::EventLog, next: u64, images: &Images) -> Vec<FeedItem> {
+/// Feed items for the log's messages (both ways), agent commands, screenshots, made images
+/// and status changes from seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
+/// Images the agent sends are shown normally; its working screenshots and `image make`
+/// previews dimmed and smaller. A human message's `screen` (context for the agent) isn't.
+fn feed_items(log: &guilab_proto::log::EventLog, next: u64, _images: &Images) -> Vec<FeedItem<ImageId>> {
     let fmt = Fmt::local();
-    let wanted = |e: &&guilab_proto::Event| {
-        matches!(
-            e.data,
-            EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::Command { .. } | EventData::ImageMade { .. } | EventData::Work { .. } | EventData::Done
-        )
+    let wanted = |e: &&guilab_proto::Event| match &e.data {
+        // Its Screenshot event shows it, with the image.
+        EventData::Command { cmd } => !cmd.starts_with("screenshot"),
+        EventData::Message { .. } | EventData::AgentMessage { .. } | EventData::ImageMade { .. } | EventData::Screenshot { .. } | EventData::Work { .. } | EventData::Done => true,
+        _ => false,
     };
     let mut events: Vec<&guilab_proto::Event> = if next == 0 {
         log.from_seq(0).rev().filter(wanted).take(FEED_BACKLOG).collect()
@@ -637,65 +618,54 @@ fn feed_items(log: &guilab_proto::log::EventLog, next: u64, images: &Images) -> 
     if next == 0 {
         events.reverse();
     }
+    let ids = |refs: &[guilab_proto::ImageRef]| refs.iter().filter_map(|r| ImageId::parse(&r.id).ok()).collect::<Vec<_>>();
+    let id = |s: &str| ImageId::parse(s).ok();
     events
         .into_iter()
         .map(|e| {
             let time = fmt.clock(e.t);
             match &e.data {
-                EventData::Message { text, images: refs, .. } => FeedItem { who: Who::Human, time, text: text.clone(), images: load_images(images, refs) },
-                EventData::AgentMessage { text, images: refs } => FeedItem { who: Who::Agent, time, text: text.clone(), images: load_images(images, refs) },
-                EventData::ImageMade { image } => FeedItem { who: Who::Log, time, text: format!("image make → {image}"), images: Vec::new() },
-                EventData::Command { cmd } => FeedItem { who: Who::Log, time, text: cmd.clone(), images: Vec::new() },
-                EventData::Work { status } => FeedItem { who: Who::Log, time, text: format!("working: {status}"), images: Vec::new() },
-                EventData::Done => FeedItem { who: Who::Log, time, text: "done".into(), images: Vec::new() },
+                EventData::Message { text, images: refs, .. } => FeedItem::me(time, text.clone()).with(ids(refs)),
+                EventData::AgentMessage { text, images: refs } => FeedItem::them(AGENT, time, text.clone()).with(ids(refs)),
+                EventData::ImageMade { image } => FeedItem::activity(time, format!("image make → {image}")).with(id(image)).faint(),
+                EventData::Screenshot { image, .. } => FeedItem::activity(time, format!("screenshot → {image}")).with(id(image)).faint(),
+                EventData::Command { cmd } => FeedItem::activity(time, cmd.clone()),
+                EventData::Work { status } => FeedItem::activity(time, format!("working: {status}")),
+                EventData::Done => FeedItem::activity(time, "done"),
                 _ => unreachable!("filtered"),
             }
         })
         .collect()
 }
 
-/// Feed size cap: thumbnails and the hover preview.
-const FEED_MAX: [u32; 2] = [1600, 1600];
+/// The agent's name in the feed.
+const AGENT: &str = "Agent";
 
-fn load_images(images: &Images, refs: &[guilab_proto::ImageRef]) -> Vec<std::sync::Arc<ColorImage>> {
-    refs.iter()
-        .filter_map(|r| {
-            let img = images.get(&r.id).map_err(|e| tracing::warn!("viewer: image {}: {e}", r.id)).ok()?;
-            let opts = guilab_image::RenderOpts { max: Some(FEED_MAX), ..Default::default() };
-            let out = guilab_image::render(&img.body, &images.store, &images.fonts, &opts).map_err(|e| tracing::warn!("viewer: image {}: {e}", r.id)).ok()?;
-            let [w, h] = out.size();
-            Some(std::sync::Arc::new(ColorImage::from_rgba_premultiplied([w as usize, h as usize], out.premultiplied())))
-        })
-        .collect()
-}
-
-/// A mark drawn in the current viewer as an image element (same sizes and palette).
-fn element(images: &Images, m: &markup::mark::Mark, scale: f32) -> guilab_image::Element {
-    use guilab_image::{Kind, Pt, Rect};
-    use markup::mark::Kind as M;
-    // Whole pixels: listings read better, and sub-pixel precision means nothing here.
-    let p = |q: &markup::egui::Pos2| Pt { x: q.x.round(), y: q.y.round() };
-    let kind = match &m.kind {
-        M::Pen(pts) => Kind::Pen(pts.iter().map(p).collect()),
-        M::Box(a, b) => Kind::Box(Rect::from_corners(p(a), p(b))),
-        M::Ellipse(a, b) => Kind::Ellipse(Rect::from_corners(p(a), p(b))),
-        M::Line(a, b) => Kind::Line(p(a), p(b)),
-        M::Arrow(a, b) => Kind::Arrow(p(a), p(b)),
-        M::Text(at, text, width) => {
-            let size = markup::mark::FONT * scale;
-            Kind::Text { at: p(at), size, width: images.text_width(text, size, *width), text: text.clone() }
+/// Asks for a picture to insert (system file dialog, on its own thread); the pick goes to
+/// `picks` for the tick to load.
+fn open_dialog(session: String, picks: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>) {
+    let spawned = std::thread::Builder::new().name("open-dialog".into()).spawn(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Insert image").add_filter("Images", &["png", "jpg", "jpeg", "svg"]);
+        if let Some(dir) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures")).filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
         }
-    };
-    // Same palette values; opaque, so premultiplied = straight.
-    guilab_image::Element::new(guilab_image::Color(m.color.to_array()), kind)
+        if let Some(path) = dialog.pick_file()
+            && let Ok(mut p) = picks.lock()
+        {
+            p.push((session, path));
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("open dialog thread: {e}");
+    }
 }
 
 /// Asks where to save (system file dialog, on its own thread so the server keeps running)
 /// and writes the PNG. Tells the human how it went via `notices`.
-fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+fn save_dialog(session: String, png: Vec<u8>, notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let spawned = std::thread::Builder::new().name("save-dialog".into()).spawn(move || {
         let stamp = Fmt::local().file_stamp(guilab_proto::events::now_ms());
-        let mut dialog = rfd::FileDialog::new().set_title("Save screenshot").set_file_name(format!("{session}-{stamp}.png")).add_filter("PNG image", &["png"]);
+        let mut dialog = rfd::FileDialog::new().set_title("Save image").set_file_name(format!("{session}-{stamp}.png")).add_filter("PNG image", &["png"]);
         if let Some(dir) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures")).filter(|d| d.is_dir()) {
             dialog = dialog.set_directory(dir);
         }
@@ -703,9 +673,10 @@ fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::syn
         if path.extension().is_none() {
             path.set_extension("png");
         }
-        let msg = match write_rgb_png(&path, w, h, &rgba) {
+        let tmp = path.with_extension("png.tmp");
+        let msg = match std::fs::write(&tmp, &png).and_then(|()| std::fs::rename(&tmp, &path)) {
             Ok(()) => format!("Saved {}", path.display()),
-            Err(e) => format!("Couldn't save: {e:#}"),
+            Err(e) => format!("Couldn't save: {e}"),
         };
         if let Ok(mut n) = notices.lock() {
             n.push(msg);
@@ -714,19 +685,4 @@ fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::syn
     if let Err(e) = spawned {
         tracing::warn!("save dialog thread: {e}");
     }
-}
-
-/// Writes RGBA pixels as an RGB PNG (atomically).
-fn write_rgb_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let tmp = path.with_extension("png.tmp");
-    let f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.set_compression(png::Compression::Fast);
-    enc.write_header()?.write_image_data(&rgb)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }

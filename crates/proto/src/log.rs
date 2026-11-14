@@ -215,7 +215,7 @@ mod tests {
         EventData::Motion { path: vec![[x, 0, 0]] }
     }
     fn msg() -> EventData {
-        EventData::Message { text: "hi".into(), images: vec![], screen: None }
+        EventData::Message { text: "hi".into(), images: vec![], screen: None, viewing: None }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The guilab daemon: one calloop loop holding the control socket, the frame timer and
 //! every session's nested loop. Single-threaded.
 
+mod human;
 mod images;
 mod lock;
 mod out;
@@ -74,8 +75,10 @@ pub struct Server {
     pub(crate) viewer_gen: u64,
     /// A tab for the viewer to switch to (`-S NAME show`).
     pub(crate) viewer_tab: Option<String>,
-    /// View menu choices, kept while the viewer is hidden.
-    pub(crate) viewer_prefs: guilab_viewer::Prefs,
+    /// The viewer's UI state (drafts, chats, View menu choices), kept while it's hidden.
+    pub(crate) viewer_ui: guilab_viewer::ViewerUi,
+    /// Files the human picked to insert (File > Insert image), from the dialog thread.
+    pub(crate) viewer_picks: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>,
     pub(crate) viewer_tx: calloop::channel::Sender<viewer::ConnectResult>,
     last_slow_tick: Instant,
 }
@@ -151,6 +154,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
     let viewer_tx = viewer::insert_channel(&handle)?;
 
     let now = Instant::now();
+    let images = images::Images::new();
     let mut srv = Server {
         handle,
         gpu: Rc::new(RefCell::new(gpu)),
@@ -164,11 +168,12 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         idle_exit: opts.idle_exit,
         idle_since: now,
         last_slow_tick: now,
-        images: images::Images::new(),
         viewer: Default::default(),
         viewer_gen: 0,
         viewer_tab: None,
-        viewer_prefs: Default::default(),
+        viewer_ui: guilab_viewer::ViewerUi::new(images.fonts.clone()),
+        viewer_picks: Default::default(),
+        images,
         viewer_tx,
     };
     if let Some(display) = opts.show

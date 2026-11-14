@@ -47,6 +47,32 @@ pub fn handle_at(t: &Theme, img: Rect, view: Rect, p: Pos2) -> Option<Edge> {
     room(band, img, view, e).then_some(e)
 }
 
+/// Every handle: corners and edges.
+pub const EDGES: [Edge; 8] = [
+    Edge { x: -1, y: -1 },
+    Edge { x: 0, y: -1 },
+    Edge { x: 1, y: -1 },
+    Edge { x: 1, y: 0 },
+    Edge { x: 1, y: 1 },
+    Edge { x: 0, y: 1 },
+    Edge { x: -1, y: 1 },
+    Edge { x: -1, y: 0 },
+];
+
+/// The grab area of handle `e` (the band outside that edge or corner), if it has room.
+pub fn handle_rect(t: &Theme, img: Rect, view: Rect, e: Edge) -> Option<Rect> {
+    let band = t.size.handle_band;
+    let span = |d: i8, lo: f32, hi: f32| match d {
+        -1 => (lo - band, lo),
+        1 => (hi, hi + band),
+        _ => (lo, hi),
+    };
+    let (x0, x1) = span(e.x, img.min.x, img.max.x);
+    let (y0, y1) = span(e.y, img.min.y, img.max.y);
+    let r = Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)).intersect(view.shrink(1.0));
+    (room(band, img, view, e) && r.is_positive()).then_some(r)
+}
+
 /// Whether the handle for `e` fits in the view.
 fn room(band: f32, img: Rect, view: Rect, e: Edge) -> bool {
     let ok = |d: i8, lo: f32, hi: f32, vlo: f32, vhi: f32| match d {

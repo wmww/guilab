@@ -278,6 +278,12 @@ impl Editor {
         self.doc_id = None;
     }
 
+    /// Drops every texture (the host moved to a new egui context, e.g. its window was
+    /// recreated: the old context's texture ids mean nothing there).
+    pub fn forget_textures(&mut self) {
+        self.textures = Default::default();
+    }
+
     /// Notes the doc shown now. State about another doc's elements is dropped; a doc
     /// arriving where there was none (after `begin`) keeps what waits for it.
     fn sync_doc(&mut self, id: Option<DocId>) {

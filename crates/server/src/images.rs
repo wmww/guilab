@@ -10,7 +10,7 @@ use std::{
 
 use guilab_compositor::Session;
 use guilab_image::{
-    Asset, AssetId, Body, Element, Fonts, Group, IRect, Image, ImageId, Kind, LoadError, Made, MakeReq, NoAssets, Pt, Raster, Rect, RenderOpts, Store,
+    Asset, AssetId, Body, Doc, Element, Fonts, Group, IRect, Image, ImageId, Kind, LoadError, Made, MakeReq, NoAssets, Pt, Raster, Rect, RenderOpts, Store,
     format::{self, ListOpts},
     load_file,
 };
@@ -168,24 +168,28 @@ impl Images {
         self.store.image(id).map_err(|e| e.to_string())
     }
 
-    /// A human drawing from the current viewer: the frozen screenshot `base` plus marks.
-    pub fn drawing(&mut self, base: &str, marks: Vec<Element>, g: Group) -> Result<Arc<Image>, String> {
-        let base = self.get(base)?;
-        let mut body = (*base.body).clone();
-        body.elements.extend(marks);
-        let id = self.store.add_image(Some(base.id), body, Made::Human, g, &NoAssets).map_err(|e| e.to_string())?;
+    /// A viewer draft frozen into a new image (`Made::Human`). The doc carries the assets it
+    /// uses, so assets the store evicted meanwhile come back.
+    pub fn freeze(&mut self, parent: Option<ImageId>, doc: &Doc, g: Group) -> Result<Arc<Image>, String> {
+        let id = self.store.add_image(parent, doc.body().clone(), Made::Human, g, doc).map_err(|e| e.to_string())?;
         self.store.image(id).map_err(|e| e.to_string())
+    }
+
+    /// A picture file for the viewer's editor (File > Insert image): an asset with an id,
+    /// unreferenced until a draft using it is sent (the draft's doc keeps it meanwhile).
+    pub fn picture(&mut self, path: &Path, g: Group) -> Result<(AssetId, Arc<Asset>), String> {
+        let a = load_file(path).map_err(|e| match e {
+            LoadError::Rendering(id) if id != "draft" => format!("That file is a guilab rendering (of image {id}); open the image from the chat instead"),
+            LoadError::Rendering(_) => "That file is a guilab rendering; open the image from the chat instead".into(),
+            e => e.to_string(),
+        })?;
+        let id = self.store.add_asset(a, g);
+        Ok((id, self.store.get_asset(id).map_err(|e| e.to_string())?))
     }
 
     /// Images referenced by messages live as long as their session.
     pub fn hold(&mut self, img: &Image) {
         self.store.hold(img.id);
-    }
-
-    /// Text that wraps at `width` keeps it; text that doesn't wrap there doesn't need one.
-    pub fn text_width(&self, text: &str, size: f32, width: f32) -> Option<f32> {
-        let wrapped = self.fonts.layout(text, size, Some(width)).lines.len();
-        (wrapped > text.split('\n').count()).then_some(width)
     }
 }
 

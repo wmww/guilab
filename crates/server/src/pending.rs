@@ -182,6 +182,16 @@ impl Server {
                     busy.push(p.session.clone());
                     return Step::Wait;
                 }
+                // The human's chains stop when an agent takes the lock (the same rule as the
+                // viewer's input, `human::may_input`).
+                if chain.source() == guilab_compositor::InputSource::Human
+                    && let Err(e) = crate::human::may_input(&slot.lock, false)
+                {
+                    if *started {
+                        s.release_all(guilab_compositor::InputSource::Human);
+                    }
+                    return Step::Reply(Response::err(e));
+                }
                 slot.last_active = now;
                 *started = true;
                 match s.run_chain(chain) {
@@ -259,9 +269,10 @@ impl Server {
         }
     }
 
-    /// Fails the session's running and queued input chains.
+    /// Fails the session's running and queued agent input chains (the human's have no key;
+    /// lock changes stop them through `human::may_input` instead).
     pub(crate) fn abort_inputs(&mut self, name: &str, resp: &Response) {
-        let jobs: Vec<Pending> = self.pending.extract_if(.., |p| p.session == name && matches!(p.wait, Wait::Input { .. })).collect();
+        let jobs: Vec<Pending> = self.pending.extract_if(.., |p| p.session == name && p.key.is_some() && matches!(p.wait, Wait::Input { .. })).collect();
         for j in jobs {
             let r = self.attach(name, j.key.as_deref(), resp.clone());
             self.out.send(&j.stream, &r);
