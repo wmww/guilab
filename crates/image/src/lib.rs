@@ -19,7 +19,7 @@ pub use edit::{Doc, Edit, ElemKey};
 pub use id::{AssetId, IdError, IdKind, ImageId};
 pub use make::{MakeReq, make};
 pub use model::{Body, Color, Element, IRect, Image, Kind, Made, Pt, Rect, Size, pt};
-pub use render::{Region, RenderError, RenderOpts, Rendered, render, svg_pixmap};
+pub use render::{Layout, Region, RenderError, RenderOpts, Rendered, layout, render, svg_pixmap};
 pub use store::{Assets, Group, Limits, Lookup, Store, StoreError};
 pub use text::{Fonts, TextLayout};
 

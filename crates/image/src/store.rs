@@ -257,14 +257,16 @@ impl Store {
         }
     }
 
-    /// Keeps an image from expiring (counted). Unknown ids are ignored.
+    /// Keeps an image from expiring until its group is dropped (guilab: the session ends);
+    /// nothing releases holds earlier. Unknown ids are ignored.
     pub fn hold(&mut self, id: ImageId) {
         if let Some(e) = self.images.get_mut(&id) {
             e.holds += 1;
         }
     }
 
-    pub fn release(&mut self, id: ImageId) {
+    #[cfg(test)]
+    pub(crate) fn release(&mut self, id: ImageId) {
         if let Some(e) = self.images.get_mut(&id) {
             e.holds = e.holds.saturating_sub(1);
         }

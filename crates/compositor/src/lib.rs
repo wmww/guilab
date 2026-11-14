@@ -26,7 +26,6 @@ pub use actions::Chain;
 pub use clipboard::{ClipRead, Clipboard};
 pub use cursor::{AppCursor, CursorImage};
 pub use input::{InputEvent, InputSource};
-pub use frame::write_rgba_png;
 pub use settle::{Settle, ShotReady};
 pub use handlers::{SurfaceId, surface_id};
 pub use render::Gpu;

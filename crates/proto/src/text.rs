@@ -313,7 +313,39 @@ fn gesture(d: &EventData) -> String {
     }
 }
 
+/// The local UTC offset in seconds, now.
+pub fn local_offset() -> i64 {
+    // SAFETY: localtime_r writes only to `tm`.
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
+    }
+}
+
 impl Fmt {
+    /// Formats in the local offset.
+    pub fn local() -> Fmt {
+        Fmt { tz: local_offset() }
+    }
+
+    /// `YYYYMMDD-HHMMSS` in the configured offset, for file names.
+    pub fn file_stamp(&self, t: u64) -> String {
+        let s = (t / 1000) as i64 + self.tz;
+        let (days, secs) = (s.div_euclid(86400), s.rem_euclid(86400));
+        // Civil date from days since 1970-01-01 (Howard Hinnant's days_from_civil, inverted).
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+    }
+
     /// `HH:MM:SS` in the configured offset.
     pub fn clock(&self, t: u64) -> String {
         let s = ((t / 1000) as i64 + self.tz).rem_euclid(86400);
@@ -610,6 +642,9 @@ mod tests {
 
     #[test]
     fn delivery_text() {
+        assert_eq!(Fmt { tz: 0 }.file_stamp(0), "19700101-000000");
+        // 2024-02-29 23:59:59 UTC, shown at +01:00.
+        assert_eq!(Fmt { tz: 3600 }.file_stamp(1_709_251_199_000), "20240301-005959");
         let f = Fmt { tz: 3600 };
         let img = ImageRef {
             id: "w8dn".into(),

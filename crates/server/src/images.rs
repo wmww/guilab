@@ -48,7 +48,7 @@ impl Images {
     }
 
     fn opts(&self, points: bool) -> ListOpts {
-        ListOpts { points, utc_offset_s: crate::tz_offset() as i32 }
+        ListOpts { points, utc_offset_s: guilab_proto::text::local_offset() as i32 }
     }
 
     /// A screenshot of the session's output as a new image (with `crop`, if any).
@@ -112,13 +112,14 @@ impl Images {
     /// Renders to `out`, or to `dir/img/<id>[-c..][-m..][-nomarks].png` (reused if there:
     /// images never change).
     pub fn render_file(&self, img: &Image, opts: &RenderOpts, dir: &Path, out: Option<&Path>) -> Result<RenderInfo, String> {
-        let r = guilab_image::render(&img.body, &self.store, &self.fonts, opts).map_err(|e| format!("rendering {}: {e}", img.id))?;
+        let err = |e| format!("rendering {}: {e}", img.id);
+        let l = guilab_image::layout(&img.body, opts).map_err(err)?;
         let path = match out {
             Some(p) => p.to_path_buf(),
             None => {
                 let mut name = img.id.to_string();
-                if r.shows != img.body.shown() {
-                    let c = r.shows;
+                if l.shows != img.body.shown() {
+                    let c = l.shows;
                     name += &format!("-c{}_{}_{}x{}", c.x, c.y, c.w, c.h);
                 }
                 if let Some([w, h]) = opts.max {
@@ -132,12 +133,13 @@ impl Images {
                 d.join(format!("{name}.png"))
             }
         };
-        let [width, height] = r.size();
+        // Images never change, so a rendering in the session dir is reused.
         if out.is_some() || !path.exists() {
+            let r = guilab_image::render(&img.body, &self.store, &self.fonts, opts).map_err(err)?;
             write_atomic(&path, &r.png(Some(img.id)))?;
         }
-        let c = r.shows;
-        Ok(RenderInfo { path, width, height, shows: [c.x, c.y, c.w as i32, c.h as i32], zoom: r.zoom })
+        let c = l.shows;
+        Ok(RenderInfo { path, width: l.size[0], height: l.size[1], shows: [c.x, c.y, c.w as i32, c.h as i32], zoom: l.zoom })
     }
 
     pub fn make(&mut self, req: &MakeReq, g: Group) -> Result<ImageId, String> {

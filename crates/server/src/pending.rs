@@ -13,7 +13,10 @@ use std::{
 
 use guilab_compositor::{Chain, XState};
 use guilab_image::RenderOpts;
-use guilab_proto::{ProcInfo, Response, ShotInfo, Tiers, events::PollInfo};
+use guilab_proto::{
+    ProcInfo, Response, ShotInfo,
+    events::{PollInfo, ResolvedTiers},
+};
 
 use crate::{Server, requests::read_messages};
 
@@ -38,7 +41,7 @@ pub(crate) enum Wait {
     /// `new -x` waiting for Xwayland.
     New { deadline: Instant },
     /// `poll` waiting for a wake event, or streaming them (`follow`).
-    Poll { deadline: Option<Instant>, tiers: Tiers, follow: bool, watch_from: u64 },
+    Poll { deadline: Option<Instant>, tiers: ResolvedTiers, follow: bool, watch_from: u64 },
 }
 
 /// How a request handler answers.

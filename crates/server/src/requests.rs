@@ -294,9 +294,10 @@ impl Server {
                 }
             }
             SessionCmd::Poll { timeout_ms, follow, tiers } => {
-                if let Err(e) = tiers.check() {
-                    return Reply::Now(Response::err(e));
-                }
+                let tiers = match tiers.resolve() {
+                    Ok(t) => t,
+                    Err(e) => return Reply::Now(Response::err(e)),
+                };
                 let pending = s.log.has_wake(key, &tiers);
                 // Waiting for the human while marked working would leave them waiting too.
                 if !follow && !pending && timeout_ms != Some(0) && slot.working.is_some() {
@@ -354,7 +355,7 @@ impl Server {
             SessionCmd::Done { message, images } => {
                 // Answering without reading what the human just said would ignore it.
                 if let Some(first) = s.log.unread().next() {
-                    let at = guilab_proto::text::Fmt { tz: crate::tz_offset() }.clock(first.t);
+                    let at = guilab_proto::text::Fmt::local().clock(first.t);
                     return Reply::Now(Response::err(format!(
                         "a human message arrived at {at} that you haven't read. Read it first: guilab poll (it returns at \
                          once), then finish with guilab done"

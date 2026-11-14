@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::events::{Delivery, Event, EventData, LogInfo, Tier, Tiers, Unread, now_ms};
+use crate::events::{Delivery, Event, EventData, LogInfo, ResolvedTiers, Tier, Unread, now_ms};
 
 fn is_message(e: &Event) -> bool {
     matches!(e.data, EventData::Message { .. })
@@ -117,7 +117,7 @@ impl EventLog {
     }
 
     /// Non-log events from seq `from` on that `key`'s own commands didn't cause.
-    fn visible<'a>(&'a self, key: &'a str, tiers: &'a Tiers, from: u64) -> impl Iterator<Item = (&'a Event, Tier)> + 'a {
+    fn visible<'a>(&'a self, key: &'a str, tiers: &'a ResolvedTiers, from: u64) -> impl Iterator<Item = (&'a Event, Tier)> + 'a {
         self.from_seq(from)
             .filter(move |e| e.by.as_deref() != Some(key))
             .map(move |e| (e, tiers.tier(&e.data)))
@@ -131,13 +131,13 @@ impl EventLog {
 
     /// First wake event for `key` at or after `from` (read or not: a sibling poller may
     /// have just shown it).
-    pub fn first_wake(&self, key: &str, tiers: &Tiers, from: u64) -> Option<u64> {
+    pub fn first_wake(&self, key: &str, tiers: &ResolvedTiers, from: u64) -> Option<u64> {
         self.visible(key, tiers, from).find(|(_, t)| *t == Tier::Wake).map(|(e, _)| e.seq)
     }
 
     /// Whether a poll by `key` would return at once: an unread message, or another wake
     /// event after its cursor.
-    pub fn has_wake(&self, key: &str, tiers: &Tiers) -> bool {
+    pub fn has_wake(&self, key: &str, tiers: &ResolvedTiers) -> bool {
         self.unread().any(|e| tiers.tier(&e.data) == Tier::Wake)
             || self.visible(key, tiers, self.cursor(key)).any(|(e, t)| t == Tier::Wake && !is_message(e))
     }
@@ -146,7 +146,7 @@ impl EventLog {
     /// event another poller of the same key already got), and moves its cursor to the end.
     /// A `poll` delivery also includes every unread message and marks them read; a command
     /// reply leaves messages out and only reports them as [`Delivery::unread`].
-    pub fn deliver(&mut self, key: &str, tiers: &Tiers, from: Option<u64>, poll: bool) -> Delivery {
+    pub fn deliver(&mut self, key: &str, tiers: &ResolvedTiers, from: Option<u64>, poll: bool) -> Delivery {
         let c = self.cursor(key);
         let start = from.map_or(c, |f| f.min(c));
         let msgs_from = from.map_or(self.read, |f| f.min(self.read));
@@ -209,7 +209,7 @@ impl EventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::Tiers;
+    use crate::events::{ResolvedTiers, Tiers};
 
     fn motion(x: i32) -> EventData {
         EventData::Motion { path: vec![[x, 0, 0]] }
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn delivery() {
         let mut l = EventLog::default();
-        let t = Tiers::default();
+        let t = ResolvedTiers::default();
         l.push(EventData::Command { cmd: "tree".into() }, Some(ANON));
         l.push(EventData::AppStart { id: 1, argv: vec!["a".into()] }, Some(ANON));
         l.push(EventData::Title { id: 3, title: None }, None);
@@ -256,7 +256,7 @@ mod tests {
         l.push(EventData::AppStart { id: 2, argv: vec!["b".into()] }, Some(ANON));
         assert_eq!(l.deliver("/wt", &t, None, false).events.len(), 1);
         // Overrides.
-        let wake_window = Tiers { wake: vec!["window".into()], ..Default::default() };
+        let wake_window = Tiers { wake: vec!["window".into()], ..Default::default() }.resolve().unwrap();
         l.push(EventData::Title { id: 3, title: None }, None);
         assert!(l.has_wake("/wt", &wake_window) && !l.has_wake("/wt", &t));
     }
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn messages_stay_unread_until_polled() {
         let mut l = EventLog::default();
-        let t = Tiers::default();
+        let t = ResolvedTiers::default();
         let w = l.push(msg(), None);
         l.push(EventData::Title { id: 3, title: None }, None);
         // A command reply only counts it; the passive event is consumed.
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(l.deliver(ANON, &t, Some(w), true).events.len(), 1);
         // --passive message: no wake, but a poll still shows (and reads) it.
         l.push(msg(), None);
-        let p = Tiers { passive: vec!["message".into()], ..Default::default() };
+        let p = Tiers { passive: vec!["message".into()], ..Default::default() }.resolve().unwrap();
         assert!(!l.has_wake(ANON, &p));
         assert_eq!(l.deliver(ANON, &p, None, true).events[0].tier, Some(Tier::Passive));
         assert!(l.unread().next().is_none());

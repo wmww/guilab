@@ -137,8 +137,16 @@ pub fn region_rect(body: &Body, region: Region) -> Result<IRect, RenderError> {
     }
 }
 
-/// Renders a body. Text uses the bundled fonts only, so output is deterministic.
-pub fn render(body: &Body, assets: &dyn Assets, fonts: &Fonts, opts: &RenderOpts) -> Result<Rendered, RenderError> {
+/// What a rendering will show and its size, without rendering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layout {
+    pub shows: IRect,
+    /// Output pixels per canvas pixel.
+    pub zoom: f32,
+    pub size: [u32; 2],
+}
+
+pub fn layout(body: &Body, opts: &RenderOpts) -> Result<Layout, RenderError> {
     let shows = region_rect(body, opts.region)?;
     let mut zoom = 1.0f32;
     if let Some([mw, mh]) = opts.max {
@@ -150,6 +158,12 @@ pub fn render(body: &Body, assets: &dyn Assets, fonts: &Fonts, opts: &RenderOpts
     }
     let out_w = ((shows.w as f32 * zoom).round() as u32).clamp(1, MAX_SIDE);
     let out_h = ((shows.h as f32 * zoom).round() as u32).clamp(1, MAX_SIDE);
+    Ok(Layout { shows, zoom, size: [out_w, out_h] })
+}
+
+/// Renders a body. Text uses the bundled fonts only, so output is deterministic.
+pub fn render(body: &Body, assets: &dyn Assets, fonts: &Fonts, opts: &RenderOpts) -> Result<Rendered, RenderError> {
+    let Layout { shows, zoom, size: [out_w, out_h] } = layout(body, opts)?;
     let mut pm = Pixmap::new(out_w, out_h).expect("pixmap size");
     if let Some(bg) = body.background {
         let c = bg.0;

@@ -1,11 +1,7 @@
-//! Frame clock tick, settle detection, screenshots and output changes.
+//! Frame clock tick, screenshots and output changes.
 
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use smithay::{
     input::pointer::CursorImageStatus,
     backend::renderer::element::default_primary_scanout_output_compare,
@@ -168,16 +164,3 @@ impl Session {
     }
 }
 
-/// Writes opaque RGBA8 pixels as an RGB PNG (via a temp file, so readers never see half).
-pub fn write_rgba_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
-    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let tmp = path.with_extension("png.tmp");
-    let f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.set_compression(png::Compression::Fast);
-    enc.write_header()?.write_image_data(&rgb)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}

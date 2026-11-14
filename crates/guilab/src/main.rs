@@ -193,7 +193,7 @@ enum Cmd {
     /// lock revoked, an app exiting on its own, the session about to expire), prints it with
     /// everything else that happened since your last command, and exits. Returns at once if
     /// a human message is waiting. Blocking needs `guilab done` first.
-    #[command(after_help = POLL_HELP)]
+    #[command(after_help = poll_help())]
     Poll {
         /// Give up after SECS (exit code 2), still printing what happened meanwhile.
         #[arg(long, value_name = "SECS")]
@@ -259,18 +259,46 @@ enum Cmd {
     },
 }
 
-const POLL_HELP: &str = "\
-Event kinds: message revoke app_exit expiring (wake by default); motion button key scroll
-touch gesture window_map window_unmap title output app_start lock unlock (reported with
-the next wake or command); command agent_message work done screenshot (your own
-actions, only in `log`).
-Groups: input (motion button key scroll touch gesture), window, app, agent, all.
-An app ended by `guilab kill` doesn't wake you.
-
-Human messages stay unread until a poll prints them; other commands only say one is
+/// `poll --help` after the options; kinds, tiers and groups come from the event table.
+fn poll_help() -> String {
+    use guilab_proto::{Tier, events::{GROUPS, KINDS}};
+    let of = |t: Tier| KINDS.iter().filter(|(_, x)| *x == t).map(|(k, _)| *k).collect::<Vec<_>>().join(" ");
+    let groups: Vec<&str> = GROUPS.iter().map(|(g, _)| *g).filter(|g| *g != "input").collect();
+    let input = GROUPS.iter().find(|(g, _)| *g == "input").map(|(_, ks)| ks.join(" ")).unwrap_or_default();
+    let kinds = format!(
+        "Event kinds: {} (wake by default); {} (reported with the next wake or command); {} (your own actions, only in `log`).",
+        of(Tier::Wake),
+        of(Tier::Passive),
+        of(Tier::Log)
+    );
+    format!(
+        "{}\nGroups: input ({input}), {}, all.\nAn app ended by `guilab kill` doesn't wake you.\n\n{}",
+        wrap(&kinds, 90),
+        groups.join(", "),
+        "Human messages stay unread until a poll prints them; other commands only say one is
 waiting. A poll that hands you a message marks you working (\"read your message\"), so end
 with `guilab done`. Every guilab command also reports, on stderr, what else happened since
-your previous command. Each git worktree has its own \"last seen\" position per session.";
+your previous command. Each git worktree has its own \"last seen\" position per session."
+    )
+}
+
+/// Wraps text at `width` columns, on spaces.
+fn wrap(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut line = 0;
+    for w in text.split(' ') {
+        if line > 0 && line + 1 + w.len() > width {
+            out.push('\n');
+            line = 0;
+        } else if line > 0 {
+            out.push(' ');
+            line += 1;
+        }
+        out.push_str(w);
+        line += w.len();
+    }
+    out
+}
 
 #[derive(Subcommand)]
 enum DebugOp {
@@ -360,14 +388,6 @@ fn parse_since(s: &str, tz: i64) -> Result<u64, String> {
     Ok(now.saturating_sub(n * mult * 1000))
 }
 
-/// Local UTC offset in seconds.
-fn tz_offset() -> i64 {
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() { 0 } else { tm.tm_gmtoff }
-    }
-}
 
 fn abs(p: PathBuf) -> PathBuf {
     std::path::absolute(&p).unwrap_or(p)
@@ -387,7 +407,7 @@ fn main() {
 }
 
 fn real_main(cli: Cli) -> Result<(), String> {
-    let fmt = guilab_proto::text::Fmt { tz: tz_offset() };
+    let fmt = guilab_proto::text::Fmt::local();
     let cmd: Command = match cli.cmd {
         Cmd::Server { wait: true, .. } => return client::wait_server(),
         Cmd::Server { stop: false, idle_exit, show, .. } => {
@@ -435,7 +455,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
         Cmd::Input { actions } => SessionCmd::Input { actions: guilab_proto::input::parse(&actions)? }.into(),
         Cmd::Poll { timeout, follow, wake, passive } => {
             let tiers = guilab_proto::Tiers { wake, passive };
-            tiers.check()?;
+            tiers.resolve()?;
             SessionCmd::Poll { timeout_ms: timeout.map(|s| (s * 1000.0) as u64), follow, tiers }.into()
         }
         Cmd::Work { status, message, image } => SessionCmd::Work { status, message, images: image.iter().map(|i| image_arg(i)).collect() }.into(),

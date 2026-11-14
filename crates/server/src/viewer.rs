@@ -611,7 +611,7 @@ pub(crate) fn insert_channel(handle: &calloop::LoopHandle<'static, Server>) -> a
 /// Feed items for the log's messages (both ways), agent commands and status changes from
 /// seq `next` on (the newest [`FEED_BACKLOG`] when the feed is new).
 fn feed_items(log: &guilab_proto::log::EventLog, next: u64, images: &Images) -> Vec<FeedItem> {
-    let fmt = Fmt { tz: crate::tz_offset() };
+    let fmt = Fmt::local();
     let wanted = |e: &&guilab_proto::Event| {
         matches!(
             e.data,
@@ -683,7 +683,7 @@ fn element(images: &Images, m: &markup::mark::Mark, scale: f32) -> guilab_image:
 /// and writes the PNG. Tells the human how it went via `notices`.
 fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let spawned = std::thread::Builder::new().name("save-dialog".into()).spawn(move || {
-        let stamp = chrono_like_stamp();
+        let stamp = Fmt::local().file_stamp(guilab_proto::events::now_ms());
         let mut dialog = rfd::FileDialog::new().set_title("Save screenshot").set_file_name(format!("{session}-{stamp}.png")).add_filter("PNG image", &["png"]);
         if let Some(dir) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures")).filter(|d| d.is_dir()) {
             dialog = dialog.set_directory(dir);
@@ -692,7 +692,7 @@ fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::syn
         if path.extension().is_none() {
             path.set_extension("png");
         }
-        let msg = match guilab_compositor::write_rgba_png(&path, w, h, &rgba) {
+        let msg = match write_rgb_png(&path, w, h, &rgba) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Couldn't save: {e:#}"),
         };
@@ -705,11 +705,17 @@ fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::syn
     }
 }
 
-/// Local time as YYYYMMDD-HHMMSS, for default file names.
-fn chrono_like_stamp() -> String {
-    let t = rustix::time::clock_gettime(rustix::time::ClockId::Realtime).tv_sec as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: localtime_r writes only to `tm`.
-    unsafe { libc::localtime_r(&t, &mut tm) };
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+/// Writes RGBA pixels as an RGB PNG (atomically).
+fn write_rgb_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let tmp = path.with_extension("png.tmp");
+    let f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    enc.write_header()?.write_image_data(&rgb)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }

@@ -14,7 +14,6 @@ guilab-proto.workspace = true
 smithay.workspace = true
 tracing.workspace = true
 rustix.workspace = true
-png.workspace = true
 libc.workspace = true
 anyhow.workspace = true
 xcursor = "0.3"

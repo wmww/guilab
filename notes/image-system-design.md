@@ -84,7 +84,7 @@ impl Store {
     pub fn lookup(&self, s: &str) -> Result<Arc<Image>, Lookup>;     // + Lookup::Id(IdError) for malformed/other-kind ids
     pub fn get_asset(&self, id: AssetId) -> Result<Arc<Asset>, Lookup>; pub fn status(&self, id: ImageId) -> Result<(), Lookup>;
     pub fn parent_note(&self, img: &Image) -> Option<&'static str>;  // "your screenshot" | "screenshot" | "expired"
-    pub fn hold(&mut self, id: ImageId); pub fn release(&mut self, id: ImageId);
+    pub fn hold(&mut self, id: ImageId);   // held until the group is dropped (no release)
     pub fn sweep(&mut self, now: Instant) -> usize;                  // expiry + budget, returns bytes freed
     pub fn drop_group(&mut self, g: Group);                          // session end
 }

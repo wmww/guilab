@@ -7,8 +7,8 @@
 //!
 //! Human messages are special: they stay unread until a poll shows them (see `log.rs`).
 //!
-//! Defaults come from [`default_tier`]; `poll --wake/--passive` override them by kind or
-//! group name ([`KINDS`], [`GROUPS`]).
+//! Defaults come from [`KINDS`] (via [`default_tier`]); `poll --wake/--passive` override
+//! them by kind or group name ([`GROUPS`]), resolved once per request ([`ResolvedTiers`]).
 
 use std::path::PathBuf;
 
@@ -184,20 +184,42 @@ pub enum EventData {
     Expiring { secs: u64 },
 }
 
-/// Every kind name, as used by `--wake`, `--passive` and `log --kind`.
-pub const KINDS: &[&str] = &[
-    "command", "agent_message", "work", "done", "message", "motion", "button", "key", "scroll", "touch", "gesture", "app_start", "app_exit",
-    "window_map", "window_unmap", "title", "output", "lock", "unlock", "revoke", "screenshot", "image_made",
-    "expiring",
+/// Every kind name (as used by `--wake`, `--passive` and `log --kind`) with its default
+/// tier. The one table: `default_tier`, `expand_kinds` and the CLI's `poll --help` read it.
+pub const KINDS: &[(&str, Tier)] = &[
+    ("message", Tier::Wake),
+    ("revoke", Tier::Wake),
+    // Passive after `guilab kill` (see `default_tier`).
+    ("app_exit", Tier::Wake),
+    ("expiring", Tier::Wake),
+    ("motion", Tier::Passive),
+    ("button", Tier::Passive),
+    ("key", Tier::Passive),
+    ("scroll", Tier::Passive),
+    ("touch", Tier::Passive),
+    ("gesture", Tier::Passive),
+    ("window_map", Tier::Passive),
+    ("window_unmap", Tier::Passive),
+    ("title", Tier::Passive),
+    ("output", Tier::Passive),
+    ("app_start", Tier::Passive),
+    ("lock", Tier::Passive),
+    ("unlock", Tier::Passive),
+    // The agent's own actions.
+    ("command", Tier::Log),
+    ("agent_message", Tier::Log),
+    ("work", Tier::Log),
+    ("done", Tier::Log),
+    ("screenshot", Tier::Log),
+    ("image_made", Tier::Log),
 ];
 
-/// Group names, each standing for several kinds.
+/// Group names, each standing for several kinds (plus `all`).
 pub const GROUPS: &[(&str, &[&str])] = &[
     ("input", &["motion", "button", "key", "scroll", "touch", "gesture"]),
     ("window", &["window_map", "window_unmap", "title"]),
     ("app", &["app_start", "app_exit"]),
     ("agent", &["command", "agent_message", "work", "done", "screenshot", "image_made"]),
-    ("all", KINDS),
 ];
 
 impl EventData {
@@ -242,39 +264,30 @@ impl EventData {
     }
 }
 
-/// Default tiers from the design: wake on human messages, a revoked lock, apps exiting on
-/// their own and imminent expiry; the client's own actions are log-only.
+/// Default tiers from the design ([`KINDS`]): wake on human messages, a revoked lock, apps
+/// exiting on their own and imminent expiry; the client's own actions are log-only.
 pub fn default_tier(d: &EventData) -> Tier {
-    match d {
-        EventData::Message { .. } | EventData::Revoke | EventData::Expiring { .. } => Tier::Wake,
-        EventData::AppExit { killed, .. } => {
-            if *killed {
-                Tier::Passive
-            } else {
-                Tier::Wake
-            }
-        }
-        EventData::Command { .. }
-        | EventData::AgentMessage { .. }
-        | EventData::Work { .. }
-        | EventData::Done
-        | EventData::Screenshot { .. }
-        | EventData::ImageMade { .. } => Tier::Log,
-        _ => Tier::Passive,
+    if let EventData::AppExit { killed: true, .. } = d {
+        return Tier::Passive;
     }
+    let k = d.kind();
+    KINDS.iter().find(|(n, _)| *n == k).map(|(_, t)| *t).expect("every kind is in KINDS (tested)")
 }
 
 /// Expands kind/group names; errors name the valid ones.
 pub fn expand_kinds(names: &[String]) -> Result<Vec<&'static str>, String> {
     let mut out = Vec::new();
     for n in names.iter().flat_map(|n| n.split(',')).map(str::trim).filter(|n| !n.is_empty()) {
-        if let Some(k) = KINDS.iter().find(|k| **k == n) {
+        if let Some((k, _)) = KINDS.iter().find(|(k, _)| *k == n) {
             out.push(*k);
+        } else if n == "all" {
+            out.extend(KINDS.iter().map(|(k, _)| *k));
         } else if let Some((_, ks)) = GROUPS.iter().find(|(g, _)| *g == n) {
             out.extend_from_slice(ks);
         } else {
+            let kinds: Vec<&str> = KINDS.iter().map(|(k, _)| *k).collect();
             let groups: Vec<&str> = GROUPS.iter().map(|(g, _)| *g).collect();
-            return Err(format!("unknown event kind '{n}'. Kinds: {}. Groups: {}", KINDS.join(" "), groups.join(" ")));
+            return Err(format!("unknown event kind '{n}'. Kinds: {}. Groups: {} all", kinds.join(" "), groups.join(" ")));
         }
     }
     Ok(out)
@@ -290,21 +303,30 @@ pub struct Tiers {
 }
 
 impl Tiers {
-    pub fn check(&self) -> Result<(), String> {
-        let w = expand_kinds(&self.wake)?;
-        let p = expand_kinds(&self.passive)?;
-        if let Some(k) = w.iter().find(|k| p.contains(k)) {
+    /// Checks the names once, for the log to use per event.
+    pub fn resolve(&self) -> Result<ResolvedTiers, String> {
+        let wake = expand_kinds(&self.wake)?;
+        let passive = expand_kinds(&self.passive)?;
+        if let Some(k) = wake.iter().find(|k| passive.contains(k)) {
             return Err(format!("'{k}' is in both --wake and --passive"));
         }
-        Ok(())
+        Ok(ResolvedTiers { wake, passive })
     }
+}
 
+/// [`Tiers`] as kind names; the default is no overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolvedTiers {
+    wake: Vec<&'static str>,
+    passive: Vec<&'static str>,
+}
+
+impl ResolvedTiers {
     pub fn tier(&self, d: &EventData) -> Tier {
         let k = d.kind();
-        let has = |l: &[String]| expand_kinds(l).is_ok_and(|v| v.contains(&k));
-        if has(&self.wake) {
+        if self.wake.contains(&k) {
             Tier::Wake
-        } else if has(&self.passive) {
+        } else if self.passive.contains(&k) {
             Tier::Passive
         } else {
             default_tier(d)
@@ -369,13 +391,72 @@ mod tests {
         let key = EventData::Key { key: "a".into(), pressed: true, text: Some("a".into()) };
         assert_eq!(default_tier(&msg), Tier::Wake);
         assert_eq!(default_tier(&key), Tier::Passive);
-        let t = Tiers { wake: vec!["input".into()], passive: vec!["message".into()] };
-        assert!(t.check().is_ok());
+        let t = Tiers { wake: vec!["input".into()], passive: vec!["message".into()] }.resolve().unwrap();
         assert_eq!(t.tier(&key), Tier::Wake);
         assert_eq!(t.tier(&msg), Tier::Passive);
-        assert!(Tiers { wake: vec!["key".into()], passive: vec!["input".into()] }.check().is_err());
+        assert!(Tiers { wake: vec!["key".into()], passive: vec!["input".into()] }.resolve().is_err());
         assert!(expand_kinds(&["nope".into()]).unwrap_err().contains("Kinds:"));
         assert_eq!(expand_kinds(&["window,key".into()]).unwrap(), ["window_map", "window_unmap", "title", "key"]);
+    }
+
+    /// One event of every kind. The match makes a new variant fail to compile here, so it
+    /// gets a sample, and then the test below checks it's in `KINDS`.
+    fn samples() -> Vec<EventData> {
+        use EventData as E;
+        let all = vec![
+            E::Command { cmd: String::new() },
+            E::AgentMessage { text: String::new(), images: vec![] },
+            E::Work { status: String::new() },
+            E::Done,
+            E::Message { text: String::new(), images: vec![], screen: None },
+            E::Motion { path: vec![] },
+            E::Button { button: String::new(), pressed: true, x: 0, y: 0, window: None },
+            E::Key { key: String::new(), pressed: true, text: None },
+            E::Scroll { dx: 0.0, dy: 0.0, x: 0, y: 0, smooth: false },
+            E::Touch { finger: 0, down: true, x: 0, y: 0 },
+            E::Gesture { gesture: String::new(), fingers: 2, dx: 0.0, dy: 0.0, scale: None, cancelled: false },
+            E::AppStart { id: 1, argv: vec![] },
+            E::AppExit { id: 1, argv: vec![], code: None, signal: None, killed: false, log: PathBuf::new() },
+            E::WindowMap { id: 1, window: String::new(), app_id: None, title: None },
+            E::WindowUnmap { id: 1, title: None, by: None },
+            E::Title { id: 1, title: None },
+            E::Output { width: 1, height: 1, scale: 1.0, human: false },
+            E::Lock { forced: false },
+            E::Unlock,
+            E::Revoke,
+            E::Screenshot { image: String::new(), path: PathBuf::new() },
+            E::ImageMade { image: String::new() },
+            E::Expiring { secs: 1 },
+        ];
+        for d in &all {
+            match d {
+                E::Command { .. } | E::AgentMessage { .. } | E::Work { .. } | E::Done | E::Message { .. } | E::Motion { .. } => {}
+                E::Button { .. } | E::Key { .. } | E::Scroll { .. } | E::Touch { .. } | E::Gesture { .. } | E::AppStart { .. } => {}
+                E::AppExit { .. } | E::WindowMap { .. } | E::WindowUnmap { .. } | E::Title { .. } | E::Output { .. } => {}
+                E::Lock { .. } | E::Unlock | E::Revoke | E::Screenshot { .. } | E::ImageMade { .. } | E::Expiring { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn kinds_table() {
+        let all = samples();
+        let kinds: Vec<&str> = all.iter().map(|d| d.kind()).collect();
+        let table: Vec<&str> = KINDS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds.len(), table.len(), "KINDS has a stale or duplicate entry");
+        for d in &all {
+            assert!(table.contains(&d.kind()), "{} missing from KINDS", d.kind());
+            let group = |g: &str| GROUPS.iter().find(|(n, _)| *n == g).unwrap().1.contains(&d.kind());
+            assert_eq!(d.is_input(), group("input"), "{}", d.kind());
+            // The agent group is exactly the agent's own (log-only) actions.
+            assert_eq!(default_tier(d) == Tier::Log, group("agent"), "{}", d.kind());
+        }
+        for (_, ks) in GROUPS {
+            assert!(ks.iter().all(|k| table.contains(k)), "{ks:?}");
+        }
+        let killed = EventData::AppExit { id: 1, argv: vec![], code: None, signal: Some(15), killed: true, log: PathBuf::new() };
+        assert_eq!(default_tier(&killed), Tier::Passive);
     }
 
     #[test]
