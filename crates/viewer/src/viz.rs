@@ -58,9 +58,7 @@ impl Overlay {
                     let p = pos2(*x as f32, *y as f32);
                     self.pointer = Some((p, t, agent, held));
                     self.left = None;
-                    if agent || held {
-                        self.trail.push_back((p, t, agent));
-                    }
+                    self.trail.push_back((p, t, agent));
                 }
                 VizKind::Button { pressed } => {
                     if let Some(ptr) = &mut self.pointer {
@@ -139,14 +137,24 @@ impl Overlay {
             animating = true;
         }
         // Pointer glow: soft concentric discs, until the pointer leaves; a ring while a
-        // button is held.
+        // button is held. Smooth scrolling stretches it into a droplet whose tail trails
+        // opposite the scroll direction, longer the faster it scrolls.
         if let Some((p, _, agent, down)) = self.pointer {
             let f = self.left.map_or(1.0, |t| 1.0 - (now - t) / LEAVE);
+            let mut tail = egui::Vec2::ZERO;
+            if let Some(&(last, _, _)) = self.smooth.back() {
+                let window = 0.15;
+                let sum = self.smooth.iter().filter(|e| last - e.0 < window).fold(vec2(0.0, 0.0), |s, e| s + e.1);
+                let k = (1.0 - (now - last) / SCROLL).max(0.0) as f32;
+                // Session px/s -> screen points of tail.
+                tail = -sum / window as f32 * 0.15 * (img.width() / size.0) * k;
+                animating = true;
+            }
             if f > 0.0 {
                 let c = if agent { AGENT } else { HUMAN };
                 let at = to_screen(p);
                 for r in [16.0, 12.0, 8.0, 5.0] {
-                    painter.circle_filled(at, r, tint(c, f * 0.12));
+                    droplet(&painter, at, r, tail * (r / 16.0), tint(c, f * 0.12));
                 }
                 if down {
                     painter.circle_stroke(at, 9.0, Stroke::new(2.0, tint(c, 0.8)));
@@ -166,22 +174,6 @@ impl Overlay {
                 let n = vec2(-dir.y, dir.x) * 5.0;
                 painter.line_segment([tip - *dir * 5.0 + n, tip], Stroke::new(2.0, c));
                 painter.line_segment([tip - *dir * 5.0 - n, tip], Stroke::new(2.0, c));
-                animating = true;
-            }
-            // Smooth scrolling: a streak from the pointer, as long as recent motion.
-            if !self.smooth.is_empty() {
-                // Length from the motion just before the latest event; fades from then.
-                let &(last, _, by_agent) = self.smooth.back().unwrap();
-                let sum = self.smooth.iter().filter(|e| last - e.0 < 0.2).fold(vec2(0.0, 0.0), |s, e| s + e.1);
-                let f = 1.0 - (now - last) / SCROLL;
-                let len = sum.length().min(40.0);
-                if len > 1.0 && f > 0.0 {
-                    let dir = sum / sum.length();
-                    let at = to_screen(p) + dir * 12.0;
-                    let c = tint(if by_agent { AGENT } else { HUMAN }, f * 0.7);
-                    painter.line_segment([at, at + dir * len], Stroke::new(3.0, c));
-                    painter.circle_filled(at + dir * len, 2.5, c);
-                }
                 animating = true;
             }
         }
@@ -270,4 +262,26 @@ fn key_icon(p: &egui::Painter, r: Rect, key: &str, c: Color32) {
             head(pos2(cx, cy + d * 7.0), vec2(0.0, d));
         }
     }
+}
+
+/// A disc of radius `r` at `c`, stretched into a teardrop whose tip is `tail` beyond the
+/// circle (a plain disc when `tail` is short).
+fn droplet(p: &egui::Painter, c: Pos2, r: f32, tail: egui::Vec2, color: Color32) {
+    let len = tail.length();
+    if len < 1.0 {
+        p.circle_filled(c, r, color);
+        return;
+    }
+    let u = tail / len;
+    let d = r + len;
+    // Tangents from the tip touch the circle at ±θ from `u`; the arc goes round the back.
+    let theta = (r / d).acos();
+    let mut pts = vec![c + u * d];
+    let steps = 24;
+    for i in 0..=steps {
+        let a = theta + (std::f32::consts::TAU - 2.0 * theta) * i as f32 / steps as f32;
+        let (sin, cos) = a.sin_cos();
+        pts.push(c + vec2(u.x * cos - u.y * sin, u.x * sin + u.y * cos) * r);
+    }
+    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
