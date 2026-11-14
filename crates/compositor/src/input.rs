@@ -36,6 +36,9 @@ pub enum InputSource {
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     PointerMotion { pos: Point<f64, Logical> },
+    /// The pointer left the output (e.g. the viewer's pointer left the app's image): clients
+    /// get a leave, and the next motion an enter.
+    PointerLeave,
     /// Linux button code (BTN_LEFT = 0x110).
     PointerButton { button: u32, pressed: bool },
     /// `steps` = wheel notches (discrete), else smooth.
@@ -211,6 +214,16 @@ impl Session {
                 if ptr.current_location() != pos {
                     ptr.motion(self, under, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
                 }
+                ptr.frame(self);
+            }
+            InputEvent::PointerLeave => {
+                let Some(ptr) = self.seat.get_pointer() else { return };
+                // A grab (a drag, a popup menu) keeps the pointer.
+                if ptr.is_grabbed() {
+                    return;
+                }
+                let location = ptr.current_location();
+                ptr.motion(self, None, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
                 ptr.frame(self);
             }
             InputEvent::PointerButton { button, pressed } => {

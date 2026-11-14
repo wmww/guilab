@@ -105,6 +105,9 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     let m = mapping(&h, &t, &v);
     click_button(&h, &t, &m, &log);
     wait_log(&log, "clicked 1", 5);
+    // Moving off the image gives the app a pointer leave (host 600,780: the chat box).
+    h.input(&t, &["move", "600", "780"]);
+    wait_log(&log, "pointer left", 5);
 
     // Locked by an agent: the human's clicks are dropped, until shared.
     let vt = v.lock();

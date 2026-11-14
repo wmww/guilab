@@ -114,6 +114,9 @@ def activate(app):
     keys = Gtk.EventControllerKey()
     keys.connect("key-pressed", lambda c, kv, code, st: out("key", Gdk.keyval_name(kv), code, int(st)) and False)
     win.add_controller(keys)
+    hover = Gtk.EventControllerMotion()
+    hover.connect("leave", lambda c: out("pointer left"))
+    win.add_controller(hover)
 
     win.set_child(box)
     win.present()

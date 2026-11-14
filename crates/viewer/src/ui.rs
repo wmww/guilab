@@ -45,6 +45,8 @@ impl SessionView<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     Motion { x: f64, y: f64 },
+    /// The pointer left the app's image (or input to it stopped): apps get a pointer leave.
+    Leave,
     /// Linux button code (BTN_LEFT = 0x110).
     Button { button: u32, pressed: bool },
     /// `steps`: wheel notches (None = smooth, e.g. touchpad). `stop`: fingers lifted.
@@ -129,6 +131,8 @@ pub struct ViewerUi {
     pixel_ratio: f32,
     /// Pointer position as of the input processed so far.
     pointer: Option<Pos2>,
+    /// The session our pointer motion last went to and that hasn't had a leave since.
+    pointer_in: Option<String>,
 }
 
 fn linux_button(b: PointerButton) -> u32 {
@@ -247,6 +251,9 @@ impl ViewerUi {
             self.image_rect = None;
             return out;
         };
+        if let Some(prev) = self.pointer_in.take_if(|p| p != s.name) {
+            out.push(Action::Input { session: prev, input: Input::Leave });
+        }
         // Taken out of the map while drawing, so `self` stays free to borrow.
         self.per(s.name, s.key);
         let mut p = self.sessions.remove(s.name).unwrap();
@@ -363,7 +370,12 @@ impl ViewerUi {
             };
             match ev {
                 Event::PointerMoved(p) | Event::PointerButton { pos: p, .. } => self.pointer = Some(p),
-                Event::PointerGone => self.pointer = None,
+                Event::PointerGone => {
+                    self.pointer = None;
+                    if self.held_buttons.is_empty() && self.pointer_in.take().is_some() {
+                        send(out, Input::Leave);
+                    }
+                }
                 _ => {}
             }
             match ev {
@@ -389,6 +401,9 @@ impl ViewerUi {
                     if grabbed || (to_app && ours(p) && img.contains(p)) {
                         let (x, y) = to_session(img, p);
                         send(out, Input::Motion { x, y });
+                        self.pointer_in = Some(s.name.to_string());
+                    } else if self.pointer_in.take().is_some() {
+                        send(out, Input::Leave);
                     }
                 }
                 Event::PointerButton { pos, button, pressed, .. } => {
@@ -480,6 +495,11 @@ impl ViewerUi {
                 }
                 _ => {}
             }
+        }
+
+        // A drawing tool or the lock took over while the pointer was in the app.
+        if !to_app && self.held_buttons.is_empty() && self.pointer_in.take().is_some() {
+            send(out, Input::Leave);
         }
 
         // Clamp the pan so some of the image stays in view.

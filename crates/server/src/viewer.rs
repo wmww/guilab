@@ -104,6 +104,7 @@ fn to_event(s: &Session, input: Input) -> InputEvent {
     let scale = s.output.current_scale().fractional_scale();
     match input {
         Input::Motion { x, y } => InputEvent::PointerMotion { pos: (x / scale, y / scale).into() },
+        Input::Leave => InputEvent::PointerLeave,
         Input::Button { button, pressed } => InputEvent::PointerButton { button, pressed },
         Input::Scroll { dx, dy, steps, stop } => InputEvent::PointerAxis {
             source: if steps.is_some() { AxisSource::Wheel } else { AxisSource::Finger },
