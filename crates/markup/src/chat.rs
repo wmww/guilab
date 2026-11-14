@@ -114,7 +114,7 @@ impl Chat {
                                 .id(draft_id)
                                 // A custom frame replaces `.margin()`, so the padding goes here.
                                 .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 6)))
-                                .hint_text("Message the agent")
+                                .hint_text("What's next?")
                                 .desired_rows(1)
                                 .min_size(vec2(0.0, button))
                                 .desired_width(ui.available_width() - button - 8.0);
