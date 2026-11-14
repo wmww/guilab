@@ -151,7 +151,7 @@ impl Files<'_> {
             Source::Id(id) => Ok((*id, self.store.get_asset(*id).map_err(|e| e.to_string())?)),
             Source::Path(p) => self.path(p),
             Source::Inline(text) => {
-                let doc = SvgDoc::parse(text, Origin::File { name: INLINE.into() }, Some(self.cwd))?;
+                let doc = SvgDoc::parse(text, Origin::File { name: INLINE.into() }, Some(self.cwd)).map_err(|e| e.to_string())?;
                 let id = self.store.add_asset(Asset::Svg(Box::new(doc)), self.group);
                 Ok((id, self.store.get_asset(id).unwrap()))
             }

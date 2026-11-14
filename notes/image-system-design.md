@@ -99,7 +99,8 @@ impl Assets for Store {}
 
 ### Invariant: renderings never become editable
 - `render()` returns `Rendered`, which can be read as pixels, encoded as PNG or uploaded as a texture. There's no `Rendered → Raster`.
-- Only two functions create a `Raster`. `Raster::from_capture(w, h, rgba, at_ms)` is called from exactly one place in guilab: the server's capture of a live session frame (keep it that way in review; test fixtures and the editor demo's synthetic screenshots are the only other callers). `asset::load_file(path)` is the other.
+- Pixels enter only two ways. `Raster::from_live_frame(w, h, rgba, at_ms)` is called from exactly one place: the server's capture of a live session frame (`tests::live_frame_callers` scans `crates/` and allows only `server/src/images.rs` and the image crate's own tests). Everything else (files, paste/drop, test and demo pictures) goes through `asset::load_file(path)` or `asset::load_bytes(data, name)`, which refuse renderings.
+- SVGs can't smuggle one in: `SvgDoc::parse` gives usvg its own `<image>` resolvers, which check linked files and data URLs (nested SVGs included) for the mark and refuse the whole SVG with the same `LoadError::Rendering`. Without a `dir`, relative links don't resolve.
 - Every PNG that guilab writes from a rendering (the `image`/`screenshot`/`make` outputs, the viewer's File → Save) gets a `tEXt` chunk `guilab-render=<image id>`. `Rendered::png(Option<ImageId>)` is the only PNG encoder and always marks (`draft` without an id), so there's no unmarked path. `load_file` refuses such files (chunk found by a raw chunk scan) with `LoadError::Rendering(id)`, and the CLI says "that file is a rendering of image k3f9; use --from k3f9". Tools outside guilab that strip the chunk (GIMP, ImageMagick) are the allowed way around it, as the spec says.
 - The editor only opens `Body`s built from store images or drafts. Thumbnails and the main view are always `Rendered`/textures, never inputs.
 
@@ -347,7 +348,7 @@ When a doc is open or a drawing tool is selected, the editor owns primary-button
 
 ## Server glue (`server/src/images.rs`, built)
 - `Server.images: Images { store, fonts, last_capture }`, one `Group` per session (`Slot::group`). The tick sweeps once a second; `end_session` drops the group.
-- `capture(session, group, cursor, by_agent, crop) -> ImageId`: `Session::capture` (opaque RGBA, cursor drawn in if asked), `Raster::from_capture`, a screenshot body. While the session's `frame_seq` and size are unchanged (and no cursor), the last raster is reused. Agent `screenshot`, the viewer's `Freeze`, `debug message --draw` and the message `screen` all use it.
+- `capture(session, group, cursor, by_agent, crop) -> ImageId`: `Session::capture` (opaque RGBA, cursor drawn in if asked), `Raster::from_live_frame`, a screenshot body. While the session's `frame_seq` and size are unchanged (and no cursor), the last raster is reused. Agent `screenshot`, the viewer's `Freeze`, `debug message --draw` and the message `screen` all use it.
 - `render_file(img, opts, dir, out)`: `s/<session>/img/<id>[-c<x>_<y>_<w>x<h>][-m<w>x<h>][-nomarks].png` (render mark included), reused if it exists; `-o PATH` always writes.
 - `make` (core `make`, `Made::Agent`), `attach(spec)` (an id, or an absolute path: `load_file` → one picture element at natural size; a rendering is refused with "attach the image itself: --image ID"), `drawing(base, marks)` (viewer marks on a copy of the frozen base, `Made::Human`, parent = base), `image_ref` (listing snapshot + marks bbox).
 - Every image a message (either way) references is held until the session ends, and so is each `Freeze` base (the drawing may be sent much later; a discarded one stays held until session end, which is cheap thanks to raster reuse).

@@ -1,12 +1,13 @@
 //! Assets (rasters and SVGs) and loading them from files.
 //!
-//! Invariant: renderings never become rasters. Only `Raster::from_capture` (the server's
-//! capture of a live frame, and nothing else) and `load_file` make a `Raster`, and
-//! `load_file` refuses PNGs that guilab rendered (see `render::RENDER_MARK`).
+//! Invariant: renderings never become pictures. Pixels come in only through
+//! `Raster::from_live_frame` (the server's capture of a live frame; a test enforces its
+//! callers) and `load_file`/`load_bytes`, which refuse PNGs that guilab rendered (see
+//! `render::RENDER_MARK`), also when an SVG embeds one.
 
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use resvg::usvg;
 
@@ -77,9 +78,10 @@ impl fmt::Debug for Raster {
 }
 
 impl Raster {
-    /// From a live session frame (straight RGBA). Call only from the server's capture; any
-    /// other pixels must come in through `load_file`, which refuses renderings.
-    pub fn from_capture(w: u32, h: u32, rgba: Vec<u8>, at_ms: u64) -> Raster {
+    /// From a live session frame (straight RGBA). Only the server's capture may call this
+    /// (`tests::live_frame_callers` checks); any other pixels come in through `load_file` or
+    /// `load_bytes`, which refuse renderings.
+    pub fn from_live_frame(w: u32, h: u32, rgba: Vec<u8>, at_ms: u64) -> Raster {
         assert_eq!(rgba.len(), w as usize * h as usize * 4, "capture size");
         Raster::from_straight([w, h], rgba, Origin::Capture { at_ms })
     }
@@ -134,18 +136,46 @@ fn system_fonts() -> Arc<usvg::fontdb::Database> {
 }
 
 impl SvgDoc {
-    /// Parses SVG text. `xmlns` is added when missing. `dir` resolves relative `<image>` hrefs.
-    pub fn parse(text: &str, origin: Origin, dir: Option<&Path>) -> Result<SvgDoc, String> {
+    /// Parses SVG text. `xmlns` is added when missing. `dir` resolves relative `<image>` hrefs
+    /// (none: they don't resolve).
+    /// An `<image>` that is a guilab rendering (a linked file or a data URL, nested SVGs
+    /// included) refuses the whole SVG, like `load_file`.
+    pub fn parse(text: &str, origin: Origin, dir: Option<&Path>) -> Result<SvgDoc, LoadError> {
         let text = add_xmlns(text);
-        let mut opt = usvg::Options { resources_dir: dir.map(Path::to_path_buf), font_family: "sans-serif".into(), ..Default::default() };
+        // The resolvers can't fail the parse, so they note a rendering here.
+        let refused: Arc<Mutex<Option<String>>> = Arc::default();
+        let (r1, r2) = (refused.clone(), refused.clone());
+        let note = move |r: &Mutex<Option<String>>, data: &[u8]| match render_mark(data) {
+            Some(id) => {
+                r.lock().unwrap().get_or_insert(id);
+                true
+            }
+            None => false,
+        };
+        let (data_default, string_default) = (usvg::ImageHrefResolver::default_data_resolver(), usvg::ImageHrefResolver::default_string_resolver());
+        let image_href_resolver = usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |mime, data, opt| if note(&r1, &data) { None } else { data_default(mime, data, opt) }),
+            resolve_string: Box::new(move |href, opt| {
+                if opt.resources_dir.is_none() && Path::new(href).is_relative() {
+                    return None;
+                }
+                let marked = std::fs::read(opt.get_abs_path(Path::new(href))).is_ok_and(|d| note(&r2, &d));
+                if marked { None } else { string_default(href, opt) }
+            }),
+        };
+        let mut opt = usvg::Options { resources_dir: dir.map(Path::to_path_buf), font_family: "sans-serif".into(), image_href_resolver, ..Default::default() };
         if text.contains("<text") {
             opt.fontdb = system_fonts();
         }
-        let tree = usvg::Tree::from_str(&text, &opt).map_err(|e| format!("bad SVG: {e}"))?;
+        let tree = usvg::Tree::from_str(&text, &opt).map_err(|e| LoadError::Format(format!("bad SVG: {e}")));
+        if let Some(id) = refused.lock().unwrap().take() {
+            return Err(LoadError::Rendering(id));
+        }
+        let tree = tree?;
         let s = tree.size();
         let size = Size { w: s.width(), h: s.height() };
         if size.w > MAX_SIDE as f32 || size.h > MAX_SIDE as f32 {
-            return Err(format!("SVG size {}x{} is too big (at most {MAX_SIDE} px per side)", size.w, size.h));
+            return Err(LoadError::Format(format!("SVG size {}x{} is too big (at most {MAX_SIDE} px per side)", size.w, size.h)));
         }
         Ok(SvgDoc { text: text.into(), size, tree, origin })
     }
@@ -200,19 +230,33 @@ impl std::error::Error for LoadError {}
 pub fn load_file(path: &Path) -> Result<Asset, LoadError> {
     let data = std::fs::read(path).map_err(|e| LoadError::Io(format!("can't read {}: {e}", path.display())))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    load_data(&data, name, &path.display().to_string(), path.parent())
+}
+
+/// Loads PNG, JPEG or SVG bytes that have no path (pasted, dropped, made in memory), named
+/// `name` in listings. Refuses PNGs guilab rendered, like `load_file`. An SVG's relative
+/// `<image>` links don't resolve.
+pub fn load_bytes(data: &[u8], name: &str) -> Result<Asset, LoadError> {
+    load_data(data, name.to_string(), name, None)
+}
+
+fn load_data(data: &[u8], name: String, shown: &str, dir: Option<&Path>) -> Result<Asset, LoadError> {
     let origin = Origin::File { name };
-    let what = |e: String| LoadError::Format(format!("{}: {e}", path.display()));
+    let what = |e: String| LoadError::Format(format!("{shown}: {e}"));
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        if let Some(id) = render_mark(&data) {
+        if let Some(id) = render_mark(data) {
             return Err(LoadError::Rendering(id));
         }
-        decode_png(&data, origin).map(Asset::Raster).map_err(what)
+        decode_png(data, origin).map(Asset::Raster).map_err(what)
     } else if data.starts_with(&[0xff, 0xd8]) {
-        decode_jpeg(&data, origin).map(Asset::Raster).map_err(what)
-    } else if let Ok(text) = std::str::from_utf8(&data)
+        decode_jpeg(data, origin).map(Asset::Raster).map_err(what)
+    } else if let Ok(text) = std::str::from_utf8(data)
         && text.contains("<svg")
     {
-        SvgDoc::parse(text, origin, path.parent()).map(|d| Asset::Svg(Box::new(d))).map_err(what)
+        SvgDoc::parse(text, origin, dir).map(|d| Asset::Svg(Box::new(d))).map_err(|e| match e {
+            LoadError::Format(e) => what(e),
+            e => e,
+        })
     } else {
         Err(what("not a PNG, JPEG or SVG file".into()))
     }

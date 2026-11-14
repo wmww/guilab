@@ -26,7 +26,7 @@ fn capture(w: u32, h: u32) -> Raster {
             px.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 100, 255]);
         }
     }
-    Raster::from_capture(w, h, px, 50_690_000)
+    Raster::from_live_frame(w, h, px, 50_690_000)
 }
 
 fn screenshot(s: &mut Store, w: u32, h: u32, scale: f32) -> ImageId {
@@ -375,6 +375,9 @@ fn rendered_pngs_are_refused() {
     }
     let e = mk(&mut s, &req(None, &["raster ./refuse.png 0,0"])).unwrap_err();
     assert!(e.contains(&format!("rendering of image {id}; use --from {id}")), "{e}");
+    // Bytes without a file too.
+    assert!(matches!(load_bytes(&r.png(Some(id)), "pasted.png"), Err(LoadError::Rendering(_))));
+    assert_eq!(load_bytes(&strip_mark(&r.png(Some(id))), "pasted.png").unwrap().origin(), &Origin::File { name: "pasted.png".into() });
     // Drafts are marked too.
     put(&p, r.png(None)).unwrap();
     assert!(matches!(load_file(&p), Err(LoadError::Rendering(d)) if d == "draft"));
@@ -887,4 +890,68 @@ fn snapped_and_simplify() {
     assert_eq!(b.kind, Kind::Box(Rect::new(0.0, 1.0, 11.0, 3.0)));
     let pts = [pt(0.0, 0.0), pt(1.0, 0.2), pt(2.0, -0.3), pt(3.0, 0.0), pt(3.0, 4.0)];
     assert_eq!(geom::simplify(&pts, 0.5), vec![pt(0.0, 0.0), pt(3.0, 0.0), pt(3.0, 4.0)]);
+}
+
+fn base64(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// An SVG can't smuggle a guilab rendering in through `<image>`: a linked file, a data URL,
+/// or a data URL inside a nested SVG.
+#[test]
+fn svg_embedding_a_rendering_is_refused() {
+    let mut s = store();
+    let id = screenshot(&mut s, 20, 10, 1.0);
+    let marked = rend(&s, id, RenderOpts::default()).png(Some(id));
+    let dir = tmp();
+    put(dir.join("embed-marked.png"), &marked).unwrap();
+    let img = |href: &str| format!(r#"<svg width="20" height="10" xmlns:xlink="http://www.w3.org/1999/xlink"><image href="{href}" width="20" height="10"/></svg>"#);
+    let data = format!("data:image/png;base64,{}", base64(&marked));
+    let nested = format!("data:image/svg+xml;base64,{}", base64(img(&data).as_bytes()));
+    for (what, svg) in [("relative link", img("embed-marked.png")), ("absolute link", img(&dir.join("embed-marked.png").display().to_string())), ("data URL", img(&data)), ("nested", img(&nested))] {
+        match SvgDoc::parse(&svg, Origin::File { name: "t.svg".into() }, Some(&dir)) {
+            Err(e @ LoadError::Rendering(_)) => assert_eq!(e.to_string(), format!("that file is a rendering of image {id}; use --from {id}"), "{what}"),
+            o => panic!("{what}: {o:?}"),
+        }
+    }
+    // Through load_file and make too.
+    put(dir.join("embed.svg"), img("embed-marked.png")).unwrap();
+    assert!(matches!(load_file(&dir.join("embed.svg")), Err(LoadError::Rendering(_))));
+    let e = mk(&mut s, &req(None, &[&format!("svg {} 0,0", img("embed-marked.png"))])).unwrap_err();
+    assert!(e.contains("use --from"), "{e}");
+    // Unmarked pictures still embed.
+    put(dir.join("embed-plain.png"), strip_mark(&marked)).unwrap();
+    SvgDoc::parse(&img("embed-plain.png"), Origin::File { name: "t.svg".into() }, Some(&dir)).unwrap();
+}
+
+/// Only the server's live capture makes rasters from bare pixels; everything else goes
+/// through `load_file`/`load_bytes`, which refuse renderings.
+#[test]
+fn live_frame_callers() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let allowed = ["server/src/images.rs", "image/src/asset.rs", "image/src/tests.rs"];
+    let mut stack = vec![crates.clone()];
+    let mut found = Vec::new();
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let rel = p.strip_prefix(&crates).unwrap().to_string_lossy().into_owned();
+                if !allowed.contains(&rel.as_str()) && std::fs::read_to_string(&p).unwrap().contains("from_live_frame") {
+                    found.push(rel);
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "Raster::from_live_frame outside the server's capture: {found:?}");
 }

@@ -14,4 +14,4 @@ After phase 6, before or as part of `ui-toolkit-pass.md`. design.md: "Widgets ne
 - `send_button`'s disabled tooltip is guilab copy ("Type a message or draw something to send", widgets.rs:329). Take the tooltips as parameters.
 - `theme::install` installs only guilab's values (theme.rs:511). Add `install_with(ctx, dark: Theme, light: Theme)` so another app can supply tokens. App-specific groups (`me`/`agent`, `slot_*`, `crop_*`, `key_point*`, `overlay`) are fine as fields, but should be documented as "used by the editor/chat/viewer".
 - The editor toolbar always shows all `Tool::ALL`, including `Interact` labelled "Use the app" (editor/lib.rs:41). Let the host pass the tool list and the Interact label (a standalone image editor has no app).
-- `guilab_editor::demo` and `guilab_kit::headless` are public library modules. That's acceptable for test hosts, but `demo` exposes `Raster::from_capture` callers (see `image-invariant-holes.md`).
+- `guilab_editor::demo` and `guilab_kit::headless` are public library modules. That's acceptable for test hosts (the demo's pictures go through `load_bytes`).

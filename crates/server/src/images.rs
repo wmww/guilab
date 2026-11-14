@@ -65,7 +65,7 @@ impl Images {
             None => {
                 let (w, h, rgba) = s.capture(cursor).map_err(|e| format!("screenshot: {e:#}"))?;
                 // The only place a live frame becomes a raster (see guilab_image::asset).
-                let a = self.store.add_asset(Asset::Raster(Raster::from_capture(w, h, rgba, at_ms)), g);
+                let a = self.store.add_asset(Asset::Raster(Raster::from_live_frame(w, h, rgba, at_ms)), g);
                 if !cursor {
                     self.last_capture.insert(s.tag.clone(), (s.frame_seq, [w, h], a));
                 }

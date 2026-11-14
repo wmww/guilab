@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use egui::{Key, Modifiers, PointerButton, Ui, Vec2};
-use guilab_image::{Asset, AssetId, Body, Doc, Edit, Fonts, Group, IRect, Limits, Origin, Raster, Store, SvgDoc};
+use guilab_image::{Asset, AssetId, Body, Doc, Edit, Fonts, Group, IRect, Limits, Origin, Store, SvgDoc, load_bytes};
 use guilab_kit::History;
 
 use crate::{Canvas, CanvasOut, Editor, Xf};
@@ -31,7 +31,7 @@ impl DemoHost {
     /// A host with a synthetic `size` "app screenshot" at UI `scale`, no doc open yet.
     pub fn new(size: [u32; 2], scale: f32) -> DemoHost {
         let mut store = Store::new(Limits::default());
-        let id = store.add_asset(Asset::Raster(fake_app(size, scale)), Group(0));
+        let id = store.add_asset(fake_app(size, scale), Group(0));
         let live = (id, store.get_asset(id).unwrap());
         DemoHost {
             editor: Editor::new("demo-editor", Arc::new(Fonts::new())),
@@ -173,8 +173,18 @@ impl DemoHost {
     }
 }
 
+/// Straight RGBA pixels as a picture, through a PNG like any outside image (only the
+/// server's live capture makes rasters from bare pixels).
+fn picture(w: u32, h: u32, rgba: &[u8], name: &str) -> Asset {
+    let mut png = Vec::new();
+    let mut enc = png::Encoder::new(&mut png, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(rgba)).expect("encode PNG");
+    load_bytes(&png, name).expect("demo picture")
+}
+
 /// A synthetic app screenshot: window chrome, a sidebar, buttons and lines of "text".
-pub fn fake_app(size: [u32; 2], scale: f32) -> Raster {
+pub fn fake_app(size: [u32; 2], scale: f32) -> Asset {
     let [w, h] = size;
     let mut px = vec![0u8; (w * h * 4) as usize];
     let s = scale;
@@ -209,7 +219,7 @@ pub fn fake_app(size: [u32; 2], scale: f32) -> Raster {
     fill(12.0, 14.0, 26.0, 28.0, [237, 106, 94]);
     fill(34.0, 14.0, 48.0, 28.0, [245, 191, 79]);
     fill(56.0, 14.0, 70.0, 28.0, [97, 197, 84]);
-    Raster::from_capture(w, h, px, 0)
+    picture(w, h, &px, "app.png")
 }
 
 /// A small SVG picture (a mockup button) for inserting.
@@ -226,5 +236,5 @@ pub fn sample_raster(w: u32, h: u32) -> Asset {
             px.extend_from_slice(&[(255 * x / w) as u8, (200 * y / h) as u8, 180, 255]);
         }
     }
-    Asset::Raster(Raster::from_capture(w, h, px, 0))
+    picture(w, h, &px, "gradient.png")
 }
