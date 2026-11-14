@@ -24,32 +24,51 @@ impl Session {
         let mut now = Vec::new();
         for w in self.space.elements().filter(|w| !is_or(w)) {
             let Some(id) = w.wl_surface().and_then(|s| surface_id(&s)) else { continue };
-            let (window, app_id, title) = match w.x11_surface() {
-                Some(x) => ("x11", nonempty(x.class()), nonempty(x.title())),
+            let (window, app_id, title, pid) = match w.x11_surface() {
+                Some(x) => ("x11", nonempty(x.class()), nonempty(x.title()), x.pid()),
                 None => {
-                    let (app_id, title) = w.wl_surface().map(|s| toplevel_ids(&s)).unwrap_or_default();
-                    ("toplevel", app_id, title)
+                    let s = w.wl_surface().map(|s| s.into_owned());
+                    let (app_id, title) = s.as_ref().map(toplevel_ids).unwrap_or_default();
+                    let pid = s.and_then(|s| self.dh.get_client(s.id()).ok()).and_then(|c| c.get_credentials(&self.dh).ok()).map(|c| c.pid as u32);
+                    ("toplevel", app_id, title, pid)
                 }
             };
-            now.push((id, window, app_id, title));
+            now.push((id, window, app_id, title, pid));
         }
-        for (id, title) in &self.seen_windows {
-            if !now.iter().any(|n| n.0 == *id) {
-                self.log.push(EventData::WindowUnmap { id: *id, title: title.clone() }, None);
-            }
+        let gone: Vec<(u32, Option<String>, Option<u32>)> = self.seen_windows.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)).cloned().collect();
+        for (id, title, pid) in gone {
+            let by = pid.map(|p| self.closed_by(p).to_string());
+            self.log.push(EventData::WindowUnmap { id, title, by }, None);
         }
-        for (id, window, app_id, title) in &now {
+        for (id, window, app_id, title, _) in &now {
             match self.seen_windows.iter().find(|s| s.0 == *id) {
                 None => {
                     self.last_map = Instant::now();
                     self.log.push(EventData::WindowMap { id: *id, window: window.to_string(), app_id: app_id.clone(), title: title.clone() },
                     None)
                 }
-                Some((_, t)) if t != title => self.log.push(EventData::Title { id: *id, title: title.clone() }, None),
+                Some((_, t, _)) if t != title => self.log.push(EventData::Title { id: *id, title: title.clone() }, None),
                 Some(_) => continue,
             };
         }
-        self.seen_windows = now.into_iter().map(|(id, _, _, t)| (id, t)).collect();
+        self.seen_windows = now.into_iter().map(|(id, _, _, t, pid)| (id, t, pid)).collect();
+    }
+
+    /// Why a window of the app with this pid just closed: `exit` if the process is gone,
+    /// `kill` if `guilab kill` signalled its process group, else `app` (it closed it itself).
+    fn closed_by(&self, pid: u32) -> &'static str {
+        // /proc/PID/stat: "pid (comm) state ppid pgrp ..."; comm may contain spaces.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let mut f = stat.rsplit_once(')').map(|(_, r)| r.split_whitespace()).into_iter().flatten();
+        let state = f.next();
+        let pgrp = f.nth(1).and_then(|g| g.parse::<u32>().ok());
+        if matches!(state, None | Some("Z" | "X")) {
+            "exit"
+        } else if pgrp.is_some_and(|g| self.killed_group(g)) {
+            "kill"
+        } else {
+            "app"
+        }
     }
 
     /// Mapped toplevels, topmost first, each with its subsurfaces and popups nested.

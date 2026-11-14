@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """GTK4 test app. Args: --menu (open a popover menu near the bottom-right corner),
 --dialog (open a modal dialog), --second (open a second toplevel), --spin (a spinning
-spinner: never settles), --big (at least 1000x700)."""
+spinner: never settles), --big (at least 1000x700), --close-second (the second toplevel
+closes itself after 500 ms)."""
 import sys
 import gi
 gi.require_version("Gtk", "4.0")
@@ -43,6 +44,8 @@ def activate(app):
             w2.set_default_size(300, 200)
             w2.set_child(Gtk.Label(label="second"))
             w2.present()
+            if "--close-second" in args:
+                GLib.timeout_add(500, lambda: w2.close() and False)
         return False
 
     GLib.timeout_add(300, later)

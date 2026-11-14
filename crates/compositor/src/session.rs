@@ -181,7 +181,10 @@ pub struct Session {
     /// The session's event log (the server adds commands, messages, lock changes).
     pub log: EventLog,
     /// Toplevels as last seen by `track_windows`: (surface id, title).
-    pub(crate) seen_windows: Vec<(u32, Option<String>)>,
+    /// Toplevels as of the last frame: id, title, client pid.
+    pub(crate) seen_windows: Vec<(u32, Option<String>, Option<u32>)>,
+    /// The human's touchpad gesture in progress (logged when it ends).
+    pub(crate) gesture: Option<guilab_proto::EventData>,
 }
 
 impl Session {
@@ -348,6 +351,7 @@ impl Session {
             xw: Xw::default(),
             log: EventLog::default(),
             seen_windows: Vec::new(),
+            gesture: None,
         };
         let mut session = session;
         let kb = session.seat.get_keyboard().unwrap();

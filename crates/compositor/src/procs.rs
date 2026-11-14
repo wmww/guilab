@@ -150,6 +150,11 @@ impl Session {
         self.procs.list.iter().map(|p| p.info.clone()).collect()
     }
 
+    /// Whether `guilab kill` signalled the app whose process group is `pgrp`.
+    pub(crate) fn killed_group(&self, pgrp: u32) -> bool {
+        self.procs.list.iter().any(|p| p.killed && p.info.pid == pgrp)
+    }
+
     pub fn is_running(&self, id: u32) -> bool {
         self.procs.list.iter().any(|p| p.info.id == id && p.child.is_some())
     }

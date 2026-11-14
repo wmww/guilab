@@ -45,6 +45,8 @@ pub struct Chain {
     /// How long the next keyboard action has waited for a menu to close.
     menu_wait: Duration,
     source: InputSource,
+    /// Surface under the pointer at the chain's last button press (a menu item it closed).
+    pressed_on: Option<u32>,
 }
 
 /// Failure in the middle of a chain: which action, and why.
@@ -70,7 +72,7 @@ fn find_node(nodes: &[TreeNode], id: u32) -> Option<&TreeNode> {
 impl Chain {
     pub fn new(actions: Vec<Action>, source: InputSource) -> Chain {
         let steps = actions.into_iter().enumerate().map(|(i, a)| Step::Act(i, a)).collect();
-        Chain { steps, origin: None, menu_wait: Duration::ZERO, source }
+        Chain { steps, origin: None, menu_wait: Duration::ZERO, source, pressed_on: None }
     }
 }
 
@@ -126,13 +128,14 @@ impl Session {
         Ok(None)
     }
 
-    pub fn input_info(&self) -> InputInfo {
+    /// State after `chain` finished.
+    pub fn input_info(&self, chain: &Chain) -> InputInfo {
         let scale = self.output.current_scale().fractional_scale();
         let p = self.pointer_location();
         let under = self.surface_under(p).and_then(|(s, _)| surface_id(&s));
         let focus = self.seat.get_keyboard().and_then(|k| k.current_focus()).and_then(|f| f.wl_surface().and_then(|s| surface_id(&s)));
         let r = |v: f64| (v * scale * 10.0).round() / 10.0;
-        InputInfo { pointer: [r(p.x), r(p.y)], under, focus }
+        InputInfo { pointer: [r(p.x), r(p.y)], under, focus, pressed_on: chain.pressed_on.filter(|s| Some(*s) != under) }
     }
 
     /// Output pixels (or `on`-surface pixels) -> global logical point, bounds-checked.
@@ -252,9 +255,13 @@ impl Session {
                     *later = Self::glide(self.pointer_location(), to, *ms, |pos| InputEvent::PointerMotion { pos });
                 }
             }
-            Action::Down { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, src),
+            Action::Down { button } => {
+                chain.pressed_on = self.surface_under(self.pointer_location()).and_then(|(s, _)| surface_id(&s));
+                self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, src)
+            }
             Action::Up { button } => self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, src),
             Action::Click { button, count } => {
+                chain.pressed_on = self.surface_under(self.pointer_location()).and_then(|(s, _)| surface_id(&s));
                 for _ in 0..*count {
                     self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: true }, src);
                     self.inject(InputEvent::PointerButton { button: button_code(*button), pressed: false }, src);

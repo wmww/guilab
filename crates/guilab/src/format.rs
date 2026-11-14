@@ -186,6 +186,9 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
                 Some(s) => line += &format!("; keyboard focus {s}"),
                 None => line += "; no keyboard focus",
             }
+            if let Some(s) = i.pressed_on {
+                line += &format!("; the last press was on surface {s} (gone or moved since)");
+            }
             line
         }
         Command::ClipGet => {

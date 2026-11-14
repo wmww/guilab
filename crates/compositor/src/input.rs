@@ -194,8 +194,30 @@ impl Session {
                 let (x, y) = self.px(*pos);
                 EventData::Touch { finger: *slot, down: false, x, y }
             }
-            InputEvent::SwipeBegin { fingers } => EventData::Gesture { gesture: "swipe".into(), fingers: *fingers },
-            InputEvent::PinchBegin { fingers } => EventData::Gesture { gesture: "pinch".into(), fingers: *fingers },
+            // Gestures are logged once, when they end, with their totals.
+            InputEvent::SwipeBegin { fingers } | InputEvent::PinchBegin { fingers } => {
+                let gesture = if matches!(ev, InputEvent::SwipeBegin { .. }) { "swipe" } else { "pinch" };
+                let scale = (gesture == "pinch").then_some(1.0);
+                self.gesture = Some(EventData::Gesture { gesture: gesture.into(), fingers: *fingers, dx: 0.0, dy: 0.0, scale, cancelled: false });
+                return;
+            }
+            InputEvent::SwipeUpdate { delta } | InputEvent::PinchUpdate { delta, .. } => {
+                let s = self.output.current_scale().fractional_scale();
+                if let Some(EventData::Gesture { dx, dy, scale, .. }) = &mut self.gesture {
+                    (*dx, *dy) = (*dx + delta.x * s, *dy + delta.y * s);
+                    if let InputEvent::PinchUpdate { scale: k, .. } = ev {
+                        *scale = Some(*k);
+                    }
+                }
+                return;
+            }
+            InputEvent::SwipeEnd { cancelled: c } | InputEvent::PinchEnd { cancelled: c } => {
+                let Some(mut g) = self.gesture.take() else { return };
+                if let EventData::Gesture { cancelled, .. } = &mut g {
+                    *cancelled = *c;
+                }
+                g
+            }
             _ => return,
         };
         self.log.push(data, None);

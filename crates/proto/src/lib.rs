@@ -457,6 +457,10 @@ pub struct InputInfo {
     /// Surface with keyboard focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<u32>,
+    /// Surface under the pointer at the chain's last press, if it's not `under` any more
+    /// (e.g. a menu item whose click closed the menu).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressed_on: Option<u32>,
 }
 
 /// A blocking client connection.

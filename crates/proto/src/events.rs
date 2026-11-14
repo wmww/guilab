@@ -103,8 +103,20 @@ pub enum EventData {
     Scroll { dx: f64, dy: f64, x: i32, y: i32, smooth: bool },
     /// Human touch: finger down or up (at its last position).
     Touch { finger: u32, down: bool, x: i32, y: i32 },
-    /// Human touchpad gesture start (`swipe`, `pinch`).
-    Gesture { gesture: String, fingers: u32 },
+    /// Human touchpad gesture (`swipe`, `pinch`), logged when it ends: total movement in
+    /// output pixels, the final pinch scale.
+    Gesture {
+        gesture: String,
+        fingers: u32,
+        #[serde(default)]
+        dx: f64,
+        #[serde(default)]
+        dy: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
+    },
     AppStart { id: u32, argv: Vec<String> },
     /// `code` on a normal exit, `signal` if killed by one. `killed`: after `guilab kill`.
     AppExit {
@@ -130,6 +142,10 @@ pub enum EventData {
         id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Who closed it, if known: `app` (its app, still running, e.g. after a click on
+        /// its close button), `exit` (its app exited), `kill` (after `guilab kill`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     Title {
         id: u32,

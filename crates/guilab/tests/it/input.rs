@@ -135,9 +135,14 @@ fn gtk_input_and_clipboard() {
     wait_log(&log, "pressed 1 2", 5);
     let tree = lab.wait_tree("s1", 5, |t| nodes(t).iter().any(|n| n["kind"] == "popup"));
     let popup = nodes(&tree).into_iter().find(|n| n["kind"] == "popup").unwrap().clone();
-    // Pick the second item (surface-local coordinates), then reopen and click away.
+    // Pick the second item (surface-local coordinates), then reopen and click away. Under
+    // load GTK may still be setting the menu up when it's first in the tree (a click then
+    // does nothing), so let it settle first.
+    lab.run(&["screenshot"]);
     let item_y = format!("{}", popup["height"].as_i64().unwrap() / 2);
-    lab.input(&t, &["on", &popup["id"].to_string(), "move", "30", &item_y, "click"]);
+    let info = lab.input(&t, &["on", &popup["id"].to_string(), "move", "30", &item_y, "click"]);
+    // If the click closed the menu already, the reply still says where it landed.
+    assert!(info["pressed_on"] == popup["id"] || info["under"] == popup["id"], "{info}");
     wait_log(&log, "menu 2", 5);
     lab.input(&t, &["move", &ax, &ay, "click", "right", "sleep", "300", "move", "20", "20", "click"]);
     lab.wait_tree("s1", 5, |t| !nodes(t).iter().any(|n| n["kind"] == "popup"));

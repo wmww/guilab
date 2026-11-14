@@ -306,7 +306,17 @@ fn input_phrases(events: &[&Event]) -> Vec<String> {
 
 fn gesture(d: &EventData) -> String {
     match d {
-        EventData::Gesture { gesture, fingers } => format!("{fingers}-finger {gesture}"),
+        EventData::Gesture { gesture, fingers, dx, dy, scale, cancelled } => {
+            let mut s = format!("{fingers}-finger {gesture}");
+            match scale {
+                Some(k) if gesture == "pinch" => s += &format!(" to {}x", num((k * 10.0).round() / 10.0)),
+                _ => s += &format!(" by {},{}", num(dx.round()), num(dy.round())),
+            }
+            if *cancelled {
+                s += " (cancelled)";
+            }
+            s
+        }
         _ => String::new(),
     }
 }
@@ -392,10 +402,18 @@ impl Fmt {
                 }
                 s
             }
-            EventData::WindowUnmap { id, title } => match title {
-                Some(t) => format!("window {id} closed: {}", quote(t)),
-                None => format!("window {id} closed"),
-            },
+            EventData::WindowUnmap { id, title, by } => {
+                let by = match by.as_deref() {
+                    Some("app") => " by its app",
+                    Some("exit") => " (its app exited)",
+                    Some("kill") => " (after guilab kill)",
+                    _ => "",
+                };
+                match title {
+                    Some(t) => format!("window {id} closed{by}: {}", quote(t)),
+                    None => format!("window {id} closed{by}"),
+                }
+            }
             EventData::Title { id, title } => format!("window {id} title is now {}", quote(title.as_deref().unwrap_or(""))),
             EventData::Output { width, height, scale, human } => {
                 let by = if *human { " (the human resized it)" } else { "" };
@@ -591,6 +609,9 @@ mod tests {
             ["scrolled down 3 notches at 7,8", "tapped at 10,10", "dragged finger 2 from 10,10 to 90,10", "moved pointer 7,7 → 10,10"]
         );
         assert_eq!(input_phrases(&refs[..1]), ["moved pointer 1,1 → 2,2 (0.3s)"]);
+        let g = |gesture: &str, scale| ev(0, EventData::Gesture { gesture: gesture.into(), fingers: 2, dx: 300.4, dy: -2.0, scale, cancelled: false });
+        let (pinch, swipe) = (g("pinch", Some(1.83)), g("swipe", None));
+        assert_eq!(input_phrases(&[&pinch, &swipe]), ["2-finger pinch to 1.8x", "2-finger swipe by 300,-2"]);
     }
 
     #[test]

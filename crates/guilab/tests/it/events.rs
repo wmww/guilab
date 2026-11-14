@@ -129,6 +129,10 @@ fn coalescing_and_log() {
     let ms = path.last().unwrap()[2].as_i64().unwrap();
     assert!((250..1000).contains(&ms), "{ms}");
     assert_eq!(ev[1]["dy"], 3.0);
+    // Gestures are logged once, with their totals; a tap as one phrase.
+    lab.run(&["debug", "input", "move", "100", "100", "pinch", "2", "swipe", "300", "0", "tap", "50", "60"]);
+    let (_, _, err) = lab.status(&["ps"]);
+    assert!(err.contains("2-finger pinch to 2x; 3-finger swipe by 300,0; tapped at 50,60"), "{err}");
     // Commands are logged with their args; filters.
     lab.run(&["ps"]);
     lab.run(&["tree"]);
@@ -283,7 +287,7 @@ fn window_events() {
     }
     let lab = Lab::new();
     lab.run(&["new", "w"]);
-    lab.run(&["run", "--", "python3", &app("gtk_app.py")]);
+    lab.run(&["run", "--", "python3", &app("gtk_app.py"), "--second", "--close-second"]);
     lab.wait_tree("w", 10, |t| !crate::nodes(t).is_empty());
     // Windows are diffed on the next frame, which may come just after `tree` saw it.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -296,9 +300,16 @@ fn window_events() {
     };
     assert_eq!(ev[0]["kind"], "window_map", "{ev:?}");
     assert_eq!(ev[0]["window"], "toplevel");
-    // Window changes are passive: reported with the next command (`wait_tree` got the map).
-    // `kill` waits for the app to exit, so it reports the close itself.
+    // A window the app closed itself says so.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !lab.log_json(&["--kind", "window_unmap"]).iter().any(|e| e["by"] == "app") {
+        assert!(Instant::now() < deadline, "{:?}", lab.log_json(&["--kind", "window"]));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(lab.run(&["log"]).contains("closed by its app: \"second window\""));
+    // Window changes are passive: reported with the next command. `kill` waits for the app
+    // to exit, so it reports the close itself.
     let (_, _, err) = lab.status(&["kill"]);
-    assert!(err.contains("window") && err.contains("closed"), "{err}");
+    assert!(err.contains("window") && err.contains("closed ("), "{err}");
     assert!(kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap"));
 }

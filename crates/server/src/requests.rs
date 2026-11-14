@@ -611,7 +611,7 @@ impl Server {
                 }
                 Ok(None) => {
                     let j = self.inputs.remove(i);
-                    let r = Response::ok(slot.session.input_info());
+                    let r = Response::ok(slot.session.input_info(&j.chain));
                     let r = self.attach(&name, j.key.as_deref(), r);
                     send(&j.stream, &r);
                 }
