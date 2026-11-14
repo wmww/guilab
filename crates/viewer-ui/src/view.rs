@@ -7,6 +7,7 @@ use guilab_image::IRect;
 use guilab_kit::Theme;
 
 use super::workspace::{Open, open_doc};
+use crate::flight::Place;
 use super::{Action, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
 use crate::{
     input::{Gesture, HostCursor, HostInput},
@@ -88,6 +89,8 @@ impl ViewerUi {
             *img = image(z);
         };
         let tool = ws.editor.tool;
+        // A press in the view this frame (an image flying in lands at once).
+        let mut pressed_view = false;
         for input in inputs {
             let ev = match input {
                 HostInput::Egui(ev) => ev,
@@ -256,6 +259,7 @@ impl ViewerUi {
                     if !ours(pos) || menu_was_open || self.panning.is_some() || self.resizing.is_some() {
                         continue;
                     }
+                    pressed_view = true;
                     let on_image = img.contains(pos);
                     // The resize handles are widgets of their own (below).
                     if handles && self.held_buttons.is_empty() && sizing::handle_at(&t, img, view, pos).is_some() {
@@ -363,19 +367,33 @@ impl ViewerUi {
             img = image(&z);
         }
 
+        // An image flying into the view isn't painted by the canvas until it lands; a press
+        // in the view lands it now (input is never held up by an animation).
+        let open_att = ws.open_key().map(|(_, a)| a);
+        let mut flying_in = doc_view && open_att.is_some_and(|a| ws.flights.flying_in(a));
+        if flying_in && pressed_view {
+            ws.flights.land_out();
+            flying_in = false;
+        }
+
         let painter = ui.painter_at(view);
         painter.rect_filled(view, 0.0, t.colors.view_bg);
-        if !doc_view {
-            match s.texture {
-                Some(tex) => {
-                    painter.image(tex, img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                }
-                None => {
-                    painter.text(view.center(), egui::Align2::CENTER_CENTER, "(no frame yet)", t.font.body.clone(), t.colors.weak);
-                }
+        // The live app; under an open image it fades out as the image flies in (and back in
+        // as it flies home).
+        let live_alpha = ws.flights.live.value(now);
+        let live_img = if doc_view { live_rect(view, &p.zoom, s, ppp) } else { img };
+        match s.texture {
+            Some(tex) if live_alpha > 0.0 => {
+                painter.image(tex, live_img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE.gamma_multiply(live_alpha));
             }
+            None if !doc_view => {
+                painter.text(view.center(), egui::Align2::CENTER_CENTER, "(no frame yet)", t.font.body.clone(), t.colors.weak);
+            }
+            _ => {}
         }
-        painter.rect_stroke(img, 0.0, egui::Stroke::new(t.size.line, t.colors.outline), egui::StrokeKind::Outside);
+        if !flying_in {
+            painter.rect_stroke(img, 0.0, egui::Stroke::new(t.size.line, t.colors.outline), egui::StrokeKind::Outside);
+        }
 
         // The editor over the image. Host zoom is physical px per image px; the canvas
         // counts points.
@@ -387,7 +405,7 @@ impl ViewerUi {
             xf,
             clip: view,
             new_doc: ([s.size.0, s.size.1], s.scale as f32),
-            visible: true,
+            visible: !flying_in,
             input: !menu_was_open,
             toasts: egui::Id::new(VIEW_TOASTS),
         };
@@ -407,7 +425,7 @@ impl ViewerUi {
             z.fit = false;
         }
         ws.wants_keys = cout.wants_keys;
-        ws.shown = cout.shown;
+        ws.view_place = ws.doc().filter(|_| doc_view).map(|d| Place { canvas: xf.rect(IRect::of_size(d.body().canvas).to_rect()), clip: xf.rect(region.to_rect()).intersect(view), alpha: 1.0 });
 
         // Resize handles: widgets registered after the canvas, so they keep their presses.
         let pointer = ui.input(|i| i.pointer.latest_pos());
@@ -477,4 +495,14 @@ impl ViewerUi {
             }
         }
     }
+}
+
+/// Where the live app shows in `view` at zoom `z` (while an open image has the view).
+fn live_rect(view: Rect, z: &Zoom, s: &SessionView, ppp: f32) -> Rect {
+    let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
+    let zoom = if z.fit { (view.width() / px.x).min(view.height() / px.y).min((ppp / s.scale as f32).max(1.0)).max(MIN_ZOOM) } else { z.zoom };
+    let pan = if z.fit { Vec2::ZERO } else { z.pan };
+    let size = px * zoom;
+    let min = view.center() + pan - size / 2.0;
+    Rect::from_min_size(pos2((min.x * ppp).round() / ppp, (min.y * ppp).round() / ppp), size)
 }

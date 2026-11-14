@@ -44,6 +44,7 @@ pub struct ThumbSource<'a> {
     pub drafts: &'a [Draft],
     pub shelf: &'a [Draft],
     pub open: &'a Open,
+    pub flights: &'a crate::flight::Flights,
     pub cache: &'a mut ThumbCache,
     pub now: f64,
 }
@@ -108,6 +109,7 @@ impl Thumbs<Att> for ThumbSource<'_> {
             (Open::Past { image, slot: s, .. }, Att::Image(id)) => image == id && *s == slot,
             _ => false,
         };
-        if open { SlotState::Away { outlined: true } } else { SlotState::Shown }
+        // A slot an image is flying to or from is empty meanwhile.
+        if open || self.flights.touching(slot, *key) { SlotState::Away { outlined: open } } else { SlotState::Shown }
     }
 }

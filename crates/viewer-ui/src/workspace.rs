@@ -13,6 +13,7 @@ use guilab_image::{Asset, AssetId, Doc, Edit, Fonts, Image, ImageId, Store};
 use guilab_kit::History;
 
 use super::{Zoom, thumbs::ThumbCache};
+use crate::flight::{Flights, Place};
 
 pub type DraftKey = u64;
 
@@ -72,6 +73,7 @@ pub enum Request {
 }
 
 pub struct Workspace {
+    pub id: egui::Id,
     pub editor: Editor,
     pub chat: Chat<Att>,
     /// The composer's drafts, in order.
@@ -85,10 +87,15 @@ pub struct Workspace {
     pub thumbs: ThumbCache,
     /// The canvas wanted the keyboard last frame.
     pub wants_keys: bool,
-    /// Hooks for animations (phase 7): last frame's slot rects and the open image's
-    /// on-screen rect.
+    /// The chat's slot rects (this frame's once the chat ran), the feed's visible area and
+    /// the composer box: where flights and the glow aim.
     pub slots: Vec<(SlotId, Att, egui::Rect)>,
-    pub shown: Option<egui::Rect>,
+    pub feed_clip: egui::Rect,
+    pub composer: egui::Rect,
+    /// Where the open image is drawn in the view (last frame's until the view ran).
+    pub view_place: Option<Place>,
+    /// Images flying between the view and the chat, and the glow.
+    pub flights: Flights,
     next_key: DraftKey,
     next_ticket: u64,
     pub requests: Vec<Request>,
@@ -111,6 +118,7 @@ impl Workspace {
         chat.hint = "Message the agent".into();
         chat.empty_hint = "Messages, and what the agent does, show up here. Draw on the app to attach a screenshot.".into();
         Workspace {
+            id,
             editor: Editor::new(id.with("editor"), fonts),
             chat,
             pending: Vec::new(),
@@ -121,7 +129,10 @@ impl Workspace {
             thumbs: ThumbCache::default(),
             wants_keys: false,
             slots: Vec::new(),
-            shown: None,
+            feed_clip: egui::Rect::NOTHING,
+            composer: egui::Rect::NOTHING,
+            view_place: None,
+            flights: Flights::default(),
             next_key: 1,
             next_ticket: 1,
             requests: Vec::new(),
@@ -139,6 +150,38 @@ impl Workspace {
             Open::Live | Open::Capturing { doc: None, .. } => None,
             Open::Capturing { doc: Some((d, _)), .. } | Open::Past { doc: d, .. } => Some(d),
             Open::Draft(k) => self.pending.iter().find(|d| d.key == *k).map(|d| &d.doc),
+        }
+    }
+
+    /// The open image's slot and key (drafts sit in the composer).
+    pub fn open_key(&self) -> Option<(SlotId, Att)> {
+        match &self.open {
+            Open::Draft(k) => Some((SlotId::Composer, Att::Draft(*k))),
+            Open::Past { image, slot, .. } => Some((*slot, Att::Image(*image))),
+            _ => None,
+        }
+    }
+
+    /// Where a slot is drawn, if the chat laid it out.
+    pub fn slot_rect(&self, slot: SlotId, att: Att) -> Option<egui::Rect> {
+        self.slots.iter().find(|(s, a, _)| *s == slot && *a == att).map(|(_, _, r)| *r)
+    }
+
+    /// The open image flies home to its slot (or, with no slot to fly to, just goes).
+    fn fly_home(&mut self) {
+        match self.open_key() {
+            Some((slot, att)) if self.slot_rect(slot, att).is_some() => self.flights.home(att, slot, self.view_place),
+            Some(_) => self.flights.quiet(true),
+            None => {}
+        }
+    }
+
+    /// The (just) open image flies out of its slot into the view.
+    fn fly_out(&mut self) {
+        match self.open_key() {
+            Some((slot, att)) if self.slot_rect(slot, att).is_some() => self.flights.out(att, slot),
+            Some(_) => self.flights.quiet(false),
+            None => {}
         }
     }
 
@@ -261,6 +304,8 @@ impl Workspace {
                 self.history.push(Op::Create { key, at });
                 self.doc_zoom = session_zoom;
                 self.open = Open::Draft(key);
+                // The doc already covers the live app, in the same place: nothing moves.
+                self.flights.quiet(false);
                 key
             }
             Open::Past { image, slot, doc } => {
@@ -306,6 +351,7 @@ impl Workspace {
     pub fn close(&mut self, session_zoom: Zoom) {
         self.commit_editor(session_zoom);
         if self.image_open() {
+            self.fly_home();
             self.open = Open::Live;
         }
     }
@@ -343,6 +389,7 @@ impl Workspace {
             }
         }
         self.doc_zoom = Zoom::default();
+        self.fly_out();
         // An open image needs a tool that works on it.
         if self.editor.tool == Tool::Interact {
             self.editor.tool = Tool::Move;
@@ -355,6 +402,7 @@ impl Workspace {
         if matches!(self.open, Open::Draft(k) if k == key) {
             self.editor.reset();
             self.open = Open::Live;
+            self.flights.quiet(true);
         }
         let d = self.pending.remove(at);
         self.shelf.push(d);
@@ -376,6 +424,7 @@ impl Workspace {
     fn shelve(&mut self, key: DraftKey) {
         if matches!(self.open, Open::Draft(k) if k == key) {
             self.open = Open::Live;
+            self.flights.quiet(true);
         }
         if let Some(d) = self.take(key) {
             self.shelf.push(d);
@@ -400,6 +449,7 @@ impl Workspace {
         self.close(session_zoom);
         self.open = Open::Draft(key);
         self.doc_zoom = Zoom::default();
+        self.fly_out();
         if self.editor.tool == Tool::Interact {
             self.editor.tool = Tool::Move;
         }
@@ -422,6 +472,7 @@ impl Workspace {
                     self.shelve(key);
                     if was_open && let Ok(doc) = store.image(from).map_err(|e| e.to_string()).and_then(|i| Doc::open((*i.body).clone(), store).map_err(|e| e.to_string())) {
                         self.open = Open::Past { image: from, slot, doc };
+                        self.flights.quiet(false);
                     }
                 }
             }
@@ -441,11 +492,18 @@ impl Workspace {
                 Op::Create { key, at } => {
                     self.unshelve(key, at);
                     self.open = Open::Draft(key);
+                    self.flights.quiet(false);
                 }
                 Op::Remove { key, .. } => self.shelve(key),
-                Op::Copy { key, .. } => {
+                Op::Copy { from, key, .. } => {
+                    // From its past image: the copy just takes over. Else it pops in (its
+                    // slot is only now coming back, so there's nothing to fly from).
+                    let quiet = !matches!(self.open, Open::Past { image, .. } if image == from);
                     self.unshelve(key, usize::MAX);
                     self.open = Open::Draft(key);
+                    if quiet {
+                        self.flights.quiet(false);
+                    }
                 }
             }
         }
@@ -460,6 +518,7 @@ impl Workspace {
         let sent = std::mem::take(&mut self.pending);
         if matches!(self.open, Open::Draft(_)) {
             self.open = Open::Live;
+            self.flights.quiet(true);
             self.editor.tool = Tool::Interact;
         }
         let keys: Vec<DraftKey> = sent.iter().map(|d| d.key).collect();

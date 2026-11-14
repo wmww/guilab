@@ -16,3 +16,4 @@ guilab-editor.workspace = true
 guilab-chat.workspace = true
 guilab-kit.workspace = true
 guilab-proto.workspace = true
+png.workspace = true

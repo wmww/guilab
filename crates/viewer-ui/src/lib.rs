@@ -17,6 +17,8 @@
 //!
 //! Zoom is in host physical pixels per image pixel, so 100% is pixel-exact at any scale.
 
+pub mod demo;
+pub mod flight;
 pub mod input;
 pub mod sizing;
 mod thumbs;
@@ -324,6 +326,7 @@ impl ViewerUi {
     /// the pointer in it. Unsent drafts, the open image and the chats stay.
     pub fn detach(&mut self) {
         for p in self.sessions.values_mut() {
+            p.ws.flights.finish();
             p.ws.thumbs.clear();
             p.ws.editor.forget_textures();
         }
@@ -339,6 +342,15 @@ impl ViewerUi {
     /// The current session's drafts: each one's element count (for tests).
     pub fn drafts(&self) -> Vec<usize> {
         self.current.as_deref().and_then(|c| self.sessions.get(c)).map_or(Vec::new(), |p| p.ws.pending.iter().map(|d| d.doc.body().elements.len()).collect())
+    }
+
+    /// The selected session's workspace (tests, demos).
+    pub fn workspace(&self) -> Option<&Workspace> {
+        self.current.as_deref().and_then(|c| self.sessions.get(c)).map(|p| &p.ws)
+    }
+
+    pub fn workspace_mut(&mut self) -> Option<&mut Workspace> {
+        self.current.as_deref().and_then(|c| self.sessions.get_mut(c)).map(|p| &mut p.ws)
     }
 
     /// The selected session (last frame).
@@ -516,6 +528,7 @@ impl ViewerUi {
         self.per(s.name, s.key);
         let mut p = self.sessions.remove(s.name).unwrap();
         p.ws.thumbs.tick(now);
+        p.ws.flights.begin(now, &t.motion);
 
         egui::Panel::left("tools").resizable(false).exact_size(t.size.toolbar_w).show(ui, |ui| {
             ui.vertical_centered(|ui| {
@@ -530,6 +543,9 @@ impl ViewerUi {
             ChatPlace::Bottom => Some(egui::Panel::bottom("chat").default_size(240.0).size_range(90.0..=800.0)),
             ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(360.0).size_range(220.0..=1200.0)),
         };
+        if panel.is_none() {
+            p.ws.slots.clear();
+        }
         if let Some(panel) = panel {
             p.ws.chat.set_status(s.agent.clone());
             let ws = &mut p.ws;
@@ -537,11 +553,13 @@ impl ViewerUi {
                 // Fill the panel, or it shrinks to its content (egui keeps the content's size).
                 ui.set_min_size(ui.available_size());
                 let keys = ws.pending_keys();
-                let mut src = ThumbSource { store, fonts: &self.fonts, drafts: &ws.pending, shelf: &ws.shelf, open: &ws.open, cache: &mut ws.thumbs, now };
+                let mut src = ThumbSource { store, fonts: &self.fonts, drafts: &ws.pending, shelf: &ws.shelf, open: &ws.open, flights: &ws.flights, cache: &mut ws.thumbs, now };
                 ws.chat.show(ui, &keys, &mut src)
             });
             let cout = cout.inner;
             ws.slots = cout.slots;
+            ws.feed_clip = cout.feed_clip;
+            ws.composer = cout.composer;
             for ev in cout.events {
                 if let Some(text) = ws.chat_event(ev, store, p.zoom) {
                     let viewing = ws.viewing();
@@ -605,6 +623,7 @@ impl ViewerUi {
                 }
             }
         });
+        p.ws.paint_motion(ui.ctx(), store, &t);
         self.host_keys(ui.ctx(), &mut p, store);
         // "Use the app" closes the editor (also when a drawing's screenshot arrived after it
         // was picked).
@@ -893,3 +912,6 @@ fn session_size(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizi
         m.note("The agent is using the app; its size is frozen");
     }
 }
+
+#[cfg(test)]
+mod tests;

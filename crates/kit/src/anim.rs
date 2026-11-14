@@ -74,3 +74,44 @@ pub fn progress(ctx: &Context, t0: f64, m: Motion) -> f32 {
     }
     m.easing.apply(t)
 }
+
+/// A value easing toward a target.
+#[derive(Clone, Copy, Debug)]
+pub struct Fader {
+    from: f32,
+    pub to: f32,
+    t0: f64,
+    m: Motion,
+}
+
+/// No animation: changes apply at once.
+pub const INSTANT: Motion = Motion { secs: 0.0, easing: Easing::Linear };
+
+impl Fader {
+    /// Resting at `v`.
+    pub fn at(v: f32) -> Fader {
+        Fader { from: v, to: v, t0: f64::NEG_INFINITY, m: INSTANT }
+    }
+
+    /// The value at egui time `now`.
+    pub fn value(&self, now: f64) -> f32 {
+        if self.m.secs <= 0.0 {
+            return self.to;
+        }
+        let k = self.m.easing.apply(((now - self.t0) / self.m.secs as f64) as f32);
+        self.from + (self.to - self.from) * k
+    }
+
+    /// Eases from the current value to `target` over `m` (no-op if that's the target already).
+    pub fn set(&mut self, target: f32, now: f64, m: Motion) {
+        if target != self.to {
+            *self = Fader { from: self.value(now), to: target, t0: now, m };
+        }
+    }
+
+    /// Still easing at `now`.
+    pub fn moving(&self, now: f64) -> bool {
+        self.m.secs > 0.0 && now - self.t0 < self.m.secs as f64
+    }
+}
+

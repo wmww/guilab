@@ -604,6 +604,33 @@ impl Editor {
         }
     }
 
+    /// Paints `body` alone (no tool overlays, no input) with its whole canvas on the screen
+    /// rect `canvas`, clipped by `painter`: e.g. an image flying between views. Shares the
+    /// canvas's textures and keeps their filters (the canvas picks those from its zoom).
+    pub fn paint_body(&mut self, painter: &egui::Painter, body: &Body, assets: &dyn guilab_image::Assets, canvas: egui::Rect) {
+        let ctx = painter.ctx().clone();
+        let fonts_ready = paint::install_fonts(&ctx);
+        let zoom = canvas.width() / body.canvas[0].max(1) as f32;
+        if !(zoom.is_finite() && zoom > 0.0) {
+            return;
+        }
+        let xf = Xf { zoom, offset: canvas.min.to_vec2() };
+        let ppp = ctx.pixels_per_point();
+        let mut pc = Ctx { xf, assets, textures: &mut self.textures, ctx: &ctx, fonts_ready, ppp, keep_filter: true };
+        let fonts = self.fonts.clone();
+        let (mut prims, mut shapes) = (Vec::new(), Vec::new());
+        if let Some(bg) = body.background {
+            shapes.push(Shape::rect_filled(canvas, 0.0, paint::c32(bg)));
+        }
+        for el in &body.elements {
+            element_prims(el, body.scale, &fonts, &mut prims);
+            for p in prims.drain(..) {
+                paint::prim_shapes(&p, &mut pc, &mut shapes, None);
+            }
+        }
+        painter.extend(shapes);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn paint(&mut self, ui: &Ui, doc: Option<&Doc>, xf: Xf, clip: egui::Rect, region: IRect, scale: f32, t: &Theme, fonts_ready: bool) {
         let shown = xf.rect(region.to_rect()).intersect(clip);
@@ -616,7 +643,7 @@ impl Editor {
             Some(d) => d,
             None => &guilab_image::NoAssets,
         };
-        let mut pc = Ctx { xf, assets, textures: &mut self.textures, ctx: &ctx, fonts_ready, ppp };
+        let mut pc = Ctx { xf, assets, textures: &mut self.textures, ctx: &ctx, fonts_ready, ppp, keep_filter: false };
         let fonts = self.fonts.clone();
         let mut prims = Vec::new();
         let halo = Some((t.colors.hover_outline, 3.0));
@@ -630,6 +657,9 @@ impl Editor {
         let mut outlines = Vec::new();
         if let Some(d) = doc {
             let body = d.body();
+            if let Some(bg) = body.background {
+                shapes.push(Shape::rect_filled(xf.rect(IRect::of_size(body.canvas).to_rect()), 0.0, paint::c32(bg)));
+            }
             for (i, el) in body.elements.iter().enumerate() {
                 let key = d.keys()[i];
                 if Some(key) == editing {

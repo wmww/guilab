@@ -6,44 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use egui::{Color32, Context, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, TextureId, Ui, pos2, vec2};
-use guilab_kit::{Easing, Motion, Theme};
+use guilab_kit::anim::{Fader, INSTANT};
+use guilab_kit::Theme;
 
 use crate::{ChatEvent, ChatOut, SlotId, SlotState};
-
-/// A value easing toward a target.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Fader {
-    from: f32,
-    pub to: f32,
-    t0: f64,
-    m: Motion,
-}
-
-const INSTANT: Motion = Motion { secs: 0.0, easing: Easing::Linear };
-
-impl Fader {
-    pub fn at(v: f32) -> Fader {
-        Fader { from: v, to: v, t0: f64::NEG_INFINITY, m: INSTANT }
-    }
-
-    pub fn value(&self, now: f64) -> f32 {
-        if self.m.secs <= 0.0 {
-            return self.to;
-        }
-        let k = self.m.easing.apply(((now - self.t0) / self.m.secs as f64) as f32);
-        self.from + (self.to - self.from) * k
-    }
-
-    pub fn set(&mut self, target: f32, now: f64, m: Motion) {
-        if target != self.to {
-            *self = Fader { from: self.value(now), to: target, t0: now, m };
-        }
-    }
-
-    pub fn moving(&self, now: f64) -> bool {
-        self.m.secs > 0.0 && now - self.t0 < self.m.secs as f64
-    }
-}
 
 struct Anim {
     /// 1 = the image shows, 0 = the empty slot.

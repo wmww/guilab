@@ -54,6 +54,9 @@ pub struct Ctx<'a> {
     pub ctx: &'a Context,
     pub fonts_ready: bool,
     pub ppp: f32,
+    /// Keep each raster texture's filter instead of picking one from the zoom (a second
+    /// view of a picture mustn't make the canvas's texture flip filters every frame).
+    pub keep_filter: bool,
 }
 
 /// Appends shapes for `prim`. `halo`: draw a wider outline of strokes in this color instead
@@ -67,7 +70,7 @@ pub fn prim_shapes(p: &Prim, c: &mut Ctx, out: &mut Vec<Shape>, halo: Option<(Co
                 return;
             }
             let r = xf.rect(*dst);
-            let nearest = z * c.ppp >= 2.0;
+            let nearest = if c.keep_filter { c.textures.nearest(*asset).unwrap_or(false) } else { z * c.ppp >= 2.0 };
             match c.assets.asset(*asset) {
                 Some(a) if a.as_raster().is_some() => {
                     let raster = a.as_raster().unwrap();
@@ -243,6 +246,11 @@ impl Textures {
         let f = self.frame;
         self.rasters.retain(|_, t| f - t.used < KEEP_FRAMES);
         self.svgs.retain(|_, (_, used)| f - *used < KEEP_FRAMES);
+    }
+
+    /// The filter of a raster's texture, if it has one.
+    fn nearest(&self, id: AssetId) -> Option<bool> {
+        self.rasters.get(&id).map(|t| t.nearest)
     }
 
     fn raster(&mut self, ctx: &Context, id: AssetId, r: &guilab_image::Raster, nearest: bool) -> egui::TextureId {

@@ -889,6 +889,7 @@ dependencies = [
  "guilab-image",
  "guilab-kit",
  "guilab-proto",
+ "png",
  "tracing",
 ]
 
