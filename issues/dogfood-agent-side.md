@@ -30,7 +30,7 @@ Driving the inner viewer: `input move X Y click type 'abc'` on the chat box gave
 With nested guilabs, the human sometimes typed into the inner viewer's chat (goes to the inner `demo` session's log) vs the outer one (goes to me). Inner chat messages don't wake my outer `poll`. Not a bug per se, but the agent needs to also watch `ig poll` or check the inner log to see them.
 
 ## `log` output looked like it lacked a message that was there
-I grepped `guilab log` of the inner session for "message" and found nothing, then told the human their inner-chat message was never sent. It had been (22:41, visible in their screenshot). Unclear whether `log` truncates by default or whether the grep raced the restart; either way, I made a wrong claim from it. If `log` limits output by default it should say "(N older events; use -n/--since)".
+I grepped `guilab log` of the inner session for "message" and found nothing, then told the human their inner-chat message was never sent. It had been (22:41, visible in their screenshot). Cause: `log` shows only the newest 100 events by default (`-n 0` for all), and pointer-motion events filled those 100. Nothing in the output says it was cut. Suggest: print "(N older events not shown; -n 0 for all)" when truncated, and/or count only non-motion events toward the limit.
 
 ## egui TextEdit: custom `.frame()` silently drops `.margin()`
 (Code-side, but bit me in viewer work.) In egui 0.35 a TextEdit with `.frame(...)` ignores `.margin(...)`; padding must go in the frame's `inner_margin`. The chat box looked misaligned and clicks on its lower half missed it until fixed.
