@@ -260,3 +260,51 @@ fn held_key_repeats() {
     let n = out.lines().find_map(|l| l.split("human message: \"").nth(1)).map(|m| m.chars().take_while(|c| *c == 'x').count());
     assert!(n.is_some_and(|n| n >= 5), "expected repeats: {out}{err}");
 }
+
+/// The host shows the app's own cursor over the app: a named shape, a client cursor
+/// surface (a red square), or none; and "not allowed" while an agent holds the lock.
+#[test]
+fn app_cursors() {
+    let Some((h, sock, t)) = host() else { return };
+    if !gtk4() {
+        return;
+    }
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600"]);
+    let log = v.json(&["run", "--", "python3", &app("gtk_cursors.py")])["log"].as_str().unwrap().to_string();
+    let applog = wait_log(&log, "ready", 20);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let m = mapping(&h, &t, &v);
+    let shot = h.path("cursor.png");
+    // The host's pixels around the pointer, after moving it over `area` (60 px below the
+    // label's center, off its text).
+    let look = |area: &str| -> Vec<[u8; 3]> {
+        let (x, y) = center(&applog, area, 1.0);
+        let x = (m.origin.0 + x.parse::<f64>().unwrap() * m.scale).round() as i64;
+        let y = (m.origin.1 + (y.parse::<f64>().unwrap() + 60.0) * m.scale).round() as i64;
+        h.input(&t, &["move", &(x - 5).to_string(), &y.to_string(), "move", &x.to_string(), &y.to_string()]);
+        std::thread::sleep(Duration::from_millis(300));
+        h.run(&["screenshot", "--cursor", "-o", &shot]);
+        let (w, _, px, ch) = crate::read_png(&shot);
+        let mut out = Vec::new();
+        for dy in -12..=12 {
+            for dx in -12..=12 {
+                let i = (((y + dy) * w as i64 + x + dx) as usize) * ch;
+                out.push([px[i], px[i + 1], px[i + 2]]);
+            }
+        }
+        out
+    };
+    let white = |p: &Vec<[u8; 3]>| p.iter().filter(|c| c.iter().all(|v| *v > 220)).count();
+    let red = |p: &Vec<[u8; 3]>| p.iter().filter(|c| c[0] > 200 && c[1] < 50 && c[2] < 50).count();
+    let named = look("named");
+    assert!(white(&named) > 10 && red(&named) == 0, "no crosshair");
+    let image = look("image");
+    assert!(red(&image) > 300, "no image cursor ({} red px)", red(&image));
+    let hidden = look("hidden");
+    assert!(white(&hidden) == 0 && red(&hidden) == 0, "the hidden cursor shows");
+    let _vt = v.lock();
+    let blocked = look("image");
+    assert!(red(&blocked) == 0 && white(&blocked) > 10, "locked: not the not-allowed cursor");
+}

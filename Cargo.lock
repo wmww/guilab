@@ -707,6 +707,7 @@ dependencies = [
  "rustix 1.1.6",
  "smithay",
  "tracing",
+ "xcursor",
 ]
 
 [[package]]

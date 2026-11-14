@@ -13,18 +13,19 @@ use smithay::{
         drm::{DrmDeviceFd, DrmNode},
         egl::{EGLContext, EGLDevice, EGLDisplay},
         renderer::{
-            Bind, ExportMem, ImportDma, Offscreen,
+            Bind, ExportMem, Frame as _, ImportDma, Offscreen, Renderer as _,
             damage::OutputDamageTracker,
             element::{Kind, RenderElementStates, surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree}},
             gles::{GlesRenderer, GlesTexture},
             pixman::PixmanRenderer,
+            utils::draw_render_elements,
         },
     },
-    desktop::{Space, Window, space::render_output},
+    desktop::{Space, Window, space::render_output, utils::bbox_from_surface_tree},
     output::Output,
     reexports::pixman,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size},
+    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
 };
 
 #[allow(clippy::large_enum_variant)] // one per server
@@ -83,12 +84,54 @@ impl Gpu {
         Ok(Gpu { renderer: Renderer::Gles(r), node, name: format!("gles {}", path.display()), gbm: Some(gbm) })
     }
 
+    /// Renders a surface tree (e.g. a cursor) on its own, at `scale`, to premultiplied
+    /// RGBA8. None if it has no content.
+    pub fn render_surface(&mut self, surface: &WlSurface, scale: f64) -> anyhow::Result<Option<SurfaceImage>> {
+        let bbox = bbox_from_surface_tree(surface, (0, 0));
+        if bbox.is_empty() {
+            return Ok(None);
+        }
+        let px: Rectangle<i32, Physical> = bbox.to_f64().to_physical_precise_up(scale);
+        let full = Rectangle::from_size(px.size);
+        macro_rules! go {
+            ($r:expr, $R:ty, $T:ty) => {{
+                let elements: Vec<WaylandSurfaceRenderElement<$R>> =
+                    render_elements_from_surface_tree($r, surface, (-px.loc.x, -px.loc.y), scale, 1.0, Kind::Unspecified);
+                let mut tex: $T = $r.create_buffer(Fourcc::Abgr8888, (px.size.w, px.size.h).into())?;
+                let mut fb = $r.bind(&mut tex)?;
+                {
+                    let mut frame = $r.render(&mut fb, px.size, Transform::Normal)?;
+                    frame.clear([0.0, 0.0, 0.0, 0.0].into(), &[full])?;
+                    draw_render_elements(&mut frame, scale, &elements, &[full])?;
+                    frame.finish()?.wait().ok();
+                }
+                let map = $r.copy_framebuffer(&fb, Rectangle::from_size((px.size.w, px.size.h).into()), Fourcc::Abgr8888)?;
+                drop(fb);
+                $r.map_texture(&map)?.to_vec()
+            }};
+        }
+        let rgba = match &mut self.renderer {
+            Renderer::Gles(r) => go!(r, GlesRenderer, GlesTexture),
+            Renderer::Pixman(r) => go!(r, PixmanRenderer, pixman::Image<'static, 'static>),
+        };
+        Ok(Some(SurfaceImage { width: px.size.w as u32, height: px.size.h as u32, rgba, origin: (px.loc.x, px.loc.y) }))
+    }
+
     pub fn import_dmabuf(&mut self, buf: &Dmabuf) -> bool {
         match &mut self.renderer {
             Renderer::Gles(r) => r.import_dmabuf(buf, None).is_ok(),
             Renderer::Pixman(r) => r.import_dmabuf(buf, None).is_ok(),
         }
     }
+}
+
+/// A surface tree rendered by [`Gpu::render_surface`].
+pub struct SurfaceImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    /// Where the image's top-left is, in pixels relative to the surface origin.
+    pub origin: (i32, i32),
 }
 
 enum Target {

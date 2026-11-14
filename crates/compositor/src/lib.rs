@@ -5,6 +5,7 @@
 
 mod actions;
 mod clipboard;
+mod cursor;
 mod focus;
 mod frame;
 mod handlers;
@@ -19,6 +20,7 @@ mod xwayland;
 
 pub use actions::Chain;
 pub use clipboard::ClipRead;
+pub use cursor::{AppCursor, CursorImage};
 pub use input::{InputEvent, InputSource};
 pub use frame::{SETTLE_QUIET, Settle, write_rgba_png};
 pub use handlers::{SurfaceId, surface_id};

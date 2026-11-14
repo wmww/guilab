@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use egui::{Color32, CursorIcon, Event, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
 use guilab_markup::{Annotated, Chat, FeedItem, Sketch, Tool};
 
-use crate::host::{Gesture, HostInput};
+use crate::host::{CursorImage, Gesture, HostCursor, HostInput};
 
 /// A session as the UI sees it.
 pub struct SessionView<'a> {
@@ -36,7 +36,7 @@ pub struct SessionView<'a> {
     pub locked: bool,
     pub shared: bool,
     /// The cursor the session's apps want.
-    pub cursor: CursorIcon,
+    pub cursor: HostCursor,
     /// Input that reached the apps (current session only).
     pub viz: Option<&'a guilab_proto::viz::VizLog>,
     pub under_pointer: Option<[u8; 3]>,
@@ -200,6 +200,9 @@ pub struct ViewerUi {
     notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     notice: Option<(String, f64)>,
     pub chat_place: ChatPlace,
+    /// The app's cursor image, when the pointer is over an app that gets input and the app
+    /// uses an image cursor (egui's cursor is then `Default`; the viewer shows this instead).
+    app_image: Option<std::sync::Arc<CursorImage>>,
 }
 
 /// Where the chat panel goes (View menu).
@@ -236,6 +239,14 @@ impl ViewerUi {
     /// Whether the current session's texture should be sampled with NEAREST (zoomed in).
     pub fn nearest(&self) -> bool {
         self.pixel_ratio >= 2.0
+    }
+
+    /// The cursor the host should show, given the cursor egui picked this frame.
+    pub fn host_cursor(&self, egui: CursorIcon) -> HostCursor {
+        match &self.app_image {
+            Some(img) if egui == CursorIcon::Default => HostCursor::Image(img.clone()),
+            _ => HostCursor::Icon(egui),
+        }
     }
 
     /// Releases everything the human holds in a session (on hide, tab switch, lock).
@@ -372,7 +383,7 @@ impl ViewerUi {
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
             let drawing = p.sketch.active();
-            self.view(ui, s, &mut p.zoom, view, resp.hovered(), &p.sketch, inputs, &mut out);
+            self.view(ui, s, &mut p.zoom, view, resp.contains_pointer(), &p.sketch, inputs, &mut out);
             if let (Some(log), Some(img)) = (s.viz, self.image_rect) {
                 p.viz.update(log, now);
                 let light = s.under_pointer.is_some_and(|[r, g, b]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 185.0);
@@ -501,7 +512,9 @@ impl ViewerUi {
     /// `drawing`: the sketch owns the pointer over the image; nothing goes to the app.
     fn view(&mut self, ui: &mut egui::Ui, s: &SessionView, z: &mut Zoom, view: Rect, hovered: bool, sketch: &Sketch, inputs: Vec<HostInput>, out: &mut Vec<Action>) {
         let drawing = sketch.active();
-        let move_tool = sketch.tool == Tool::Move;
+        // Drags on the image pan: the Move tool (off marks), or a frozen screenshot with no
+        // drawing tool.
+        let pan_tool = sketch.tool == Tool::Move || (sketch.tool == Tool::Interact && sketch.drawing_open());
         let ppp = ui.ctx().pixels_per_point();
         // Session pixels in points at zoom 1.
         let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
@@ -677,7 +690,7 @@ impl ViewerUi {
                         continue;
                     }
                     // Off the image, or with the Move tool anywhere but on a mark: pan.
-                    if !on_image || (move_tool && button == PointerButton::Primary && sketch.mark_at(pos).is_none()) {
+                    if !on_image || (pan_tool && button == PointerButton::Primary && sketch.mark_at(pos).is_none()) {
                         if self.held_buttons.is_empty() {
                             self.panning = Some(pos);
                         }
@@ -778,14 +791,27 @@ impl ViewerUi {
         self.image_rect = Some(img);
         self.pixel_ratio = z.zoom;
 
-        // Cursor: the app's over its image, a hand while panning.
+        // Cursor. Over the image: the app's when input goes to it, else a tool cursor, never
+        // the arrow (the app's own cursor is usually an arrow; it would look like input goes
+        // through). Drawing tools get theirs from the canvas, which runs after this.
+        self.app_image = None;
+        let over_img = hovered && ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| img.contains(p));
+        let ctx = ui.ctx();
         if self.panning.is_some() {
-            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        } else if move_tool && hovered {
-            ui.ctx().set_cursor_icon(CursorIcon::Grab); // the canvas shows Move over marks
-        } else if hovered && !drawing && let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
-            if img.contains(p) {
-                ui.ctx().set_cursor_icon(s.cursor);
+            ctx.set_cursor_icon(CursorIcon::Grabbing);
+        } else if pan_tool && hovered {
+            ctx.set_cursor_icon(CursorIcon::Grab); // the canvas shows Move over marks
+        } else if over_img && !drawing {
+            if blocked {
+                ctx.set_cursor_icon(CursorIcon::NotAllowed);
+            } else {
+                match &s.cursor {
+                    HostCursor::Icon(i) => ctx.set_cursor_icon(*i),
+                    HostCursor::Image(img) => {
+                        ctx.set_cursor_icon(CursorIcon::Default);
+                        self.app_image = Some(img.clone());
+                    }
+                }
             }
         }
     }

@@ -11,16 +11,17 @@ use std::{
 };
 
 use calloop::{RegistrationToken, channel};
-use guilab_compositor::{InputEvent, InputSource, Session, render::Renderer};
+use guilab_compositor::{AppCursor, InputEvent, InputSource, Session, render::Renderer};
 use guilab_proto::{Annotation, EventData, Response, ViewerInfo, text::Fmt};
 use guilab_viewer::{
     Action, BufferKind, Connected, FeedItem, HostEvent, HostSource, Input, SessionFrame, Viewer, Who,
+    CursorImage, HostCursor,
     egui::{ColorImage, CursorIcon as EguiCursor},
     markup,
 };
 use smithay::{
     backend::input::AxisSource,
-    input::{keyboard::Keycode, pointer::{CursorIcon, CursorImageStatus}},
+    input::{keyboard::Keycode, pointer::CursorIcon},
 };
 
 use crate::{
@@ -54,13 +55,41 @@ pub(crate) struct Shown {
     /// `show` requests waiting for the first frame.
     waiters: Vec<UnixStream>,
     deadline: Instant,
+    /// Per session (by tag): the app cursor as of `Session::cursor_seq`.
+    cursors: std::collections::HashMap<String, (u64, HostCursor)>,
+    next_cursor_id: u64,
 }
 
-fn egui_cursor(status: &CursorImageStatus) -> EguiCursor {
-    let CursorImageStatus::Named(icon) = status else {
-        // A client-drawn cursor surface: we can't forward its image, show an arrow.
-        return if matches!(status, CursorImageStatus::Hidden) { EguiCursor::None } else { EguiCursor::Default };
-    };
+impl Shown {
+    /// The session's app cursor for the viewer (converted once per change).
+    fn cursor(&mut self, session: &mut Session) -> HostCursor {
+        let seq = session.cursor_seq();
+        if let Some((s, c)) = self.cursors.get(&session.tag)
+            && *s == seq
+        {
+            return c.clone();
+        }
+        let c = match session.app_cursor() {
+            AppCursor::Hidden => HostCursor::Icon(EguiCursor::None),
+            AppCursor::Named(i) => HostCursor::Icon(egui_cursor(i)),
+            AppCursor::Image(img) => {
+                self.next_cursor_id += 1;
+                HostCursor::Image(std::sync::Arc::new(CursorImage {
+                    id: self.next_cursor_id,
+                    width: img.width,
+                    height: img.height,
+                    rgba: img.rgba.clone(),
+                    hotspot: img.hotspot,
+                    scale: img.scale,
+                }))
+            }
+        };
+        self.cursors.insert(session.tag.clone(), (seq, c.clone()));
+        c
+    }
+}
+
+fn egui_cursor(icon: CursorIcon) -> EguiCursor {
     match icon {
         CursorIcon::ContextMenu => EguiCursor::ContextMenu,
         CursorIcon::Help => EguiCursor::Help,
@@ -239,7 +268,7 @@ impl Server {
         };
         let shown_on = display.display().to_string();
         tracing::info!("viewer shown on {shown_on}");
-        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, token: Some(token), display, waiters, deadline }));
+        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, token: Some(token), display, waiters, deadline, cursors: Default::default(), next_cursor_id: 0 }));
     }
 
     /// Closes the viewer (if any). `why`: an error for `show` requests still waiting.
@@ -298,6 +327,8 @@ impl Server {
                 }
                 // What's under the pointer decides the overlay's light/dark colors.
                 let under: Vec<Option<[u8; 3]>> = self.sessions.values_mut().map(|slot| slot.session.color_under_pointer()).collect();
+                let cursors: Vec<HostCursor> = self.sessions.values_mut().map(|slot| s.cursor(&mut slot.session)).collect();
+                s.cursors.retain(|tag, _| self.sessions.values().any(|slot| &slot.session.tag == tag));
                 let frames: Vec<SessionFrame> = self
                     .sessions
                     .iter()
@@ -312,14 +343,15 @@ impl Server {
                             scale: o.scale,
                             locked: slot.lock.current.is_some(),
                             shared: slot.lock.current.as_ref().is_some_and(|l| l.shared),
-                            cursor: egui_cursor(&slot.session.cursor_status),
+                            cursor: HostCursor::Icon(EguiCursor::Default),
                             viz: &slot.session.viz,
                             under_pointer: None,
                         }
                     })
-                    .zip(&under)
-                    .map(|(mut f, u)| {
-                        f.under_pointer = *u;
+                    .zip(under.into_iter().zip(cursors))
+                    .map(|(mut f, (u, c))| {
+                        f.under_pointer = u;
+                        f.cursor = c;
                         f
                     })
                     .collect();

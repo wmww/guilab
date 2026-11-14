@@ -93,6 +93,9 @@ impl ClientData for ClientState {
 
 pub const SOCKET_NAME: &str = "wayland-0";
 
+/// `color_under_pointer` cache: ((viz seq, frame seq), when, color).
+pub(crate) type UnderPointer = ((u64, u64), Instant, Option<[u8; 3]>);
+
 pub struct Session {
     pub name: String,
     /// Unique per session instance; apps carry it as `GUILAB_TAG` (see procs.rs).
@@ -122,7 +125,12 @@ pub struct Session {
     pub xwayland_shell_state: XWaylandShellState,
 
     pub seat: Seat<Session>,
+    /// What the apps want the cursor to be; change it with `set_cursor_status`.
     pub cursor_status: CursorImageStatus,
+    pub(crate) cursor_seq: u64,
+    pub(crate) cursor_image: Option<std::sync::Arc<crate::cursor::CursorImage>>,
+    /// A named cursor loaded from the theme, by (icon, scale bits).
+    pub(crate) named_cursor: Option<crate::cursor::NamedCursor>,
     pub output: Output,
     pub space: Space<Window>,
     pub popups: PopupManager,
@@ -153,7 +161,7 @@ pub struct Session {
     /// Input that reached the apps, for the viewer to show.
     pub viz: guilab_proto::viz::VizLog,
     /// Cache for `color_under_pointer`: (viz end, frame seq), when sampled, the color.
-    pub(crate) under_pointer: Option<((u64, u64), Instant, Option<[u8; 3]>)>,
+    pub(crate) under_pointer: Option<UnderPointer>,
     /// A button was pressed while a popup grab was active (see `popup_may_close`).
     pub click_in_grab: bool,
     /// Mime types of a client-owned clipboard selection (None: empty or ours).
@@ -299,6 +307,9 @@ impl Session {
             xwayland_shell_state,
             seat,
             cursor_status: CursorImageStatus::default_named(),
+            cursor_seq: 0,
+            cursor_image: None,
+            named_cursor: None,
             output,
             space,
             popups: PopupManager::default(),

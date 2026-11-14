@@ -109,6 +109,9 @@ enum Cmd {
         /// Capture now instead of waiting up to 3 s for apps to stop drawing.
         #[arg(long)]
         no_settle: bool,
+        /// Draw the mouse cursor in (the app's own cursor, at the pointer).
+        #[arg(long)]
+        cursor: bool,
     },
     /// Show or change the output size (pixels) and scale.
     Output {
@@ -319,9 +322,10 @@ fn real_main(cli: Cli) -> Result<(), String> {
         Cmd::Kill { id } => Command::Kill { id },
         Cmd::Ps => Command::Ps,
         Cmd::Tree => Command::Tree,
-        Cmd::Screenshot { output, no_settle } => Command::Screenshot {
+        Cmd::Screenshot { output, no_settle, cursor } => Command::Screenshot {
             path: output.map(|p| std::path::absolute(&p).unwrap_or(p)),
             settle: !no_settle,
+            cursor,
         },
         Cmd::Output { size, scale } => Command::Output { size, scale },
         Cmd::Lock { force } => Command::Lock { force },

@@ -17,4 +17,4 @@ Enabled per session (`Session::new`): compositor v6, subcompositor, shm, xdg-she
 Built (`input.rs`, `actions.rs`, `keys.rs`; behaviours in `code-map.md`). Still useful:
 - `InputTime::now()` for synthetic events. Gestures: `ptr.gesture_{swipe,pinch,hold}_*`, then `ptr.frame`. Touch focus is fixed at `down`.
 - Text-input-v3 only routes to an IME; smithay has no compositor-side `commit_string`, so it isn't a typing path.
-- Not built: hold gestures, `screenshot --cursor` (anvil `cursor.rs` + `drawing.rs`), DnD icon `wl_surface.offset` (icon is drawn at the pointer).
+- Not built: hold gestures, DnD icon `wl_surface.offset` (icon is drawn at the pointer).

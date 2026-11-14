@@ -79,6 +79,7 @@ pub(crate) struct ShotWait {
     pub stream: UnixStream,
     pub path: PathBuf,
     pub settle: bool,
+    pub cursor: bool,
     pub start: Instant,
 }
 

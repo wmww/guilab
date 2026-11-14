@@ -106,6 +106,46 @@ pub struct RawKey {
     pub pressed: bool,
 }
 
+/// A cursor image for the host pointer.
+pub struct CursorImage {
+    /// Unique per image content (images are re-sent only when it changes).
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Premultiplied RGBA8.
+    pub rgba: Vec<u8>,
+    /// Hotspot in image pixels.
+    pub hotspot: (i32, i32),
+    /// Image pixels per logical pixel: the cursor shows at size / scale host points.
+    pub scale: f64,
+}
+
+/// What the host pointer shows over the window.
+#[derive(Clone)]
+pub enum HostCursor {
+    Icon(egui::CursorIcon),
+    Image(std::sync::Arc<CursorImage>),
+}
+
+impl HostCursor {
+    fn same(&self, o: &HostCursor) -> bool {
+        match (self, o) {
+            (HostCursor::Icon(a), HostCursor::Icon(b)) => a == b,
+            (HostCursor::Image(a), HostCursor::Image(b)) => a.id == b.id,
+            _ => false,
+        }
+    }
+}
+
+/// The surface and buffers for image cursors.
+struct CursorSurface {
+    surface: WlSurface,
+    viewport: Option<WpViewport>,
+    pool: SlotPool,
+    /// The attached buffer (kept alive while the host may read it).
+    buffer: Option<ShmBuffer>,
+}
+
 /// How frames reach the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferKind {
@@ -138,7 +178,9 @@ pub struct HostState {
     registry: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
-    _compositor: CompositorState,
+    compositor: CompositorState,
+    viewporter: Option<WpViewporter>,
+    cursor_surface: Option<CursorSurface>,
     _xdg: XdgShell,
     shm: Shm,
     dmabuf: DmabufState,
@@ -153,8 +195,10 @@ pub struct HostState {
     cursor_device: Option<WpCursorShapeDeviceV1>,
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
+    /// Serial of the last pointer enter (`set_cursor` needs it).
     pointer_serial: u32,
-    cursor: Option<Shape>,
+    /// What the pointer should show (re-applied on enter).
+    cursor: Option<HostCursor>,
     present: Option<Present>,
     feedback: Option<DmabufFeedback>,
     /// From the host's `zwp_linux_dmabuf_feedback_v1`, once known: whether it can take our dmabufs.
@@ -225,7 +269,8 @@ impl HostState {
         let surface = compositor.create_surface(&qh);
         // egui draws GL-style (row 0 at the bottom); the host flips it back.
         surface.set_buffer_transform(wl_output::Transform::Flipped180);
-        let viewport = g.bind::<WpViewporter, _, _>(&qh, 1..=1, ()).ok().map(|v| v.get_viewport(&surface, &qh, ()));
+        let viewporter = g.bind::<WpViewporter, _, _>(&qh, 1..=1, ()).ok();
+        let viewport = viewporter.as_ref().map(|v| v.get_viewport(&surface, &qh, ()));
         let fractional = match (&viewport, g.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())) {
             (Some(_), Ok(m)) => Some(m.get_fractional_scale(&surface, &qh, ())),
             _ => None,
@@ -241,7 +286,9 @@ impl HostState {
             output_state: OutputState::new(g, &qh),
             gestures: g.bind::<ZwpPointerGesturesV1, _, _>(&qh, 1..=3, ()).ok(),
             cursor_shapes: CursorShapeManager::bind(g, &qh).ok(),
-            _compositor: compositor,
+            compositor,
+            viewporter,
+            cursor_surface: None,
             _xdg: xdg,
             shm,
             dmabuf,
@@ -303,18 +350,70 @@ impl HostState {
         ((w as f64 * self.scale).round().max(1.0) as u32, (h as f64 * self.scale).round().max(1.0) as u32)
     }
 
-    pub fn set_cursor(&mut self, icon: egui::CursorIcon) {
-        let shape = cursor_shape(icon);
-        if self.cursor == shape {
+    pub fn set_cursor(&mut self, cursor: HostCursor) {
+        if self.cursor.as_ref().is_some_and(|c| c.same(&cursor)) {
             return;
         }
-        self.cursor = shape;
-        let Some(ptr) = &self.pointer else { return };
-        match (shape, &self.cursor_device) {
-            (Some(s), Some(d)) => d.set_shape(self.pointer_serial, s),
-            (None, _) => ptr.set_cursor(self.pointer_serial, None, 0, 0),
-            _ => {}
+        self.cursor = Some(cursor);
+        self.apply_cursor();
+    }
+
+    /// Sends `self.cursor` to the host (needs a pointer serial).
+    fn apply_cursor(&mut self) {
+        let (Some(ptr), Some(cursor)) = (&self.pointer, &self.cursor) else { return };
+        let serial = self.pointer_serial;
+        match cursor {
+            HostCursor::Icon(icon) => match (cursor_shape(*icon), &self.cursor_device) {
+                (Some(s), Some(d)) => d.set_shape(serial, s),
+                (None, _) => ptr.set_cursor(serial, None, 0, 0),
+                // No cursor-shape protocol: leave the host's cursor alone.
+                _ => {}
+            },
+            HostCursor::Image(img) => {
+                let img = img.clone();
+                let ptr = ptr.clone();
+                match self.cursor_image(&img) {
+                    Ok((surface, hx, hy)) => ptr.set_cursor(serial, Some(&surface), hx, hy),
+                    Err(e) => tracing::warn!("viewer cursor image: {e:#}"),
+                }
+            }
         }
+    }
+
+    /// Puts `img` on the cursor surface; returns it with the hotspot in surface points.
+    fn cursor_image(&mut self, img: &CursorImage) -> anyhow::Result<(WlSurface, i32, i32)> {
+        if self.cursor_surface.is_none() {
+            let surface = self.compositor.create_surface(&self.qh);
+            let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, &self.qh, ()));
+            let pool = SlotPool::new(64 * 64 * 4, &self.shm).context("cursor shm pool")?;
+            self.cursor_surface = Some(CursorSurface { surface, viewport, pool, buffer: None });
+        }
+        let c = self.cursor_surface.as_mut().unwrap();
+        let (w, h) = (img.width.max(1), img.height.max(1));
+        let (buf, canvas) = c.pool.create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)?;
+        // Premultiplied RGBA -> little-endian ARGB (BGRA bytes).
+        for (d, s) in canvas.as_chunks_mut::<4>().0.iter_mut().zip(img.rgba.as_chunks::<4>().0) {
+            *d = [s[2], s[1], s[0], s[3]];
+        }
+        buf.attach_to(&c.surface)?;
+        // The cursor's logical size is its pixel size over its scale, whatever the host's
+        // scale (real cursors aren't zoomed).
+        let scale = img.scale.max(0.1);
+        let (lw, lh) = (((w as f64 / scale).round() as i32).max(1), ((h as f64 / scale).round() as i32).max(1));
+        let k = if let Some(vp) = &c.viewport {
+            vp.set_destination(lw, lh);
+            scale
+        } else {
+            // Integer buffer scale only if it divides the image.
+            let s = scale.round() as i32;
+            let s = if (scale - s as f64).abs() < 0.01 && s >= 1 && w as i32 % s == 0 && h as i32 % s == 0 { s } else { 1 };
+            c.surface.set_buffer_scale(s);
+            s as f64
+        };
+        c.surface.damage_buffer(0, 0, w as i32, h as i32);
+        c.surface.commit();
+        c.buffer = Some(buf);
+        Ok((c.surface.clone(), (img.hotspot.0 as f64 / k).round() as i32, (img.hotspot.1 as f64 / k).round() as i32))
     }
 
     /// Picks dmabuf or shm once the host's dmabuf feedback is in (or can't come).
@@ -722,8 +821,7 @@ impl PointerHandler for HostState {
                 PointerEventKind::Enter { serial } => {
                     self.pointer_serial = serial;
                     // The host forgets our cursor on enter; set it again.
-                    let c = self.cursor.take();
-                    self.set_cursor(c.map_or(egui::CursorIcon::Default, |_| egui::CursorIcon::Default));
+                    self.apply_cursor();
                     self.pointer_pos = pos;
                     self.events.push(HostInput::Egui(egui::Event::PointerMoved(pos)));
                 }
@@ -732,8 +830,7 @@ impl PointerHandler for HostState {
                     self.pointer_pos = pos;
                     self.events.push(HostInput::Egui(egui::Event::PointerMoved(pos)));
                 }
-                PointerEventKind::Press { button, serial, .. } | PointerEventKind::Release { button, serial, .. } => {
-                    self.pointer_serial = serial;
+                PointerEventKind::Press { button, .. } | PointerEventKind::Release { button, .. } => {
                     let pressed = matches!(ev.kind, PointerEventKind::Press { .. });
                     if let Some(button) = egui_button(button) {
                         self.events.push(HostInput::Egui(egui::Event::PointerButton { pos, button, pressed, modifiers: self.modifiers }));

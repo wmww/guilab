@@ -17,3 +17,4 @@ rustix.workspace = true
 png.workspace = true
 libc.workspace = true
 anyhow.workspace = true
+xcursor = "0.3"

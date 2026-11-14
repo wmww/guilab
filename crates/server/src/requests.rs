@@ -222,7 +222,7 @@ impl Server {
                 }
                 Response::ok(s.output_info())
             }
-            Command::Screenshot { path, settle } => {
+            Command::Screenshot { path, settle, cursor } => {
                 let path = match path {
                     Some(p) => p,
                     None => {
@@ -235,7 +235,7 @@ impl Server {
                     Err(e) => return Some(e),
                 };
                 // Answered after the next frame (see check_waiters).
-                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, start: Instant::now() });
+                self.waiters.push(ShotWait { session: name.to_string(), key: key.to_string(), stream, path, settle, cursor, start: Instant::now() });
                 return None;
             }
             Command::Poll { timeout_ms, follow, tiers } => {
@@ -472,7 +472,7 @@ impl Server {
                 continue;
             };
             let w = self.waiters.remove(i);
-            let resp = match s.write_png(&w.path) {
+            let resp = match s.write_png(&w.path, w.cursor) {
                 Ok((width, height)) => {
                     s.log.push(EventData::Screenshot { path: w.path.clone() }, Some(&w.key));
                     Response::ok(ShotInfo { path: w.path, width, height, settled })

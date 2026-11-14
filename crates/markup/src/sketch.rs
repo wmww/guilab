@@ -466,7 +466,8 @@ impl Sketch {
             if self.drawing.as_ref().is_some_and(|d| d.moving.is_some()) {
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             } else if resp.hovered() && pos.is_some_and(|p| self.mark_at(p).is_some()) {
-                ui.ctx().set_cursor_icon(CursorIcon::Move);
+                // Four arrows. Not `Move`: many themes (Adwaita) draw that as the arrow.
+                ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
             }
         } else if self.tool != Tool::Interact && resp.hovered() && pos.is_some_and(on_image) {
             ui.ctx().set_cursor_icon(if self.tool == Tool::Text { CursorIcon::Text } else { CursorIcon::Crosshair });

@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use smithay::{
+    input::pointer::CursorImageStatus,
     backend::renderer::element::default_primary_scanout_output_compare,
     desktop::utils::{
         OutputPresentationFeedback, send_frames_surface_tree, surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
@@ -77,6 +78,10 @@ impl Session {
         if let Some(icon) = &icon {
             send_frames_surface_tree(icon, &output, now, None, |_, _| Some(output.clone()));
         }
+        // Cursor surfaces too, so animated cursors run.
+        if let CursorImageStatus::Surface(c) = &self.cursor_status {
+            send_frames_surface_tree(c, &output, now, None, |_, _| Some(output.clone()));
+        }
         self.space.refresh();
         self.popups.cleanup();
         self.track_windows();
@@ -107,9 +112,13 @@ impl Session {
         if !drawing && acked && quiet && drawn { Settle::Settled } else { Settle::Busy }
     }
 
-    /// Writes the last rendered frame as an RGB PNG. Returns its pixel size.
-    pub fn write_png(&mut self, path: &Path) -> anyhow::Result<(u32, u32)> {
-        let (w, h, rgba) = self.read_rgba()?;
+    /// Writes the last rendered frame as an RGB PNG, with the cursor drawn in if `cursor`.
+    /// Returns its pixel size.
+    pub fn write_png(&mut self, path: &Path, cursor: bool) -> anyhow::Result<(u32, u32)> {
+        let (w, h, mut rgba) = self.read_rgba()?;
+        if cursor {
+            self.draw_cursor(w, h, &mut rgba);
+        }
         write_rgba_png(path, w, h, &rgba)?;
         Ok((w, h))
     }

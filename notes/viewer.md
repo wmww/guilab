@@ -28,8 +28,15 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 - The UI tracks the buttons and keys it pressed in a session and releases them on tab switch, lock (blocked), keyboard leave and hide.
 - Pinch and swipe (`zwp_pointer_gesture_*_v1`, bound by hand) arrive as `HostInput::Gesture`. A gesture that begins over the image with "Use the app" goes to the app whole; otherwise a pinch zooms the view at the pointer and a swipe does nothing.
 - Key repeat: the host compositor leaves repeat to clients, so `HostState::tick_repeat` (called each server tick via `wants_draw`) repeats the held key for egui only, at the host's `repeat_info`. Raw keys forwarded to sessions never repeat; the session's apps repeat themselves (see design.md).
-- Pointer leave: the UI tracks which session last got motion (`pointer_in`) and sends `Input::Leave` when the pointer leaves the image, a tool takes over, the lock blocks, the tab changes or the window loses the pointer. Cursor: the session's named cursor (`CursorImageStatus::Named`) maps to egui `CursorIcon` and then to `wp_cursor_shape_v1`.
+- Pointer leave: the UI tracks which session last got motion (`pointer_in`) and sends `Input::Leave` when the pointer leaves the image, a tool takes over, the lock blocks, the tab changes or the window loses the pointer. Cursors: see below.
 - Wheel vs touchpad: axis events with value120/discrete or source Wheel become egui `Line` units (notches), else `Point`. Forwarded wheel = 15 logical px per notch (like agent `scroll`); smooth scroll is scaled so content follows the fingers.
+
+## Cursors
+- Over the app with input going through: the app's own cursor. The compositor (`cursor.rs`) gives `AppCursor`: Named (cursor-shape protocol), Hidden, or Image (a `wl_pointer.set_cursor` surface rendered to RGBA at the output scale by `Gpu::render_surface`, lazily, once per `cursor_seq` change; animated cursors get frame callbacks each tick, and cursor commits don't count for settle). The server converts it to `HostCursor` once per change (`Shown::cursor`).
+- Host side (`HostState::set_cursor`): named → `wp_cursor_shape_v1`; image → an shm buffer on our own cursor surface, viewport destination = image size / its scale (not the viewer's zoom: real cursors aren't zoomed); hidden → null surface. `set_cursor` needs the *enter* serial (smithay rejects others outside a grab).
+- Over the image when input doesn't go through: blocked by the lock → NotAllowed; drawing tools → crosshair/text (canvas); Move tool and a frozen screenshot with "Use the app" → Grab (drag pans), AllScroll over marks (Adwaita draws `move` as the arrow), Grabbing while panning. Never the arrow there.
+- The UI decides via egui's cursor; for an image cursor it sets `Default` and `ViewerUi::host_cursor` swaps in the image if nothing overrode it.
+- `screenshot --cursor` draws the same cursor at the pointer (named shapes from the xcursor theme, `XCURSOR_THEME`/`XCURSOR_SIZE`, default `default`→Adwaita), which is how tests check the host's cursor (`viewer::app_cursors`, app `gtk_cursors.py`).
 
 ## Chat and drawing (ui.rs, markup)
 - Panel order matters in egui: tabs (top), toolbar (left, full height), chat (bottom), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.

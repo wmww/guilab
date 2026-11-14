@@ -120,6 +120,9 @@ pub enum Command {
         /// Absolute path; None = a new file in the session dir.
         path: Option<PathBuf>,
         settle: bool,
+        /// Draw the pointer's cursor in.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cursor: bool,
     },
     /// Change and/or show the output. Reply: [`OutputInfo`].
     Output { size: Option<[u32; 2]>, scale: Option<f64> },
@@ -215,10 +218,11 @@ impl Command {
             Command::Kill { id } => format!("kill{}", id.map(|i| format!(" {i}")).unwrap_or_default()),
             Command::Ps => "ps".into(),
             Command::Tree => "tree".into(),
-            Command::Screenshot { path, settle } => format!(
-                "screenshot{}{}",
+            Command::Screenshot { path, settle, cursor } => format!(
+                "screenshot{}{}{}",
                 opt("-o", path.as_ref().map(|p| p.display().to_string())),
-                if *settle { "" } else { " --no-settle" }
+                if *settle { "" } else { " --no-settle" },
+                if *cursor { " --cursor" } else { "" }
             ),
             Command::Output { size, scale } => format!(
                 "output{}{}",
@@ -440,7 +444,7 @@ mod tests {
     fn request_roundtrip() {
         let req = Request {
             target: Target { name: Some("a".into()), ..Default::default() },
-            cmd: Command::Screenshot { path: None, settle: true },
+            cmd: Command::Screenshot { path: None, settle: true, cursor: false },
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"target":{"name":"a"},"cmd":"screenshot","path":null,"settle":true}"#);

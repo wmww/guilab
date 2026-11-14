@@ -101,6 +101,10 @@ impl CompositorHandler for Session {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // Cursor commits (animated cursors) don't count as the app drawing.
+        if self.cursor_commit(surface) {
+            return;
+        }
         self.last_commit = Instant::now();
         tracing::trace!(surface = surface_id(surface), "commit");
         if !is_sync_subsurface(surface) {
@@ -158,7 +162,7 @@ impl SeatHandler for Session {
     }
 
     fn cursor_image(&mut self, _: &Seat<Self>, image: CursorImageStatus) {
-        self.cursor_status = image;
+        self.set_cursor_status(image);
     }
 }
 

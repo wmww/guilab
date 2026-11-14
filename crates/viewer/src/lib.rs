@@ -28,7 +28,7 @@ use smithay::backend::{
 
 pub use egui;
 pub use guilab_markup::{self as markup, Annotated, FeedItem, Who};
-pub use host::{BufferKind, Connected, HostInput, HostState, connect};
+pub use host::{BufferKind, Connected, CursorImage, HostCursor, HostInput, HostState, connect};
 pub use source::{HostEvent, HostSource};
 pub use ui::{Action, Input};
 
@@ -45,7 +45,7 @@ pub struct SessionFrame<'a> {
     pub scale: f64,
     pub locked: bool,
     pub shared: bool,
-    pub cursor: egui::CursorIcon,
+    pub cursor: HostCursor,
     /// Input that reached the apps (the overlay shows it).
     pub viz: &'a guilab_proto::viz::VizLog,
     /// Average color around the pointer in the session's frame.
@@ -97,7 +97,11 @@ impl Viewer {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let cur = self.ui.current();
         for s in sessions {
-            (s.name, s.locked, s.shared, s.size, s.scale.to_bits(), s.cursor as u8).hash(&mut h);
+            (s.name, s.locked, s.shared, s.size, s.scale.to_bits()).hash(&mut h);
+            match &s.cursor {
+                HostCursor::Icon(i) => (*i as u8 as u64).hash(&mut h),
+                HostCursor::Image(img) => (img.id | 1 << 63).hash(&mut h),
+            }
             if Some(s.name) == cur || cur.is_none() {
                 s.seq.hash(&mut h);
                 s.viz.end().hash(&mut h);
@@ -184,7 +188,7 @@ impl Viewer {
                 scale: s.scale,
                 locked: s.locked,
                 shared: s.shared,
-                cursor: s.cursor,
+                cursor: s.cursor.clone(),
                 viz: (Some(s.name) == cur.as_deref()).then_some(s.viz),
                 under_pointer: s.under_pointer,
             })
@@ -212,7 +216,8 @@ impl Viewer {
         if self.ui.current().map(str::to_string) != cur || self.ui.nearest() != nearest {
             self.host.dirty = true; // the mirror is stale (new tab, or its filter changed)
         }
-        self.host.set_cursor(out.platform_output.cursor_icon);
+        let cursor = self.ui.host_cursor(out.platform_output.cursor_icon);
+        self.host.set_cursor(cursor);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         self.next_repaint = (delay < Duration::from_secs(3600)).then(|| now + delay);
         self.pending.append(out.textures_delta);

@@ -14,7 +14,7 @@ Requires the `guilab` binary on PATH (`cargo install --path crates/guilab` from 
 ```sh
 guilab new                          # session named after this git worktree (-s 1280x720, --scale 2, -x for X11 apps)
 guilab run -- ./target/debug/myapp  # start the app inside it; its log path: guilab ps
-guilab screenshot                   # waits for apps to finish drawing, prints the PNG path: read it
+guilab screenshot                   # waits for apps to finish drawing, prints the PNG path: read it (--cursor: draw the mouse cursor in)
 guilab tree                         # windows/popups: ids, app_id, title, pixel geometry
 guilab lock                         # input needs the lock; prints a token, e.g. gfm7b785
 guilab -t gfm7b785 input move 200 150 click type 'hello' key Return
