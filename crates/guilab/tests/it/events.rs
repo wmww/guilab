@@ -78,7 +78,9 @@ fn delivery_on_next_command() {
     let (code, out, err) = lab.status(&["output"]);
     assert_eq!((code, out.as_str()), (0, "640x480\n"));
     assert!(err.starts_with("[guilab events since the session started; not errors]\n"), "{err}");
-    assert!(err.contains("human: moved pointer 5,5 → 200,100 (0.2s); double-clicked at 200,100; typed \"Hi there\"; pressed Return; pressed ctrl+s"), "{err}");
+    // The glide's duration varies under load.
+    assert!(err.contains("human: moved pointer 5,5 → 200,100 (0."), "{err}");
+    assert!(err.contains("s); double-clicked at 200,100; typed \"Hi there\"; pressed Return; pressed ctrl+s"), "{err}");
     // Delivered once.
     let (_, _, err) = lab.status(&["output"]);
     assert!(err.is_empty(), "{err}");

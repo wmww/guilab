@@ -119,6 +119,9 @@ pub enum Action {
     Freeze { session: String },
     /// The human sent a message (text, composited drawings with their text annotations).
     Message { session: String, text: String, images: Vec<Annotated> },
+    /// File > Save screenshot: ask where, then save `image` (the open drawing with its
+    /// marks), or the session's live output if None. Report back with [`ViewerUi::notice`].
+    SaveScreenshot { session: String, image: Option<std::sync::Arc<egui::ColorImage>> },
 }
 
 /// UI state of one session.
@@ -187,7 +190,15 @@ pub struct ViewerUi {
     pub nav: NavSetting,
     /// The touchpad gesture in progress: where it goes, and for the app, which session.
     gesture: Option<(GestureTo, String)>,
+    /// When (egui time) the human last tried to use an app an agent has locked.
+    blocked_at: Option<f64>,
+    /// Messages for the human (e.g. "Saved to ..."), shown as a toast; and when shown.
+    notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    notice: Option<(String, f64)>,
 }
+
+/// How long toasts stay up after the thing that raised them (seconds).
+const TOAST_SECS: f64 = 4.0;
 
 fn linux_button(b: PointerButton) -> u32 {
     match b {
@@ -243,6 +254,11 @@ impl ViewerUi {
         p
     }
 
+    /// Where other threads post messages for the human (shown as a toast).
+    pub fn notices(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.notices.clone()
+    }
+
     /// The next session event seq its feed wants (0 = it has nothing yet).
     pub fn feed_next(&mut self, name: &str, key: &str) -> u64 {
         self.per(name, key).feed_next
@@ -279,16 +295,18 @@ impl ViewerUi {
         }
         self.sessions.retain(|k, p| sessions.iter().any(|s| s.name == k && s.key == p.key));
 
+        let now = ui.input(|i| i.time);
+        self.menu_bar(ui, sessions, &mut out);
+
         // Session tabs: the selected one takes the panel color below it, so it reads as
         // attached to the session it shows.
         let bar = ui.visuals().extreme_bg_color;
-        egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(bar).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 0 })).show(ui, |ui| {
+        egui::Panel::top("tabs").show_separator_line(false).frame(egui::Frame::new().fill(bar).inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 0 })).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for s in sessions {
                     let sel = self.current.as_deref() == Some(s.name);
-                    let label = if s.locked { format!("🔒 {}", s.name) } else { s.name.to_string() };
-                    if session_tab(ui, sel, &label).clicked() && !sel {
+                    if session_tab(ui, sel, s.name).clicked() && !sel {
                         self.current = Some(s.name.to_string());
                     }
                 }
@@ -325,14 +343,6 @@ impl ViewerUi {
             }
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            egui::Panel::top("session-bar").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    self.lock_bar(ui, s, &mut out);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        zoom_bar(ui, &mut p.zoom);
-                    });
-                });
-            });
             let view = ui.available_rect_before_wrap();
             let resp = ui.allocate_rect(view, Sense::hover());
             let drawing = p.sketch.active();
@@ -340,6 +350,45 @@ impl ViewerUi {
             if drawing && let Some(rect) = self.image_rect {
                 let size = [s.size.0 as usize, s.size.1 as usize];
                 p.sketch.canvas(ui, guilab_markup::View { rect, clip: view, size, scale: s.scale as f32 });
+            }
+            // Toasts above the drawing's own (slot 0).
+            let mut slot = usize::from(p.sketch.drawing_open());
+            if !s.blocked() {
+                self.blocked_at = None;
+            }
+            if let Some(t) = self.blocked_at {
+                let mut stop = false;
+                let r = guilab_markup::toast(ui, egui::Id::new("blocked-toast"), view, slot, |ui| {
+                    ui.label("Agent using app");
+                    stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
+                });
+                slot += 1;
+                if stop {
+                    out.push(Action::Revoke { session: s.name.to_string() });
+                    self.blocked_at = None;
+                } else if r.hovered() {
+                    self.blocked_at = Some(now);
+                } else if now - t > TOAST_SECS {
+                    self.blocked_at = None;
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TOAST_SECS - (now - t) + 0.05));
+                }
+            }
+            if let Ok(mut n) = self.notices.lock()
+                && let Some(text) = n.pop()
+            {
+                n.clear();
+                self.notice = Some((text, now));
+            }
+            if let Some((text, t)) = &self.notice {
+                guilab_markup::toast(ui, egui::Id::new("notice-toast"), view, slot, |ui| {
+                    ui.label(text.as_str());
+                });
+                if now - t > TOAST_SECS {
+                    self.notice = None;
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(TOAST_SECS - (now - t) + 0.05));
+                }
             }
         });
         if p.sketch.wants_screenshot() {
@@ -349,23 +398,56 @@ impl ViewerUi {
         out
     }
 
-    fn lock_bar(&mut self, ui: &mut egui::Ui, s: &SessionView, out: &mut Vec<Action>) {
-        if !s.locked {
-            ui.label("Unlocked: you and agents can use it.");
-            return;
-        }
-        // Buttons first, so they don't move when the text changes.
-        if ui.button("Revoke").on_hover_text("Take the lock away from the agent").clicked() {
-            out.push(Action::Revoke { session: s.name.to_string() });
-        }
-        if ui.selectable_label(s.shared, "Share").on_hover_text("Use the app too while the agent keeps its lock").clicked() {
-            out.push(Action::Share { session: s.name.to_string(), on: !s.shared });
-        }
-        if s.shared {
-            ui.label("🔒 An agent holds the lock; shared, so you can use it too.");
-        } else {
-            ui.colored_label(Color32::from_rgb(240, 180, 80), "🔒 An agent holds the lock; your input is blocked.");
-        }
+    /// File / Edit / View, for the current session.
+    fn menu_bar(&mut self, ui: &mut egui::Ui, sessions: &[SessionView], out: &mut Vec<Action>) {
+        let cur = self.current.clone();
+        let p = cur.as_deref().and_then(|c| {
+            let key = sessions.iter().find(|s| s.name == c)?.key;
+            Some(self.per(c, key))
+        });
+        egui::Panel::top("menu").show_separator_line(false).show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                let Some(p) = p else {
+                    ui.add_enabled_ui(false, |ui| ["File", "Edit", "View"].map(|m| ui.menu_button(m, |_| {})));
+                    return;
+                };
+                let name = cur.clone().unwrap_or_default();
+                ui.menu_button("File", |ui| {
+                    let label = if p.sketch.drawing_open() { "Save drawing as image…" } else { "Save screenshot…" };
+                    if ui.button(label).clicked() {
+                        out.push(Action::SaveScreenshot { session: name.clone(), image: p.sketch.preview() });
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(p.sketch.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                        p.sketch.undo();
+                    }
+                    if ui.add_enabled(p.sketch.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z")).clicked() {
+                        p.sketch.redo();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    let z = &mut p.zoom;
+                    if ui.button("Zoom in").clicked() {
+                        z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
+                        z.fit = false;
+                    }
+                    if ui.button("Zoom out").clicked() {
+                        z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
+                        z.fit = false;
+                    }
+                    ui.separator();
+                    if ui.radio(z.fit, "Fit to window").clicked() {
+                        *z = Zoom::default();
+                    }
+                    if ui.radio(!z.fit && z.zoom == 1.0, "Actual size (1:1)").clicked() {
+                        *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                    }
+                    ui.separator();
+                    ui.weak(format!("Zoom {:.0}%", z.zoom * 100.0));
+                });
+            });
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -397,6 +479,9 @@ impl ViewerUi {
         let send = |out: &mut Vec<Action>, input: Input| out.push(Action::Input { session: s.name.to_string(), input });
         let blocked = s.blocked();
         let to_app = !blocked && !drawing;
+        let now = ui.input(|i| i.time);
+        // The human tried to use the app while an agent holds it: say so (a toast).
+        let mut tried = false;
         let layer = ui.layer_id();
         let ours = |p: Pos2| view.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer);
         let zoom_at = |z: &mut Zoom, img: &mut Rect, p: Pos2, factor: f32| {
@@ -424,6 +509,8 @@ impl ViewerUi {
                         }
                         self.held_keys.push(k.code);
                         send(out, Input::Key { code: k.code, pressed: true });
+                    } else if blocked {
+                        tried = true;
                     }
                     continue;
                 }
@@ -434,7 +521,9 @@ impl ViewerUi {
                     match g {
                         Gesture::PinchBegin { fingers } | Gesture::SwipeBegin { fingers } => {
                             let pinch = matches!(g, Gesture::PinchBegin { .. });
-                            let over_app = to_app && self.pointer.is_some_and(|p| ours(p) && img.contains(p));
+                            let over_img = self.pointer.is_some_and(|p| ours(p) && img.contains(p));
+                            tried |= blocked && !drawing && over_img;
+                            let over_app = to_app && over_img;
                             if over_app {
                                 self.gesture = Some((GestureTo::App { pinch }, s.name.to_string()));
                                 send(out, if pinch { Input::PinchBegin { fingers } } else { Input::SwipeBegin { fingers } });
@@ -548,6 +637,7 @@ impl ViewerUi {
                         continue;
                     }
                     if !to_app {
+                        tried |= blocked && !drawing;
                         continue;
                     }
                     self.held_in = Some(s.name.to_string());
@@ -587,6 +677,7 @@ impl ViewerUi {
                         continue;
                     }
                     if blocked {
+                        tried = true;
                         continue;
                     }
                     let stop = phase == egui::TouchPhase::End;
@@ -609,6 +700,9 @@ impl ViewerUi {
             }
         }
 
+        if tried {
+            self.blocked_at = Some(now);
+        }
         // A drawing tool or the lock took over while the pointer was in the app.
         if !to_app && self.held_buttons.is_empty() && self.pointer_in.take().is_some() {
             send(out, Input::Leave);
@@ -634,11 +728,6 @@ impl ViewerUi {
             }
         }
         painter.rect_stroke(img, 0.0, egui::Stroke::new(1.0, Color32::from_gray(60)), egui::StrokeKind::Outside);
-        if blocked && !drawing {
-            let banner = Rect::from_min_size(view.min + vec2(8.0, 8.0), vec2(view.width() - 16.0, 26.0));
-            painter.rect_filled(banner, 4.0, Color32::from_black_alpha(190));
-            painter.text(banner.center(), egui::Align2::CENTER_CENTER, "Input blocked: an agent holds the lock", egui::FontId::proportional(14.0), Color32::from_rgb(240, 180, 80));
-        }
         self.image_rect = Some(img);
         self.pixel_ratio = z.zoom;
 
@@ -648,34 +737,13 @@ impl ViewerUi {
         } else if move_tool && hovered {
             ui.ctx().set_cursor_icon(CursorIcon::Grab); // the canvas shows Move over marks
         } else if hovered && !drawing && let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
-            if img.contains(p) && !blocked {
+            if img.contains(p) {
                 ui.ctx().set_cursor_icon(s.cursor);
-            } else if img.contains(p) {
-                ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
             }
         }
     }
 }
 
-fn zoom_bar(ui: &mut egui::Ui, z: &mut Zoom) {
-    // Right to left.
-    if ui.selectable_label(!z.fit && z.zoom == 1.0, "1:1").on_hover_text("One session pixel per screen pixel").clicked() {
-        *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
-    }
-    if ui.selectable_label(z.fit, "Fit").on_hover_text("Fit the window (reset zoom and pan)").clicked() {
-        *z = Zoom::default();
-    }
-    if ui.button("+").clicked() {
-        z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
-        z.fit = false;
-    }
-    ui.label(format!("{:.0}%", z.zoom * 100.0));
-    if ui.button("−").clicked() {
-        z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
-        z.fit = false;
-    }
-    ui.weak("Ctrl+scroll: zoom · middle-drag: pan");
-}
 
 /// One session tab: rounded top corners, an accent line on the selected one.
 fn session_tab(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {

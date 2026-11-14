@@ -166,6 +166,28 @@ impl Sketch {
         }
     }
 
+    pub fn can_undo(&self) -> bool {
+        self.drawing.as_ref().is_some_and(|d| !d.marks.is_empty())
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.drawing.as_ref().is_some_and(|d| !d.redo.is_empty())
+    }
+
+    /// The open drawing composited as the human sees it (marks and text), without closing it.
+    pub fn preview(&mut self) -> Option<Arc<ColorImage>> {
+        let d = self.drawing.as_ref()?;
+        let shot = d.shot.as_ref()?;
+        let mut marks = d.marks.clone();
+        if let Some(e) = &d.editing
+            && !e.text.trim().is_empty()
+        {
+            marks.push(Mark { kind: Kind::Text(e.pos, e.text.trim_end().to_string()), color: e.color });
+        }
+        let r = self.renderer.get_or_insert_with(Renderer::default);
+        Some(Arc::new(r.composite(&shot.image, &marks, d.scale)))
+    }
+
     pub fn redo(&mut self) {
         if let Some(d) = &mut self.drawing
             && let Some(m) = d.redo.pop()
@@ -253,24 +275,6 @@ impl Sketch {
                 self.color = c;
                 if matches!(self.tool, Tool::Interact | Tool::Move) {
                     self.tool = Tool::Pen;
-                }
-            }
-        }
-        ui.separator();
-        let can_undo = self.drawing.as_ref().is_some_and(|d| !d.marks.is_empty());
-        let can_redo = self.drawing.as_ref().is_some_and(|d| !d.redo.is_empty());
-        for (redo, can, tip) in [(false, can_undo, "Undo (Ctrl+Z)"), (true, can_redo, "Redo (Ctrl+Shift+Z)")] {
-            let (rect, resp) = ui.allocate_exact_size(size, if can { Sense::click() } else { Sense::hover() });
-            if can && resp.hovered() {
-                ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            let col = if can { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
-            undo_icon(ui.painter(), rect.shrink(7.0), col, redo);
-            if resp.on_hover_text(tip).clicked() {
-                if redo {
-                    self.redo();
-                } else {
-                    self.undo();
                 }
             }
         }
@@ -497,19 +501,11 @@ impl Sketch {
     fn bar(&mut self, ui: &mut Ui, clip: Rect) {
         let mut queue = false;
         let mut discard = false;
-        egui::Area::new(self.id.with("bar"))
-            .pivot(Align2::CENTER_TOP)
-            .fixed_pos(pos2(clip.center().x, clip.min.y + 8.0))
-            .order(Order::Middle)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Drawing on a frozen screenshot.");
-                        queue = ui.button("Queue").on_hover_text("Keep it for the next message").clicked();
-                        discard = ui.button("Discard").clicked();
-                    });
-                });
-            });
+        crate::toast(ui, self.id.with("bar"), clip, 0, |ui| {
+            ui.label("Drawing on a frozen screenshot");
+            queue = ui.button("Queue").on_hover_text("Keep it for the next message").clicked();
+            discard = ui.button("Discard").clicked();
+        });
         if queue {
             self.queue_drawing();
         } else if discard {
@@ -608,21 +604,3 @@ fn tool_icon(p: &egui::Painter, r: Rect, t: Tool, c: Color32) {
     }
 }
 
-/// A hooked arrow: the head on the left pointing left, the tail curving back under it.
-/// Mirrored for redo.
-fn undo_icon(p: &egui::Painter, r: Rect, c: Color32, mirror: bool) {
-    let s = Stroke::new(1.7, c);
-    let m = |q: Pos2| if mirror { pos2(r.left() + r.right() - q.x, q.y) } else { q };
-    let y0 = r.top() + r.height() * 0.3;
-    let rad = r.height() * 0.32;
-    let cx = r.right() - rad;
-    let mut pts = vec![pos2(r.left() + 3.0, y0)];
-    pts.extend((0..=12).map(|i| {
-        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
-        pos2(cx + a.cos() * rad, y0 + rad + a.sin() * rad)
-    }));
-    pts.push(pos2(r.left() + r.width() * 0.35, y0 + 2.0 * rad));
-    p.add(Shape::line(pts.into_iter().map(m).collect(), s));
-    let tip = pos2(r.left() - 0.5, y0);
-    p.add(Shape::convex_polygon(vec![m(tip), m(tip + vec2(5.0, -4.0)), m(tip + vec2(5.0, 4.0))], c, Stroke::NONE));
-}

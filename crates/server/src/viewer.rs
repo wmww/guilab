@@ -356,6 +356,24 @@ impl Server {
                 }
                 Action::Revoke { session } => self.revoke_lock(&session),
                 Action::Share { session, on } => self.share(&session, on),
+                Action::SaveScreenshot { session, image } => {
+                    let (w, h, mut rgba) = match image {
+                        Some(i) => (i.size[0] as u32, i.size[1] as u32, i.pixels.iter().flat_map(|c| c.to_array()).collect::<Vec<u8>>()),
+                        None => {
+                            let Some(slot) = self.sessions.get_mut(&session) else { continue };
+                            match slot.session.read_rgba() {
+                                Ok(shot) => shot,
+                                Err(e) => {
+                                    tracing::warn!("viewer: screenshot to save: {e:#}");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    rgba.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
+                    let ViewerState::Shown(s) = &self.viewer else { continue };
+                    save_dialog(session, w, h, rgba, s.viewer.notices());
+                }
                 Action::Freeze { session } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
                     let shot = match slot.session.read_rgba() {
@@ -478,4 +496,39 @@ fn decode_png(path: &std::path::Path) -> anyhow::Result<ColorImage> {
         }
         t => anyhow::bail!("unsupported PNG color type {t:?}"),
     })
+}
+
+/// Asks where to save (system file dialog, on its own thread so the server keeps running)
+/// and writes the PNG. Tells the human how it went via `notices`.
+fn save_dialog(session: String, w: u32, h: u32, rgba: Vec<u8>, notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let spawned = std::thread::Builder::new().name("save-dialog".into()).spawn(move || {
+        let stamp = chrono_like_stamp();
+        let mut dialog = rfd::FileDialog::new().set_title("Save screenshot").set_file_name(format!("{session}-{stamp}.png")).add_filter("PNG image", &["png"]);
+        if let Some(dir) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures")).filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut path) = dialog.save_file() else { return };
+        if path.extension().is_none() {
+            path.set_extension("png");
+        }
+        let msg = match guilab_compositor::write_rgba_png(&path, w, h, &rgba) {
+            Ok(()) => format!("Saved {}", path.display()),
+            Err(e) => format!("Couldn't save: {e:#}"),
+        };
+        if let Ok(mut n) = notices.lock() {
+            n.push(msg);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("save dialog thread: {e}");
+    }
+}
+
+/// Local time as YYYYMMDD-HHMMSS, for default file names.
+fn chrono_like_stamp() -> String {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Realtime).tv_sec as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r writes only to `tm`.
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
 }

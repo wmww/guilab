@@ -104,6 +104,9 @@ impl Viewer {
     /// there's new input (handled right away even if the frame has to wait).
     pub fn wants_draw(&mut self, now: Instant, sessions: &[SessionFrame]) -> bool {
         self.host.tick_repeat(now);
+        if self.ui.notices().lock().is_ok_and(|n| !n.is_empty()) {
+            self.host.dirty = true;
+        }
         let changed = self.host.dirty || self.next_repaint.is_some_and(|t| now >= t) || self.signature(sessions) != self.shown;
         (self.host.can_draw() && changed) || self.host.has_input()
     }
@@ -118,6 +121,11 @@ impl Viewer {
         let any = !items.is_empty();
         self.ui.push_feed(name, key, items, next);
         self.host.dirty |= any;
+    }
+
+    /// Where other threads post messages for the human (shown as toasts).
+    pub fn notices(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.ui.notices()
     }
 
     /// Answers [`Action::Freeze`].
