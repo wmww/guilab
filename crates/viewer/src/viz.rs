@@ -30,7 +30,11 @@ pub struct Overlay {
     notches: Vec<(Pos2, f64, egui::Vec2, bool)>,
     /// Smooth scrolling: when, delta (session px), by an agent.
     smooth: VecDeque<(f64, egui::Vec2, bool)>,
+    /// Hover trail: position, time, by an agent.
     trail: VecDeque<(Pos2, f64, bool)>,
+    /// The drag in progress (path, by an agent), and finished drags fading from release.
+    drag: Option<(Vec<Pos2>, bool)>,
+    dropped: Vec<(Vec<Pos2>, f64, bool)>,
     ripples: Vec<(Pos2, f64, bool)>,
     /// Touch points: position, last event time, lifted.
     touches: BTreeMap<u32, (Pos2, f64, bool)>,
@@ -58,7 +62,10 @@ impl Overlay {
                     let p = pos2(*x as f32, *y as f32);
                     self.pointer = Some((p, t, agent, held));
                     self.left = None;
-                    self.trail.push_back((p, t, agent));
+                    match &mut self.drag {
+                        Some((path, _)) => path.push(p),
+                        None => self.trail.push_back((p, t, agent)),
+                    }
                 }
                 VizKind::Button { pressed } => {
                     if let Some(ptr) = &mut self.pointer {
@@ -67,8 +74,12 @@ impl Overlay {
                         ptr.3 = *pressed;
                         if *pressed {
                             self.ripples.push((ptr.0, t, agent));
-                            // The drag's trail starts at the press.
-                            self.trail.push_back((ptr.0, t, agent));
+                            // The drag's path starts at the press.
+                            self.drag = Some((vec![ptr.0], agent));
+                        } else if let Some((path, a)) = self.drag.take()
+                            && path.len() > 1
+                        {
+                            self.dropped.push((path, t, a));
                         }
                     }
                 }
@@ -106,6 +117,7 @@ impl Overlay {
             self.trail.pop_front();
         }
         self.ripples.retain(|r| now - r.1 < RIPPLE);
+        self.dropped.retain(|d| now - d.1 < TRAIL);
         self.notches.retain(|n| now - n.1 < SCROLL);
         while self.smooth.front().is_some_and(|e| now - e.0 > SCROLL) {
             self.smooth.pop_front();
@@ -126,15 +138,32 @@ impl Overlay {
         let painter = ui.painter_at(view);
         let mut animating = false;
 
-        // Trail: segments fading with age.
-        for w in self.trail.iter().collect::<Vec<_>>().windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if b.1 - a.1 > 0.15 {
-                continue;
+        // Hover trail: thin and dim, fading with age; drags: brighter and thicker, held
+        // until release, then fading. Each run is one strip, so joints don't double up.
+        let mut run: Vec<(Pos2, f32)> = Vec::new();
+        let mut run_agent = false;
+        let flush = |run: &mut Vec<(Pos2, f32)>, agent: bool| {
+            if run.len() > 1 {
+                strip(&painter, run, 2.0, if agent { AGENT } else { HUMAN }, 0.35);
             }
-            let f = 1.0 - (now - b.1) / TRAIL;
-            painter.line_segment([to_screen(a.0), to_screen(b.0)], Stroke::new(3.0, tint(if b.2 { AGENT } else { HUMAN }, f * 0.45)));
+            run.clear();
+        };
+        let mut prev_t = f64::NEG_INFINITY;
+        for &(p, t, agent) in &self.trail {
+            if t - prev_t > 0.15 || agent != run_agent {
+                flush(&mut run, run_agent);
+                run_agent = agent;
+            }
+            run.push((to_screen(p), (1.0 - (now - t) / TRAIL) as f32));
+            prev_t = t;
             animating = true;
+        }
+        flush(&mut run, run_agent);
+        let drags = self.drag.iter().map(|(path, a)| (path, 1.0, *a)).chain(self.dropped.iter().map(|(path, t, a)| (path, (1.0 - (now - t) / TRAIL) as f32, *a)));
+        for (path, f, agent) in drags {
+            let pts: Vec<(Pos2, f32)> = path.iter().map(|p| (to_screen(*p), f)).collect();
+            strip(&painter, &pts, 3.5, if agent { AGENT } else { HUMAN }, 0.85);
+            animating |= f < 1.0;
         }
         // Pointer glow: soft concentric discs, until the pointer leaves; a ring while a
         // button is held. Smooth scrolling stretches it into a droplet whose tail trails
@@ -146,18 +175,25 @@ impl Overlay {
                 let window = 0.15;
                 let sum = self.smooth.iter().filter(|e| last - e.0 < window).fold(vec2(0.0, 0.0), |s, e| s + e.1);
                 let k = (1.0 - (now - last) / SCROLL).max(0.0) as f32;
-                // Session px/s -> screen points of tail.
-                tail = -sum / window as f32 * 0.15 * (img.width() / size.0) * k;
+                // Speed (session px/s) -> tail length, growing slower than linear.
+                let speed = sum.length() / window as f32;
+                if speed > 0.0 {
+                    tail = -sum / sum.length() * 0.6 * speed.powf(0.7) * (img.width() / size.0) * k;
+                }
                 animating = true;
             }
             if f > 0.0 {
                 let c = if agent { AGENT } else { HUMAN };
                 let at = to_screen(p);
-                for r in [16.0, 12.0, 8.0, 5.0] {
-                    droplet(&painter, at, r, tail * (r / 16.0), tint(c, f * 0.12));
+                // A faint dark halo first, so it also reads on light content.
+                for r in [18.0, 15.5] {
+                    droplet(&painter, at, r, tail * (r / 14.0), Color32::from_black_alpha((f * 22.0) as u8));
+                }
+                for r in [14.0, 10.5, 7.0, 4.5] {
+                    droplet(&painter, at, r, tail * (r / 14.0), tint(c, f * 0.14));
                 }
                 if down {
-                    painter.circle_stroke(at, 9.0, Stroke::new(2.0, tint(c, 0.8)));
+                    painter.circle_stroke(at, 8.0, Stroke::new(2.0, tint(c, 0.85)));
                 }
                 animating |= self.left.is_some();
             }
@@ -179,6 +215,10 @@ impl Overlay {
         }
         for (p, t, agent) in &self.ripples {
             let f = ((now - t) / RIPPLE) as f32;
+            // A quick bright flash, then the ring spreads.
+            if f < 0.35 {
+                painter.circle_filled(to_screen(*p), 9.0, tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64 / 0.35) * 0.55));
+            }
             painter.circle_stroke(to_screen(*p), 6.0 + 18.0 * f, Stroke::new(2.0, tint(if *agent { AGENT } else { HUMAN }, (1.0 - f as f64) * 0.8)));
             animating = true;
         }
@@ -284,4 +324,35 @@ fn droplet(p: &egui::Painter, c: Pos2, r: f32, tail: egui::Vec2, color: Color32)
         pts.push(c + vec2(u.x * cos - u.y * sin, u.x * sin + u.y * cos) * r);
     }
     p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// A polyline as one triangle strip (no overlapping caps at joints), with a soft dark
+/// underlay for light content. Each point carries its own opacity factor.
+fn strip(p: &egui::Painter, pts: &[(Pos2, f32)], width: f32, color: Color32, alpha: f32) {
+    use egui::epaint::{Mesh, Vertex, WHITE_UV};
+    let add = |w: f32, col: &dyn Fn(f32) -> Color32| {
+        let mut mesh = Mesh::default();
+        for (i, &(q, f)) in pts.iter().enumerate() {
+            let prev = pts[i.saturating_sub(1)].0;
+            let next = pts[(i + 1).min(pts.len() - 1)].0;
+            let d = next - prev;
+            let n = if d.length() > 0.0 { vec2(-d.y, d.x) / d.length() } else { vec2(0.0, 1.0) };
+            let (inner, outer) = (col(f), Color32::TRANSPARENT);
+            // Core plus a 1 px feather on each side.
+            for (off, c) in [(-(w / 2.0 + 1.0), outer), (-w / 2.0, inner), (w / 2.0, inner), (w / 2.0 + 1.0, outer)] {
+                mesh.vertices.push(Vertex { pos: q + n * off, uv: WHITE_UV, color: c });
+            }
+            if i > 0 {
+                let b = (i as u32 - 1) * 4;
+                let a = i as u32 * 4;
+                for j in 0..3 {
+                    mesh.add_triangle(b + j, b + j + 1, a + j);
+                    mesh.add_triangle(b + j + 1, a + j + 1, a + j);
+                }
+            }
+        }
+        p.add(egui::Shape::mesh(mesh));
+    };
+    add(width + 2.0, &|f| Color32::from_black_alpha((f.max(0.0) * alpha * 40.0) as u8));
+    add(width, &|f| tint(color, (f.max(0.0) * alpha) as f64));
 }
