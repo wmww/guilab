@@ -4,7 +4,7 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use egui::{Color32, ColorImage, Id, Key, Modifiers, RichText, Sense, TextureHandle, TextureOptions, Ui, vec2};
+use egui::{Color32, ColorImage, Id, RichText, Sense, TextureHandle, TextureOptions, Ui, vec2};
 
 use crate::{
     raster::downscale,
@@ -98,7 +98,7 @@ impl Chat {
                     .desired_width(ui.available_width() - send_w - 8.0);
                 // Plain Enter sends; take it before the text box turns it into a newline.
                 let has_focus = ui.memory(|m| m.has_focus(self.id.with("draft")));
-                let enter = has_focus && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+                let enter = has_focus && ui.input_mut(crate::consume_plain_enter);
                 ui.add(edit);
                 let click = ui.add_sized(vec2(send_w, 24.0), egui::Button::new("Send")).clicked();
                 let has_images = sketch.queued() > 0 || sketch.drawing_open();

@@ -330,7 +330,8 @@ impl Server {
                 g.killed = true;
             }
             g.children.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
-            !(g.killed && g.children.is_empty())
+            // Done once everything is gone; don't sit out the grace period if apps exited on SIGTERM.
+            !(g.children.is_empty() && (g.killed || procs::tagged_pids(&g.tag).is_empty()))
         });
     }
 

@@ -25,3 +25,11 @@ pub use sketch::{Annotated, Note, Sketch, View};
 
 #[cfg(test)]
 mod tests;
+
+/// Consumes a press of Enter with no modifiers. Unlike `consume_key`, which ignores Shift,
+/// this leaves Shift+Enter for text boxes to turn into a newline.
+pub(crate) fn consume_plain_enter(i: &mut egui::InputState) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if modifiers.matches_exact(egui::Modifiers::NONE)));
+    i.events.len() != before
+}

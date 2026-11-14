@@ -364,7 +364,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
         token: cli.token.or_else(|| env("GUILAB_TOKEN")),
     };
     let mut c = client::connect()?;
-    let mut reply = c.request(target, cmd.clone())?;
+    let mut reply = c.request(target.clone(), cmd.clone())?;
     if let Command::Poll { follow, timeout_ms, .. } = &cmd {
         let timeout = timeout_ms.map(|ms| ms as f64 / 1000.0);
         loop {
@@ -392,9 +392,36 @@ fn real_main(cli: Cli) -> Result<(), String> {
     if !reply.ok {
         return Err(reply.error.unwrap_or_else(|| "unknown error".into()));
     }
+    if let Command::Kill { .. } = &cmd {
+        wait_killed(&mut c, &target, &reply, &fmt, cli.json);
+    }
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&reply.data).unwrap_or_default());
         return Ok(());
     }
     format::print(&cmd, reply.data, &fmt)
+}
+
+/// `kill` returns once the apps have exited (up to 3 s: the server SIGKILLs after 2),
+/// so `guilab kill && guilab run -- CMD` doesn't race a single-instance app's old copy.
+fn wait_killed(c: &mut client::Conn, target: &guilab_proto::Target, reply: &guilab_proto::Response, fmt: &guilab_proto::text::Fmt, json: bool) {
+    use guilab_proto::{ProcInfo, ProcState};
+    let Some(killed) = serde_json::from_value::<Vec<ProcInfo>>(reply.data.clone()).ok() else { return };
+    let ids: Vec<u32> = killed.iter().map(|p| p.id).collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !ids.is_empty() && std::time::Instant::now() < deadline {
+        let Ok(r) = c.request(target.clone(), Command::Ps) else { return };
+        if let Some(d) = &r.events {
+            if json {
+                eprintln!("{}", serde_json::to_string(d).unwrap_or_default());
+            } else if let Some(b) = format::events_block(fmt, d) {
+                eprintln!("{b}");
+            }
+        }
+        let Some(ps) = serde_json::from_value::<Vec<ProcInfo>>(r.data).ok() else { return };
+        if !ps.iter().any(|p| ids.contains(&p.id) && matches!(p.state, ProcState::Running)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }

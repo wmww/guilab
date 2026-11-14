@@ -10,3 +10,21 @@ Skill doc and `--help` say nothing about running guilab inside a guilab session.
 
 ## First command dumps human pointer noise
 First `run` printed "[guilab events since the session started]" with a long line of pointer moves and scrolls. Pointer-move spam is low value to an agent; clicks/typing matter. Consider collapsing moves/scrolls harder or omitting them unless they end in a click.
+
+## `kill` returned before the app exited (fixed)
+`guilab kill && guilab run -- CMD` (the skill's rebuild recipe) raced: `kill` replied right after SIGTERM, so a single-instance app (here: the inner guilab server) saw its old copy still alive and exited ("a guilab server is already running"). Then my next inner command autostarted a stray server outside the outer session. Fixed: the CLI's `kill` now waits (up to 3 s) until the killed apps are gone, and a server's shutdown no longer always sits out the full 2 s grace when its apps exited on SIGTERM (before, the outer SIGKILLed the inner exactly as its own grace ended).
+
+## Inner CLI commands autostart a stray server
+Any `guilab` command autostarts a server if none answers. When driving a nested guilab whose server is down or restarting, a stray `ls`/`new` silently creates a new server outside the outer session (no viewer, not an outer app). Had to wait for `control.sock` to appear by hand. Suggest an env/flag to disable autostart (e.g. `GUILAB_NO_AUTOSTART=1`), or a `guilab server --wait` that blocks until a server is up.
+
+## `lock --force` prints a sentence, not a bare token
+`guilab lock` prints just the token, so `T=$(guilab lock)` works. `guilab lock --force` prints `token gh9gm4uy (session guilab). Pass it to ...` on stdout, so the same capture yields garbage and the follow-up `-t $T input ...` fails with a confusing clap error ("unrecognized subcommand 'move'"). Both should print only the token on stdout; put prose on stderr.
+
+## Lost token means `--force` on your own lock
+I captured a token inside a command whose output I discarded; the next `lock` said the session is locked by someone. There's no way for the holder to recover its own token (e.g. `guilab lock` from the same worktree/agent could say "you already hold it: TOKEN", or `unlock --force` is the only exit). Minor, but cost a round trip.
+
+## Typing right after a click in the viewer goes to the app, not the chat box
+Driving the inner viewer: `input move X Y click type 'abc'` on the chat box gave the box focus, but the keys went to the session app (gtk4-demo) instead. With `sleep 200` after the click it works. The viewer apparently routes keys by last frame's focus. Humans rarely hit this, but scripted tests of the viewer do; ideally key routing follows egui focus as of the click.
+
+## Messages split across two viewers are confusing to track
+With nested guilabs, the human sometimes typed into the inner viewer's chat (goes to the inner `demo` session's log) vs the outer one (goes to me). Inner chat messages don't wake my outer `poll`. Not a bug per se, but the agent needs to also watch `ig poll` or check the inner log to see them.

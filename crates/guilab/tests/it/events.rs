@@ -33,13 +33,14 @@ fn kinds(events: &[Value]) -> Vec<&str> {
 fn wake_and_passive() {
     let lab = Lab::new();
     lab.run(&["new"]);
-    // Killed apps are passive: the poll times out (exit 2) and reports it.
+    // Killed apps are passive: the poll times out (exit 2).
     lab.run(&["run", "--", "sleep", "100"]);
-    lab.run(&["kill"]);
-    std::thread::sleep(Duration::from_millis(300));
+    // `kill` waits for the exit, so the exit is reported on its stderr.
+    let (_, _, err) = lab.status(&["kill"]);
+    assert!(err.contains("app 1 (sleep) ended after guilab kill"), "{err}");
     let (code, out, _) = lab.status(&["poll", "--timeout", "0.5"]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("no wake event within 0.5s") && out.contains("app 1 (sleep) ended after guilab kill"), "{out}");
+    assert!(out.contains("no wake event within 0.5s"), "{out}");
     // An app exiting on its own wakes, with its status and log.
     lab.run(&["run", "--", "sh", "-c", "sleep 0.3; exit 3"]);
     let t = Instant::now();
@@ -229,13 +230,9 @@ fn window_events() {
     };
     assert_eq!(ev[0]["kind"], "window_map", "{ev:?}");
     assert_eq!(ev[0]["window"], "toplevel");
-    lab.run(&["kill"]);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap") {
-        assert!(Instant::now() < deadline, "no unmap");
-        std::thread::sleep(Duration::from_millis(50));
-    }
     // Window changes are passive: reported with the next command (`wait_tree` got the map).
-    let (_, _, err) = lab.status(&["ps"]);
+    // `kill` waits for the app to exit, so it reports the close itself.
+    let (_, _, err) = lab.status(&["kill"]);
     assert!(err.contains("window") && err.contains("closed"), "{err}");
+    assert!(kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap"));
 }

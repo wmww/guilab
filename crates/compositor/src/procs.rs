@@ -201,20 +201,20 @@ fn signal_group(pid: u32, sig: Signal) {
     }
 }
 
+/// Pids of live processes whose environment has `GUILAB_TAG=tag` (zombies have no environment).
+pub fn tagged_pids(tag: &str) -> Vec<Pid> {
+    let needle = format!("{TAG_VAR}={tag}");
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| {
+            let pid = e.file_name().to_str()?.parse::<i32>().ok()?;
+            let env = std::fs::read(e.path().join("environ")).ok()?;
+            env.split(|b| *b == 0).any(|v| v == needle.as_bytes()).then(|| Pid::from_raw(pid)).flatten()
+        })
+        .collect()
+}
+
 /// Signals every process whose environment has `GUILAB_TAG=tag`. Returns how many.
 pub fn signal_tagged(tag: &str, sig: Signal) -> usize {
-    let needle = format!("{TAG_VAR}={tag}");
-    let mut n = 0;
-    let Ok(dir) = std::fs::read_dir("/proc") else { return 0 };
-    for e in dir.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
-        let Ok(env) = std::fs::read(e.path().join("environ")) else { continue };
-        if env.split(|b| *b == 0).any(|v| v == needle.as_bytes())
-            && let Some(pid) = Pid::from_raw(pid)
-            && rustix::process::kill_process(pid, sig).is_ok()
-        {
-            n += 1;
-        }
-    }
-    n
+    tagged_pids(tag).into_iter().filter(|p| rustix::process::kill_process(*p, sig).is_ok()).count()
 }

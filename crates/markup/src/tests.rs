@@ -73,18 +73,25 @@ fn draw_queue_send() {
     run(vec![Event::Text("ok here".into())], &mut sketch);
     run(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], &mut sketch);
 
-    *chat.draft_mut() = "two things".into();
+    *chat.draft_mut() = "two".into();
     let mut sent = None;
-    // Enter in the focused message box sends.
     frame(&ctx, vec![], |ui| {
         ui.memory_mut(|m| m.request_focus(egui::Id::new("c").with("draft")));
         chat.show(ui, &mut sketch);
     });
+    // Shift+Enter adds a newline instead of sending.
+    frame(&ctx, vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::SHIFT }], |ui| {
+        sent = chat.show(ui, &mut sketch);
+    });
+    assert!(sent.is_none(), "Shift+Enter must not send");
+    assert_eq!(chat.draft_mut().as_str(), "two\n");
+    chat.draft_mut().push_str("things");
+    // Enter in the focused message box sends.
     frame(&ctx, vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], |ui| {
         sent = chat.show(ui, &mut sketch);
     });
     let m = sent.expect("sent");
-    assert_eq!(m.text, "two things");
+    assert_eq!(m.text, "two\nthings");
     assert_eq!(m.images.len(), 2);
     assert_eq!(sketch.queued(), 0);
     assert!(!sketch.drawing_open());

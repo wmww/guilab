@@ -365,7 +365,7 @@ impl Sketch {
         let k = d.scale * xf.zoom;
         let font = FontId::proportional(FONT * k);
         let pad = PAD * k;
-        let (enter, esc) = ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape)));
+        let (enter, esc) = ui.input_mut(|i| (crate::consume_plain_enter(i), i.consume_key(Modifiers::NONE, Key::Escape)));
         let min_width = FONT * k * 4.0;
         let color = e.color;
         let layout_font = font.clone();
