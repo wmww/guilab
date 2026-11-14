@@ -57,6 +57,8 @@ pub const STROKE: f32 = 3.0;
 pub const FONT: f32 = 18.0;
 /// Padding around text, inside its backing.
 pub const PAD: f32 = 4.0;
+/// Text wraps at this many font sizes (so it follows the font size if that ever changes).
+pub const WRAP_EMS: f32 = 16.0;
 const ARROW_HEAD: f32 = 16.0;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,8 +72,8 @@ pub enum Kind {
     Line(Pos2, Pos2),
     /// From tail to tip.
     Arrow(Pos2, Pos2),
-    /// Top-left of the text.
-    Text(Pos2, String),
+    /// Top-left of the text, the text, and its wrap width (all in screenshot pixels).
+    Text(Pos2, String, f32),
 }
 
 /// One drawn thing, in screenshot pixels.
@@ -101,13 +103,14 @@ impl Xf {
     }
 }
 
-/// Lays out text: (text, font size, color) -> galley, in the target's coordinates.
-pub type Layout<'a> = dyn FnMut(String, f32, Color32) -> Arc<Galley> + 'a;
+/// Lays out text: (text, font size, color, wrap width) -> galley, in the target's coordinates.
+pub type Layout<'a> = dyn FnMut(String, f32, Color32, f32) -> Arc<Galley> + 'a;
 
-/// Backing behind text so it reads on any screenshot: light behind dark colors, dark behind light.
+/// Backing behind text so it reads on any screenshot: translucent black, except behind very
+/// dark text (of the palette, only black), which gets translucent white.
 pub fn text_backing(c: Color32) -> Color32 {
     let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
-    if lum > 150.0 { Color32::from_black_alpha(215) } else { Color32::from_white_alpha(235) }
+    if lum < 50.0 { Color32::from_white_alpha(200) } else { Color32::from_black_alpha(170) }
 }
 
 impl Mark {
@@ -119,7 +122,7 @@ impl Mark {
                 (r.min, r.max)
             }
             Kind::Box(a, b) | Kind::Ellipse(a, b) | Kind::Line(a, b) | Kind::Arrow(a, b) => (*a, *b),
-            Kind::Text(_, t) => return t.trim().is_empty(),
+            Kind::Text(_, t, _) => return t.trim().is_empty(),
         };
         (b - a).length() < min
     }
@@ -131,7 +134,7 @@ impl Mark {
                 *a += d;
                 *b += d;
             }
-            Kind::Text(p, _) => *p += d,
+            Kind::Text(p, ..) => *p += d,
         }
     }
 
@@ -201,8 +204,8 @@ impl Mark {
                 out.push(Shape::line_segment([a, b - dir * head * 0.5], stroke));
                 out.push(Shape::convex_polygon(vec![b, base + n, base - n], self.color, Stroke::NONE));
             }
-            Kind::Text(at, text) => {
-                let g = layout(text.clone(), FONT * k, self.color);
+            Kind::Text(at, text, width) => {
+                let g = layout(text.clone(), FONT * k, self.color, width * xf.zoom);
                 let pos = p(*at);
                 let bg = g.rect.translate(pos.to_vec2()).expand(PAD * k);
                 out.push(Shape::rect_filled(bg, 3.0 * k, text_backing(self.color)));

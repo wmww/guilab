@@ -17,7 +17,7 @@ use egui::{
 };
 
 use crate::{
-    mark::{COLORS, FONT, Kind, Mark, PAD, STROKE, Tool, Xf, text_backing},
+    mark::{COLORS, FONT, Kind, Mark, PAD, STROKE, Tool, WRAP_EMS, Xf, text_backing},
     raster::{Renderer, downscale},
 };
 
@@ -58,10 +58,29 @@ struct Shot {
 }
 
 struct Editing {
+    /// Top-left in image pixels; nudged while typing to keep the box on the image.
     pos: Pos2,
     text: String,
     color: Color32,
+    /// Wrap width, image pixels.
+    width: f32,
+    /// Take keyboard focus once the pointer is up (a click's release would take it away).
     focus: bool,
+    had_focus: bool,
+}
+
+impl Editing {
+    /// A new box at image point `pos`, wrapping at [`WRAP_EMS`] or the image's right edge,
+    /// moved left if that leaves it too narrow.
+    fn new(mut pos: Pos2, color: Color32, scale: f32, size: [usize; 2]) -> Editing {
+        let em = FONT * scale;
+        let pad = PAD * scale;
+        let right = size[0] as f32 - pad;
+        let min = (6.0 * em).min(right);
+        pos.x = pos.x.min(right - min).max(pad);
+        let width = (WRAP_EMS * em).min(right - pos.x);
+        Editing { pos, text: String::new(), color, width, focus: true, had_focus: false }
+    }
 }
 
 struct Drawing {
@@ -182,7 +201,7 @@ impl Sketch {
         if let Some(e) = &d.editing
             && !e.text.trim().is_empty()
         {
-            marks.push(Mark { kind: Kind::Text(e.pos, e.text.trim_end().to_string()), color: e.color });
+            marks.push(Mark { kind: Kind::Text(e.pos, e.text.trim_end().to_string(), e.width), color: e.color });
         }
         let r = self.renderer.get_or_insert_with(Renderer::default);
         Some(Arc::new(r.composite(&shot.image, &marks, d.scale)))
@@ -230,7 +249,7 @@ impl Sketch {
             .marks
             .iter()
             .filter_map(|m| match &m.kind {
-                Kind::Text(p, t) => Some(Note { text: t.clone(), pos: *p, color: m.color }),
+                Kind::Text(p, t, _) => Some(Note { text: t.clone(), pos: *p, color: m.color }),
                 _ => None,
             })
             .collect();
@@ -372,7 +391,7 @@ impl Sketch {
                 Tool::Arrow => Some(Kind::Arrow(q, q)),
                 Tool::Text => {
                     if !near_edit {
-                        d.editing = Some(Editing { pos: q, text: String::new(), color: self.color, focus: true });
+                        d.editing = Some(Editing::new(q, self.color, d.scale, view.size));
                     }
                     None
                 }
@@ -411,7 +430,7 @@ impl Sketch {
             && let Some(p) = pos.filter(|p| on_image(*p))
         {
             d.active = None;
-            d.editing = Some(Editing { pos: to_img(p), text: String::new(), color: self.color, focus: true });
+            d.editing = Some(Editing::new(to_img(p), self.color, d.scale, view.size));
         }
 
         let painter = ui.painter_at(view.clip);
@@ -421,7 +440,7 @@ impl Sketch {
                 let tex = shot.tex.get_or_insert_with(|| ui.ctx().load_texture("frozen-screenshot", (*shot.image).clone(), TextureOptions::LINEAR));
                 shapes.push(Shape::image(tex.id(), view.rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE));
             }
-            let mut layout = |t: String, size: f32, c: Color32| painter.layout_no_wrap(t, FontId::proportional(size), c);
+            let mut layout = |t: String, size: f32, c: Color32, wrap: f32| painter.layout(t, FontId::proportional(size), c, wrap);
             d.text_rects.clear();
             for m in d.marks.iter().chain(&d.active) {
                 let first = shapes.len();
@@ -436,7 +455,7 @@ impl Sketch {
         if let Some(d) = &mut self.drawing
             && d.editing.is_some()
         {
-            self.text_editor(ui, xf);
+            self.text_editor(ui, xf, view.size);
         }
         if self.drawing.is_some() {
             self.bar(ui, view.clip);
@@ -454,18 +473,20 @@ impl Sketch {
         }
     }
 
-    fn text_editor(&mut self, ui: &mut Ui, xf: Xf) {
+    fn text_editor(&mut self, ui: &mut Ui, xf: Xf, size: [usize; 2]) {
         let d = self.drawing.as_mut().unwrap();
         let e = d.editing.as_mut().unwrap();
         let k = d.scale * xf.zoom;
         let font = FontId::proportional(FONT * k);
         let pad = PAD * k;
         let (enter, esc) = ui.input_mut(|i| (crate::consume_plain_enter(i), i.consume_key(Modifiers::NONE, Key::Escape)));
-        let min_width = FONT * k * 4.0;
         let color = e.color;
+        let wrap = e.width * xf.zoom;
+        // The box hugs the text (wrapped like the mark it becomes), at least a few ems wide.
+        let text_w = ui.painter().layout(e.text.clone(), font.clone(), color, wrap).size().x;
+        let width = (text_w + 2.0).max(FONT * k * 4.0).min(wrap.max(FONT * k));
         let layout_font = font.clone();
-        // No wrapping: the box grows with the text, like the mark it becomes.
-        let mut layouter = move |ui: &Ui, text: &dyn egui::TextBuffer, _wrap: f32| ui.painter().layout_no_wrap(text.as_str().to_string(), layout_font.clone(), color);
+        let mut layouter = move |ui: &Ui, text: &dyn egui::TextBuffer, _wrap: f32| ui.painter().layout(text.as_str().to_string(), layout_font.clone(), color, wrap);
         let r = egui::Area::new(self.id.with("text-edit"))
             .fixed_pos(xf.apply(e.pos) - Vec2::splat(pad))
             .order(Order::Foreground)
@@ -479,19 +500,26 @@ impl Sketch {
                             .frame(egui::Frame::NONE)
                             .margin(egui::Margin::ZERO)
                             .desired_rows(1)
-                            .desired_width(min_width)
+                            .desired_width(width)
                             .layouter(&mut layouter),
                     )
                 })
             });
         let te = r.inner.inner;
-        if e.focus {
+        // Growing past the bottom edge pushes the box up instead.
+        let h = te.rect.height() / xf.zoom + 2.0 * PAD * d.scale;
+        let bottom = size[1] as f32 - PAD * d.scale;
+        if e.pos.y + h > bottom {
+            e.pos.y = (bottom - h).max(PAD * d.scale);
+        }
+        if e.focus && !ui.input(|i| i.pointer.any_down()) {
             te.request_focus();
             e.focus = false;
         }
+        e.had_focus |= te.has_focus();
         if esc {
             d.editing = None;
-        } else if enter || te.lost_focus() {
+        } else if enter || (e.had_focus && te.lost_focus()) {
             let e = d.editing.take().unwrap();
             push_text(d, e);
         }
@@ -548,7 +576,7 @@ impl Sketch {
 fn push_text(d: &mut Drawing, e: Editing) {
     let text = e.text.trim_end().to_string();
     if !text.trim().is_empty() {
-        d.marks.push(Mark { kind: Kind::Text(e.pos, text), color: e.color });
+        d.marks.push(Mark { kind: Kind::Text(e.pos, text, e.width), color: e.color });
         d.redo.clear();
     }
 }

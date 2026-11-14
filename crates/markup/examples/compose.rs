@@ -39,7 +39,7 @@ fn main() {
             let xy = nums(p.next().unwrap());
             let c = color(p.next());
             let text = p.next().unwrap_or("").replace("\\n", "\n");
-            marks.push(Mark { kind: Kind::Text(pos2(xy[0], xy[1]), text), color: c });
+            marks.push(Mark { kind: Kind::Text(pos2(xy[0], xy[1]), text, guilab_markup::mark::WRAP_EMS * guilab_markup::mark::FONT * scale), color: c });
             continue;
         }
         let (pts, c) = match rest.split_once(':') {
@@ -74,7 +74,7 @@ fn main() {
     };
 
     for m in &marks {
-        if let Kind::Text(p, t) = &m.kind {
+        if let Kind::Text(p, t, _) = &m.kind {
             println!("text at {},{}: {t:?}", p.x, p.y);
         }
     }

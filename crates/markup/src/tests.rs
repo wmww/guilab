@@ -15,7 +15,7 @@ fn composite_box_and_text() {
     let base = white(200, 100);
     let marks = [
         Mark { kind: Kind::Box(pos2(20.0, 20.0), pos2(80.0, 60.0)), color: RED },
-        Mark { kind: Kind::Text(pos2(110.0, 30.0), "hi".into()), color: RED },
+        Mark { kind: Kind::Text(pos2(110.0, 30.0), "hi".into(), 288.0), color: RED },
     ];
     let out = Renderer::default().composite(&base, &marks, 1.0);
     let px = |x: usize, y: usize| out.pixels[y * 200 + x];
@@ -100,11 +100,12 @@ fn draw_queue_send() {
     assert!(a.notes.is_empty());
     let c = a.image.pixels[120 * 400 + 120];
     assert!(c.r() > 150 && c.g() < 120, "arrow shaft at (120,120): {c:?}");
-    // Text: a note at the click (image px), not baked into the image, but in the preview.
+    // Text: a note at the click (image px; x nudged left so the box has 6 ems before the
+    // right edge), not baked into the image, but in the preview.
     let b = &m.images[1];
     assert_eq!(b.notes.len(), 1);
     assert_eq!(b.notes[0].text, "ok here");
-    assert_eq!(b.notes[0].pos, pos2(300.0, 20.0));
+    assert_eq!(b.notes[0].pos, pos2(288.0, 20.0));
     assert!(b.image.pixels.iter().all(|p| *p == Color32::WHITE), "text isn't baked by default");
     assert!(b.preview.pixels.iter().any(|p| *p != Color32::WHITE), "the preview has it");
 }
@@ -148,4 +149,35 @@ fn move_tool_drags_marks() {
     let px = |x: usize, y: usize| out[0].image.pixels[y * 400 + x];
     assert_eq!(px(100, 150), RED, "moved here");
     assert_eq!(px(100, 50), Color32::WHITE, "gone from here");
+}
+
+#[test]
+fn text_tool_single_click_wraps_and_stays_on_image() {
+    let ctx = egui::Context::default();
+    let mut sketch = Sketch::new("s");
+    let view = View { rect: Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)), clip: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), size: [400, 300], scale: 1.0 };
+    let run = |events: Vec<Event>, sketch: &mut Sketch| {
+        frame(&ctx, events, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| sketch.canvas(ui, view));
+        })
+    };
+    sketch.tool = Tool::Text;
+    // A plain click near the bottom right: the box opens, keeps focus, and is typed into.
+    run(vec![Event::PointerMoved(pos2(390.0, 290.0))], &mut sketch);
+    run(vec![button(pos2(390.0, 290.0), true)], &mut sketch);
+    sketch.set_screenshot(white(400, 300));
+    run(vec![button(pos2(390.0, 290.0), false)], &mut sketch);
+    run(vec![], &mut sketch);
+    run(vec![], &mut sketch);
+    let long = "a fairly long note that has to wrap onto several lines here";
+    run(vec![Event::Text(long.into())], &mut sketch);
+    run(vec![], &mut sketch);
+    run(vec![Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], &mut sketch);
+    let out = sketch.take_all();
+    assert_eq!(out[0].notes.len(), 1, "the click made a note");
+    let n = &out[0].notes[0];
+    assert_eq!(n.text, long);
+    // Moved left to fit (6 ems min) and up so the wrapped lines stay on the image.
+    assert!(n.pos.x <= 400.0 - 6.0 * 18.0, "{:?}", n.pos);
+    assert!(n.pos.y < 290.0 - 18.0, "pushed up: {:?}", n.pos);
 }

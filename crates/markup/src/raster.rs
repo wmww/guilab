@@ -30,7 +30,7 @@ impl Renderer {
         let mut shapes = Vec::new();
         {
             let mut view = self.fonts.with_pixels_per_point(1.0);
-            let mut layout = |t: String, size: f32, c: Color32| view.layout_no_wrap(t, egui::FontId::proportional(size), c);
+            let mut layout = |t: String, size: f32, c: Color32, wrap: f32| view.layout(t, egui::FontId::proportional(size), c, wrap);
             for m in marks {
                 m.shapes(scale, Xf::IDENTITY, &mut layout, &mut shapes);
             }
