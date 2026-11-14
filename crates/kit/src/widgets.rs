@@ -108,16 +108,21 @@ pub fn send_button(ui: &mut Ui, enabled: bool) -> Response {
 
 /// The round × badge (remove) centered at `center`; red on hover.
 pub fn close_badge(ui: &mut Ui, id: Id, center: Pos2, tooltip: &str) -> Response {
+    let painter = ui.painter().clone();
+    close_badge_on(ui, &painter, id, center, tooltip)
+}
+
+/// [`close_badge`] painted with `painter` (e.g. on a layer above `ui`); input stays `ui`'s.
+pub fn close_badge_on(ui: &mut Ui, painter: &Painter, id: Id, center: Pos2, tooltip: &str) -> Response {
     let t = Theme::get(ui.ctx());
     let c = &t.colors;
     let rect = Rect::from_center_size(center, Vec2::splat(t.size.close_badge));
     let resp = ui.interact(rect, id, Sense::click());
-    let p = ui.painter();
-    p.circle_filled(center, rect.width() / 2.0, if resp.hovered() { c.danger } else { c.badge });
+    painter.circle_filled(center, rect.width() / 2.0, if resp.hovered() { c.danger } else { c.badge });
     let s = Stroke::new(1.5, c.badge_fg);
     let h = rect.width() * 0.22;
-    p.line_segment([center + vec2(-h, -h), center + vec2(h, h)], s);
-    p.line_segment([center + vec2(h, -h), center + vec2(-h, h)], s);
+    painter.line_segment([center + vec2(-h, -h), center + vec2(h, h)], s);
+    painter.line_segment([center + vec2(h, -h), center + vec2(-h, h)], s);
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tooltip)
 }
 

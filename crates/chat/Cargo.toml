@@ -1,0 +1,18 @@
+[package]
+name = "guilab-chat"
+description = "egui chat widget: a feed of messages, activity lines and image thumbnails, and a composer with pending attachments. Generic over attachment keys; the host owns images and undo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# egui + guilab-kit only; no image or guilab app types.
+
+[lib]
+doctest = false
+
+[dependencies]
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+guilab-kit.workspace = true
+
+[dev-dependencies]
+png.workspace = true

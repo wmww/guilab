@@ -2,7 +2,7 @@
 
 The design for `issues/image-system.md`, `chat-image-flow.md`, `move-tool.md` and `chat-draw-gaps.md`, plus the shared toolkit from `ui-toolkit-pass.md`. Those issues hold the user's spec, and this note is how it gets built. When a phase lands, move what's true into `code-map.md`/`design.md` and trim this note.
 
-**Status:** phases 1 (`crates/image`), 2 (`crates/kit`), 3 (agent side: server store, CLI, protocol) and 4 (`crates/editor`, not wired into the viewer yet) are built and tested; those sections describe the code as it is. Phases 5–7 not started.
+**Status:** phases 1 (`crates/image`), 2 (`crates/kit`), 3 (agent side: server store, CLI, protocol), 4 (`crates/editor`) and 5 (`crates/chat`) are built and tested; those sections describe the code as it is. Editor and chat aren't wired into the viewer yet (phase 6). Phases 6–7 not started.
 
 ## Principles
 - **One object, many views.** An image is immutable data in a store. Thumbnails, the editor, PNG files and listings are all views of it. A pending image is a *draft*: a mutable body that only the viewer holds, frozen into an image when it's sent.
@@ -202,7 +202,7 @@ INLINE   = "<svg" ... matching "</svg>"   (spaces and quotes allowed; xmlns adde
 In code: `make::make(&mut Store, &Fonts, &MakeReq { from, canvas, color, crop, drop, elements, cwd }, Made, Group) -> Result<ImageId, String>`. All strings arrive unparsed; errors are agent-ready sentences.
 
 ## guilab-kit
-Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent; sizes incl. thumb_h, feed_thumb_h, faint_scale, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`, `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
+Built (phase 2); see `code-map.md`. What later phases use: `Theme::get(ctx)` tokens (colors incl. glow, key_point(_hot/_ring), hover_outline, crop_dim/crop_line, me/agent, slot_empty/slot_open; sizes incl. thumb_h, feed_thumb_h, faint_scale/faint_opacity, thumb_aspect_max, composer_lines, jump_button, hit_slop, key_point_r/_hit_r, close_badge; `motion` whoosh/slot_grow/fade/hover/hover_grow), `anim::tween`/`progress`/`lerp_rect`, `History<Op>` (`undo()`/`redo()` return the step's ops as a `Vec`: a group is one step), widgets `close_badge`(`_on` a given painter), `thumb_frame`, `send_button`, `tab`, `tool_button`, `swatch`, `toast`, `field_frame`, `preview`, `menu::MenuBar`; `headless::Headless` (run frames from synthetic events, paint them on the CPU: widget tests and screenshots without a window).
 
 ## guilab-editor (built)
 ```rust
@@ -260,29 +260,36 @@ Key points show on every element (not the base or a text being edited) while Mov
 - `guilab_editor::demo::DemoHost`: a complete host (doc, `Store` of assets, `History<Edit>`, fit/wheel zoom/middle-drag pan, Ctrl+Z / Ctrl+Shift+Z, live view → doc on `begin`, dropped on `abandon`). Tests (`src/tests.rs`) drive it through `guilab_kit::headless::Headless` with synthetic events.
 - `examples/shots.rs`: scripted scenarios rendered headless (CPU) in both themes and at 2x, with the pointer and cursor name marked: `target/debug/examples/shots [DIR] [FILTER]` after `cargo test --workspace` (default `target/editor-shots`).
 
-## guilab-chat
+## guilab-chat (built)
 ```rust
-pub struct Chat<K: Clone + Eq + Hash> { /* items, draft text, scroll, per-slot animation state */ }
-pub struct Item<K> { pub author: Author, pub time: String, pub text: String, pub attachments: Vec<K>, pub faint: bool }
-pub enum Author { Me, Them { name: String }, Activity }        // colors from Theme (me / agent)
-pub enum SlotId { Feed { item: u64, index: u16 }, Composer }   // identity = (SlotId, K); composer slots follow their key when others are removed
+pub struct Chat<K: Clone + Eq + Hash> { pub max_items, pub me_name, pub hint, pub empty_hint, /* items, draft, feed scroll, composer slots, per-slot animation */ }
+pub struct Item<K> { pub author: Author, pub time: String, pub text: String, pub attachments: Vec<K>, pub faint: bool }  // Item::me/them/activity(..).with(keys).faint()
+pub enum Author { Me, Them { name: String }, Activity }        // colors from Theme (me / agent); Activity = one dim mono line
+pub enum SlotId { Feed { item: u64, index: u16 }, Composer }   // identity = (SlotId, K)
 pub enum SlotState { Shown, Away { outlined: bool } }           // Away = empty slot (its image is in the editor or in flight)
-pub struct Thumb { pub texture: Option<TextureId>, pub aspect: f32 }   // None = placeholder (e.g. expired)
+pub struct Status { pub text: String, pub elapsed: u64, pub note: Option<String> }   // the host writes the note ("no guilab activity for 3m")
 pub trait Thumbs<K> {
-    fn thumb(&mut self, ctx: &Context, key: &K, height_px: f32) -> Thumb;
-    fn state(&self, slot: SlotId, key: &K) -> SlotState;
+    fn aspect(&mut self, key: &K) -> f32;                                          // every slot laid out: keep cheap
+    fn texture(&mut self, ctx: &Context, key: &K, height_px: f32) -> Option<TextureId>; // on-screen slots only; None = placeholder; height = hovered size in px
+    fn state(&self, slot: SlotId, key: &K) -> SlotState { Shown }
 }
-pub enum ChatEvent<K> { Open { slot: SlotId, key: K, rect: Rect }, Remove { key: K }, Send { text: String } }
-pub struct ChatOut<K> { pub events: Vec<ChatEvent<K>>, pub slots: Vec<(SlotId, K, Rect)> }   // every visible slot's rect this frame
+pub enum ChatEvent<K> { Open { slot, key, rect }, Remove { key }, Send { text }, Undo, Redo }
+pub struct ChatOut<K> { pub events, pub slots: Vec<(SlotId, K, Rect)>, pub feed_clip: Rect, pub composer: Rect }   // slot(slot, &key)
 impl<K> Chat<K> {
-    pub fn push(&mut self, item: Item<K>) -> u64;                   // item id
+    pub fn push(&mut self, item: Item<K>) -> u64;          // item id for SlotId::Feed
+    pub fn set_status(&mut self, s: Option<Status>);       // every frame
+    pub fn cross_fade(&mut self, slot: SlotId, key: K);    // the slot's next state change fades (copy-on-edit) instead of switching
     pub fn show(&mut self, ui: &mut Ui, pending: &[K], thumbs: &mut dyn Thumbs<K>) -> ChatOut<K>;
+    // draft()/draft_mut(), text_id(), scroll_to_end(), items(), len()
 }
 ```
-- The composer draws `pending` thumbnails **inside the text box, above the text**, at feed size, each with a `close_badge`. Send is enabled when the text isn't empty or `pending` isn't. Send clears the text and emits `Send`. The host takes the pending list itself.
-- Sent items lay out the same way: images above the text. `faint` items (agent screenshots and previews) are dimmed and drawn at `faint_scale`.
-- Inside the widget, keyed by `(SlotId, K)` with `Theme.motion`: a new composer key grows in, a removed one shrinks out, `Away ↔ Shown` cross-fades (a placeholder outline, then the image), and hover grows the thumbnail in a foreground layer without relayout. Clicking emits `Open` with the rect.
-- The text field keeps its own undo while focused. Ctrl+Z elsewhere is the host's.
+- Files: `lib.rs` (API), `slot.rs` (one thumbnail, shared by feed and composer), `composer.rs`, `feed.rs`, `demo.rs` (`DemoHost`: u32 keys, synthetic screenshots, open/close, removal undo via `History`, `edit_open` = copy-on-edit), `tests.rs` (demo host driven through `kit::headless`), `examples/chat_shots.rs` (`target/debug/examples/chat_shots [DIR] [FILTER]`, default `target/chat-shots`: both themes and 2x).
+- **Feed**: messages get a header (name in the author color, time) once per run of one author; images above the text, in a wrapping row; text selectable. Activity lines are `›` + mono, truncated to one line, time and full text on hover; their images (and any `faint` item's) are at `faint_scale` and `faint_opacity`. The status line (wave of dots, text, elapsed, note) ends the feed and repaints every 100 ms. Short content sits at the bottom next to the composer (the empty hint in the middle). While at the end it scrolls to the end every frame (`scroll_to_cursor_animation(.., none)`), so new items and a growing composer keep it there; a wheel/scroll-bar move away in the same frame wins and stops following (threshold 1 px: smooth-scroll steps are small). Scrolled up, a round ↓ button (accent when new items arrived) jumps back.
+- **Composer**: a `field_frame` box; pending thumbnails at `feed_thumb_h` in a row above the text, each with a × badge (top right, inside the image). Enter sends, Shift+Enter is a newline (plain Enter consumed before the TextEdit, decided after it took the pass's typing). Send is enabled with text or pending. Send clears the text and its undo, keeps focus, and the sent keys leave the composer at once (no shrink). The text grows to `composer_lines`, then scrolls. Clicking the box's padding focuses the text.
+- **Undo split**: the text box keeps its own undo only for edits since it got focus; otherwise Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y in it become `ChatEvent::Undo`/`Redo` for the host (so "× then Ctrl+Z" restores the image even with the text focused). Unfocused, the host handles the keys itself.
+- **Slots**: extreme aspects are center-cropped to `thumb_aspect_max`. A new composer key grows in (width and scale, neighbors slide), a removed one shrinks out with its last texture (`Thumbs` should keep it alive for `slot_grow`), a key coming back (undo) grows back in place. Hover grows a shown thumbnail to `hover_grow` of full size (faint ones from their small size) on an `Order::Foreground` layer with a shadow, no relayout, shifted to stay on screen; the hit area follows the grown rect so its edge doesn't flicker; hovering the × keeps it grown. `Away` slots don't grow: they show `slot_empty` with an outline lit on hover, plus a 2 pt `slot_open` outline (fades in/out over `fade`) when `outlined`. State changes are instant (flights land without a pop) unless `cross_fade` was asked. Clicks on any slot, empty ones too, emit `Open` with the drawn rect; the host decides what a click on the open image's slot means (close).
+- **Hooks for phase 7**: `ChatOut.slots` = drawn rect of every slot laid out (grown, growing in, or empty), feed slots scrolled away included, with `feed_clip` to tell; `composer`. `Away` + `outlined` + `cross_fade` cover empty slots, the open-image outline and the copy-on-edit fade; flights and the glow are drawn by the host from those rects.
+- `guilab-markup` keeps its own old `Chat` until phase 6 switches the viewer and deletes markup.
 
 ## Viewer glue (`crates/viewer`)
 `ui.rs` splits into `ui/mod.rs` (tabs, menus, panels), `ui/view.rs` (session view: zoom/pan, input forwarding; viewer-sizing's code), `ui/workspace.rs` (below), `ui/flight.rs` (whooshes and the glow) and `ui/thumbs.rs` (texture cache: renders by image id, renders by draft key and revision, 2× display size).
@@ -377,6 +384,7 @@ send it: guilab done "..." --image p4n2
 - **viewer-cursors**: the editor reports `CanvasOut.cursor`, and the session view applies it over the image, so a tool cursor, never the arrow, shows while a tool takes input.
 - **viewer-sizing**: the open doc has its own `doc_zoom` (fit to its crop) and ignores "lock size to window". Resize handles show on the live view only. Flights use the doc rect from that zoom.
 - **ui-toolkit-pass**: kit, the value sweep and portal light/dark are done; the issue keeps the pass over the rebuilt editor and chat UI (after P7).
+- **Phase 6 and the chat**: the server builds `Status.note` (today's `quiet` hint text) and maps feed events to `Item`s (commands/work/done/image_made = `Activity`, agent screenshots `faint`); viewer thumbs implement `Thumbs` over the texture cache.
 
 ## Phases
 Each phase leaves main green (`cargo test --workspace`, clippy) and working end to end.
@@ -387,7 +395,7 @@ Each phase leaves main green (`cargo test --workspace`, clippy) and working end 
 | 2 | **(done)** **Kit**: `guilab-kit` with Theme (tokens for everything moved), anim, History; move menu/toast/send button/tab; viewer and markup use it. | viewer-polish landed | kit, viewer, markup |
 | 3 | **(done)** **Agent side**: store in the server, capture, `screenshot` → image, `image`, `image make`, `done`/`work --image ID\|PATH`, `ImageRef` in message/agent events, feed renders from the store, skill doc "Images", `tests/it/images.rs`. Also (beyond the original plan): human messages already go through the store (the current viewer's marks are rebuilt as elements on the frozen base, so nothing baked enters it), `Annotation` is gone, `debug message --draw`, and the `screen` id on image-less messages. Tested end to end on 2 fresh agents. | 1 | proto, server, guilab, viewer, markup, skill |
 | 4 | **(done)** **Editor**: `guilab-editor` with all tools, the move tool spec, key points and hover, text editing, crop tool, insert, edits out. Tests with a bare `egui::Context` (like markup's). | 1, 2 | new crate |
-| 5 | **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
+| 5 | **(done)** **Chat**: `guilab-chat` with the generic feed, composer with slots in the box, × remove, send rules, slot states and animations, hover grow, slot rects. Bare-context tests. | 2 | new crate |
 | 6 | **Integration**: Workspace (drafts, Open, History incl. composer ops, copy-on-edit), Capture/captured (replaces `Freeze` + sketch tag), Message with drafts → freeze (replaces the markup-mark conversion in `server/src/viewer.rs`), the old `Sketch`/`Chat`/`guilab-markup` deleted, keep `ViewerUi` across hide/show. Transitions are instant (empty slots and outlines, no flights). Update `viewer.rs` tests (`draw_and_send` already checks the listing) and the skill doc. | 3, 4, 5 | viewer, server, skill |
 | 7 | **Motion and polish**: flights, glow, slot fades, feed hover grow, faint agent images, File → Insert image, dogfood through guilab itself (screenshots and input). | 6 | viewer (+ chat/kit tweaks) |
 

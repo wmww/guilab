@@ -1,0 +1,302 @@
+//! One thumbnail slot, shared by the feed and the composer: hover grow (lifted onto a
+//! foreground layer, no relayout), empty and outlined states with optional cross-fades,
+//! center-cropped extreme aspects, the remove badge, click to open.
+
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+
+use egui::{Color32, Context, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, TextureId, Ui, pos2, vec2};
+use guilab_kit::{Easing, Motion, Theme};
+
+use crate::{ChatEvent, ChatOut, SlotId, SlotState};
+
+/// A value easing toward a target.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Fader {
+    from: f32,
+    pub to: f32,
+    t0: f64,
+    m: Motion,
+}
+
+const INSTANT: Motion = Motion { secs: 0.0, easing: Easing::Linear };
+
+impl Fader {
+    pub fn at(v: f32) -> Fader {
+        Fader { from: v, to: v, t0: f64::NEG_INFINITY, m: INSTANT }
+    }
+
+    pub fn value(&self, now: f64) -> f32 {
+        if self.m.secs <= 0.0 {
+            return self.to;
+        }
+        let k = self.m.easing.apply(((now - self.t0) / self.m.secs as f64) as f32);
+        self.from + (self.to - self.from) * k
+    }
+
+    pub fn set(&mut self, target: f32, now: f64, m: Motion) {
+        if target != self.to {
+            *self = Fader { from: self.value(now), to: target, t0: now, m };
+        }
+    }
+
+    pub fn moving(&self, now: f64) -> bool {
+        self.m.secs > 0.0 && now - self.t0 < self.m.secs as f64
+    }
+}
+
+struct Anim {
+    /// 1 = the image shows, 0 = the empty slot.
+    shown: Fader,
+    outline: Fader,
+    hover: Fader,
+    seen: u64,
+}
+
+impl Anim {
+    fn moving(&self, now: f64) -> bool {
+        self.shown.moving(now) || self.outline.moving(now) || self.hover.moving(now)
+    }
+}
+
+pub(crate) struct Slots<K> {
+    anims: HashMap<(SlotId, K), Anim>,
+    pub fades: HashSet<(SlotId, K)>,
+    frame: u64,
+    now: f64,
+}
+
+impl<K> Default for Slots<K> {
+    fn default() -> Self {
+        Slots { anims: HashMap::new(), fades: HashSet::new(), frame: 0, now: 0.0 }
+    }
+}
+
+/// How one slot is drawn.
+pub(crate) struct Look {
+    /// The layout rect at rest (full size, before `appear`).
+    pub rest: Rect,
+    /// Image aspect (uncropped), for the center crop.
+    pub aspect: f32,
+    /// The rest size is faint (smaller, dimmed).
+    pub faint: bool,
+    /// 0..1: growing in or shrinking out (composer).
+    pub appear: f32,
+    /// Shows the remove badge.
+    pub removable: bool,
+    /// Shrinking out after removal: no input, the cached texture, the last state.
+    pub dying: bool,
+}
+
+/// The aspect a slot is laid out with: extreme images are center-cropped.
+pub(crate) fn slot_aspect(t: &Theme, aspect: f32) -> f32 {
+    let max = t.size.thumb_aspect_max;
+    if aspect.is_finite() && aspect > 0.0 { aspect.clamp(1.0 / max, max) } else { 1.0 }
+}
+
+impl<K: Clone + Eq + Hash> Slots<K> {
+    pub fn begin_frame(&mut self, ctx: &Context) {
+        self.frame += 1;
+        self.now = ctx.input(|i| i.time);
+    }
+
+    /// Drops state of slots not shown any more; keeps repainting while something moves.
+    pub fn end_frame(&mut self, ctx: &Context) {
+        let (frame, now) = (self.frame, self.now);
+        self.anims.retain(|_, a| a.seen + 2 >= frame);
+        if self.anims.values().any(|a| a.moving(now)) {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Lays out nothing (the caller allocated `look.rest`); paints the slot and handles its
+    /// input. `texture` is asked only when the slot is on screen. Returns the texture used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        t: &Theme,
+        chat: Id,
+        slot: SlotId,
+        key: &K,
+        look: Look,
+        state: Option<SlotState>,
+        texture: impl FnOnce(f32) -> Option<TextureId>,
+        out: &mut ChatOut<K>,
+    ) -> Option<TextureId> {
+        let now = self.now;
+        let ctx = ui.ctx().clone();
+        let a = self.anims.entry((slot, key.clone())).or_insert_with(|| {
+            let (shown, outlined) = split(state.unwrap_or_default());
+            Anim { shown: Fader::at(shown), outline: Fader::at(outlined), hover: Fader::at(0.0), seen: 0 }
+        });
+        a.seen = self.frame;
+        if let Some(st) = state {
+            let (shown, outlined) = split(st);
+            if a.shown.to != shown {
+                let fade = self.fades.remove(&(slot, key.clone()));
+                a.shown.set(shown, now, if fade { t.motion.fade } else { INSTANT });
+            }
+            a.outline.set(outlined, now, t.motion.fade);
+        }
+
+        // Hover grow: to `hover_grow` of full size, faint slots too (they grow more).
+        let base = if look.faint { t.size.faint_scale } else { 1.0 };
+        let grow = t.motion.hover_grow / base;
+        let screen = ctx.content_rect();
+        let drawn_at = |h: f32| {
+            let r = scale(look.rest, (1.0 + (grow - 1.0) * h) * look.appear);
+            // A grown thumbnail stays on screen (only shifted for the growth).
+            if screen.contains_rect(look.rest) { keep_inside(r, screen) } else { r }
+        };
+        let lifted_before = a.hover.to > 0.5;
+        let mut drawn = drawn_at(a.hover.value(now));
+        let id = chat.with(("slot", slot, hash(key)));
+        if !look.dying {
+            let resp = ui.interact(if lifted_before { drawn } else { scale(look.rest, look.appear) }, id, Sense::click());
+            // The badge is painted with the slot below; registered after the thumbnail, its
+            // input wins over the thumbnail's.
+            let badge_hover = look.removable && {
+                let r = Rect::from_center_size(badge_center(t, drawn), egui::Vec2::splat(t.size.close_badge));
+                let b = ui.interact(r, id.with("x"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Remove");
+                if b.clicked() {
+                    out.events.push(ChatEvent::Remove { key: key.clone() });
+                }
+                b.hovered()
+            };
+            let hovered = (resp.hovered() || badge_hover) && a.shown.to > 0.5;
+            if resp.hovered() {
+                ctx.set_cursor_icon(CursorIcon::PointingHand);
+            }
+            a.hover.set(hovered as u8 as f32, now, t.motion.hover);
+            drawn = drawn_at(a.hover.value(now));
+            if resp.clicked() {
+                out.events.push(ChatEvent::Open { slot, key: key.clone(), rect: drawn });
+            }
+            out.slots.push((slot, key.clone(), drawn));
+        }
+
+        let h = a.hover.value(now);
+        let lifted = h > 0.001;
+        let visible = lifted || ui.is_rect_visible(drawn);
+        if !visible {
+            return None;
+        }
+        let painter = if lifted {
+            ctx.layer_painter(LayerId::new(Order::Foreground, chat.with("lifted")))
+        } else {
+            ui.painter().clone()
+        };
+        let c = &t.colors;
+        let radius = t.radius.thumb;
+        let opacity = look.appear.min(1.0) * if look.faint { lerp(t.size.faint_opacity, 1.0, h) } else { 1.0 };
+        let shown = a.shown.value(now);
+        let outline = a.outline.value(now);
+        if lifted {
+            let shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: c.shadow.gamma_multiply(h) };
+            painter.add(shadow.as_shape(drawn, radius));
+        }
+        let mut used = None;
+        if shown < 1.0 {
+            let k = (1.0 - shown) * opacity;
+            let hot = ui.rect_contains_pointer(drawn) && !look.dying;
+            painter.rect(drawn, radius, c.slot_empty.gamma_multiply(k), Stroke::new(t.size.line, if hot { c.outline_focus } else { c.outline }.gamma_multiply(k)), StrokeKind::Inside);
+        }
+        if shown > 0.0 {
+            let k = shown * opacity;
+            let height_px = look.rest.height() * grow * ctx.pixels_per_point();
+            used = texture(height_px);
+            match used {
+                Some(tex) => {
+                    let uv = crop_uv(look.aspect, drawn.width() / drawn.height());
+                    painter.add(egui::epaint::RectShape::filled(drawn, radius, Color32::WHITE.gamma_multiply(k)).with_texture(tex, uv));
+                }
+                None => placeholder(&painter, t, drawn, k),
+            }
+            let line = if h > 0.5 { c.outline_focus } else { c.outline };
+            painter.rect_stroke(drawn, radius, Stroke::new(t.size.line, line.gamma_multiply(k)), StrokeKind::Inside);
+        }
+        if outline > 0.0 {
+            painter.rect_stroke(drawn, radius + 1.0, Stroke::new(2.0, c.slot_open.gamma_multiply(outline * look.appear.min(1.0))), StrokeKind::Outside);
+        }
+        if look.removable && !look.dying && look.appear > 0.5 {
+            badge(&painter, t, badge_center(t, drawn), ui.rect_contains_pointer(Rect::from_center_size(badge_center(t, drawn), egui::Vec2::splat(t.size.close_badge))));
+        }
+        used
+    }
+}
+
+fn hash(k: &impl Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    BuildHasherDefault::<DefaultHasher>::default().hash_one(k)
+}
+
+fn split(s: SlotState) -> (f32, f32) {
+    match s {
+        SlotState::Shown => (1.0, 0.0),
+        SlotState::Away { outlined } => (0.0, outlined as u8 as f32),
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn scale(r: Rect, k: f32) -> Rect {
+    Rect::from_center_size(r.center(), r.size() * k)
+}
+
+/// Shifts `r` into `bounds` where it fits.
+fn keep_inside(r: Rect, bounds: Rect) -> Rect {
+    let mut d = vec2(0.0, 0.0);
+    if r.width() <= bounds.width() {
+        d.x = (bounds.min.x - r.min.x).max(0.0) + (bounds.max.x - r.max.x).min(0.0);
+    }
+    if r.height() <= bounds.height() {
+        d.y = (bounds.min.y - r.min.y).max(0.0) + (bounds.max.y - r.max.y).min(0.0);
+    }
+    r.translate(d)
+}
+
+/// UVs showing the middle of an image of `aspect` in a slot of `slot` aspect.
+fn crop_uv(aspect: f32, slot: f32) -> Rect {
+    if !(aspect.is_finite() && aspect > 0.0) || (aspect - slot).abs() < 1e-3 {
+        return Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+    }
+    if aspect > slot {
+        let w = slot / aspect;
+        Rect::from_min_max(pos2((1.0 - w) / 2.0, 0.0), pos2((1.0 + w) / 2.0, 1.0))
+    } else {
+        let h = aspect / slot;
+        Rect::from_min_max(pos2(0.0, (1.0 - h) / 2.0), pos2(1.0, (1.0 + h) / 2.0))
+    }
+}
+
+fn badge_center(t: &Theme, r: Rect) -> Pos2 {
+    let off = t.size.close_badge / 2.0 + t.space.sm;
+    r.right_top() + vec2(-off, off)
+}
+
+fn badge(p: &Painter, t: &Theme, center: Pos2, hot: bool) {
+    let c = &t.colors;
+    let r = t.size.close_badge / 2.0;
+    p.circle_filled(center, r, if hot { c.danger } else { c.badge });
+    let s = Stroke::new(1.5, c.badge_fg);
+    let h = r * 0.44;
+    p.line_segment([center + vec2(-h, -h), center + vec2(h, h)], s);
+    p.line_segment([center + vec2(h, -h), center + vec2(-h, h)], s);
+}
+
+/// No texture: the empty fill with a small picture glyph.
+fn placeholder(p: &Painter, t: &Theme, r: Rect, k: f32) {
+    let c = &t.colors;
+    p.rect_filled(r, t.radius.thumb, c.slot_empty.gamma_multiply(k));
+    let s = (r.width().min(r.height()) * 0.32).max(8.0);
+    let g = Rect::from_center_size(r.center(), vec2(s * 1.25, s));
+    let col = c.weak.gamma_multiply(k);
+    let stroke = Stroke::new(t.size.icon_stroke, col);
+    p.rect_stroke(g, 2.0, stroke, StrokeKind::Middle);
+    p.circle_filled(g.min + vec2(g.width() * 0.7, g.height() * 0.3), s * 0.09, col);
+    p.line_segment([g.left_bottom() + vec2(s * 0.12, -s * 0.12), g.min + vec2(g.width() * 0.4, g.height() * 0.45)], stroke);
+    p.line_segment([g.min + vec2(g.width() * 0.4, g.height() * 0.45), g.right_bottom() + vec2(-s * 0.12, -s * 0.12)], stroke);
+}

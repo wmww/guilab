@@ -60,6 +60,10 @@ pub struct Colors {
     /// Thin ring around key points, so they read on light and dark images.
     pub key_point_ring: Color32,
     pub hover_outline: Color32,
+    /// Chat: an empty thumbnail slot (its image is open or in flight), and the outline of
+    /// the slot whose image is open.
+    pub slot_empty: Color32,
+    pub slot_open: Color32,
     /// Crop tool: shade over the canvas outside the crop, and the crop's outline.
     pub crop_dim: Color32,
     pub crop_line: Color32,
@@ -118,8 +122,15 @@ pub struct Sizes {
     pub handle_len: f32,
     pub handle_w: f32,
     pub handle_gap: f32,
-    /// Feed images of the agent's own (later phases).
+    /// Faint feed images (the agent's working screenshots): size factor and opacity.
     pub faint_scale: f32,
+    pub faint_opacity: f32,
+    /// Thumbnails wider (or taller) than this aspect ratio are center-cropped to it.
+    pub thumb_aspect_max: f32,
+    /// The message box grows with its text up to this many lines, then scrolls.
+    pub composer_lines: f32,
+    /// Width of the feed's "jump to the latest message" button.
+    pub jump_button: f32,
     /// Extra hit distance around marks, and key point radii (later phases).
     pub hit_slop: f32,
     pub key_point_r: f32,
@@ -137,6 +148,7 @@ pub struct Radius {
     pub tab: f32,
     pub field: f32,
     pub toast: f32,
+    pub thumb: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -263,6 +275,10 @@ fn sizes() -> Sizes {
         handle_w: 4.0,
         handle_gap: 3.0,
         faint_scale: 0.6,
+        faint_opacity: 0.6,
+        thumb_aspect_max: 3.0,
+        composer_lines: 8.0,
+        jump_button: 28.0,
         hit_slop: 6.0,
         key_point_r: 5.0,
         key_point_hit_r: 4.0,
@@ -271,7 +287,7 @@ fn sizes() -> Sizes {
     }
 }
 
-const RADIUS: Radius = Radius { small: 2.0, menu: 6.0, button: 4.0, tab: 6.0, field: 10.0, toast: 10.0 };
+const RADIUS: Radius = Radius { small: 2.0, menu: 6.0, button: 4.0, tab: 6.0, field: 10.0, toast: 10.0, thumb: 4.0 };
 
 fn fonts() -> Fonts {
     Fonts {
@@ -336,6 +352,8 @@ impl Theme {
                 key_point_hot: Color32::from_rgb(110, 170, 255),
                 key_point_ring: Color32::from_black_alpha(170),
                 hover_outline: Color32::from_rgba_unmultiplied(110, 170, 255, 140),
+                slot_empty: gray(24),
+                slot_open: Color32::from_rgb(110, 170, 255),
                 crop_dim: Color32::from_black_alpha(150),
                 crop_line: gray(240),
                 shadow: Color32::from_black_alpha(96),
@@ -382,6 +400,8 @@ impl Theme {
                 key_point_hot: Color32::from_rgb(30, 100, 210),
                 key_point_ring: Color32::from_black_alpha(150),
                 hover_outline: Color32::from_rgba_unmultiplied(30, 100, 210, 140),
+                slot_empty: gray(228),
+                slot_open: Color32::from_rgb(30, 100, 210),
                 crop_dim: Color32::from_black_alpha(130),
                 crop_line: gray(255),
                 shadow: Color32::from_black_alpha(40),

@@ -774,6 +774,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "guilab-chat"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "guilab-kit",
+ "png",
+]
+
+[[package]]
 name = "guilab-compositor"
 version = "0.1.0"
 dependencies = [
