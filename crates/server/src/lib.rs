@@ -115,6 +115,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         exe_mtime,
         renderer: gpu.name.clone(),
         viewer: None,
+        pending: Default::default(),
     };
 
     let mut event_loop: EventLoop<'static, Server> = EventLoop::try_new()?;

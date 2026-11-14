@@ -80,6 +80,21 @@ fn peer_gone(stream: &UnixStream) -> bool {
 
 impl Server {
     /// Adds a waiting request. Input chains start right away (most never sleep).
+    /// Pending requests by kind (`ping`, for tests and debugging).
+    pub(crate) fn pending_counts(&self) -> guilab_proto::PendingCounts {
+        let mut c = guilab_proto::PendingCounts::default();
+        for p in &self.pending {
+            match p.wait {
+                Wait::Poll { .. } => c.polls += 1,
+                Wait::Input { .. } => c.inputs += 1,
+                Wait::Shot { .. } => c.screenshots += 1,
+                Wait::Clip { .. } => c.clips += 1,
+                Wait::Kill { .. } | Wait::New { .. } => {}
+            }
+        }
+        c
+    }
+
     pub(crate) fn add_pending(&mut self, p: Pending) {
         let input = matches!(p.wait, Wait::Input { .. });
         self.pending.push(p);

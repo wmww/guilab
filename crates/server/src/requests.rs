@@ -118,6 +118,7 @@ impl Server {
             GlobalCmd::Ping => {
                 let mut info = self.info.clone();
                 info.viewer = self.viewer_info();
+                info.pending = self.pending_counts();
                 Response::ok(info)
             }
             GlobalCmd::Show { display } => 'show: {

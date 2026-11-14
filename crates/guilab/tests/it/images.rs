@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::process::Stdio;
 
-use crate::{Lab, read_png};
+use crate::*;
 
 fn id(v: &serde_json::Value) -> String {
     v.as_str().unwrap().to_string()

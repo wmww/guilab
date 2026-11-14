@@ -1,6 +1,6 @@
 //! Session lifecycle, resolution and TTL.
 
-use crate::Lab;
+use crate::*;
 
 #[test]
 fn new_ls_end() {
@@ -37,8 +37,10 @@ fn ttl_expires() {
     lab.run(&["new", "short", "--ttl", "1"]);
     lab.run(&["run", "--", "sleep", "100"]);
     let pid = lab.json(&["ps"])[0]["pid"].as_u64().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-    assert!(lab.run(&["ls"]).contains("no sessions"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    assert!(!crate::cleanup::alive(pid), "app outlived its session");
+    // Checked once a second: gone within 1-2 s of inactivity.
+    wait_until("the session to expire", 10, || {
+        let ls = lab.run(&["ls"]);
+        if ls.contains("no sessions") { Ok(()) } else { Err(ls) }
+    });
+    wait_dead(&[pid], "the app to end with its session");
 }

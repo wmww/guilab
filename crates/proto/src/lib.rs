@@ -429,6 +429,18 @@ pub struct ServerInfo {
     /// The viewer window, if shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer: Option<ViewerInfo>,
+    /// Requests waiting for their reply (tests wait on these instead of sleeping).
+    #[serde(default)]
+    pub pending: PendingCounts,
+}
+
+/// Counts of requests the server will answer later.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PendingCounts {
+    pub polls: usize,
+    pub inputs: usize,
+    pub screenshots: usize,
+    pub clips: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +452,13 @@ pub struct ViewerInfo {
     /// Frames presented so far (the viewer draws only when something changed).
     #[serde(default)]
     pub frames: u64,
+    /// The window's size on the host (logical), as last configured.
+    #[serde(default)]
+    pub window: [u32; 2],
+    /// Times human input (presses, keys, scrolls, touches, gestures; not motion) was
+    /// dropped because the session was locked.
+    #[serde(default)]
+    pub dropped: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

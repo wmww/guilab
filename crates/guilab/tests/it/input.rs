@@ -3,59 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{Lab, app, have, nodes, rect};
-
-pub fn has_python_module(check: &str) -> bool {
-    let ok = std::process::Command::new("python3").args(["-c", check]).status().is_ok_and(|s| s.success());
-    if !ok {
-        eprintln!("skipping: python3 can't run `{check}`");
-    }
-    ok
-}
-
-pub fn gtk4() -> bool {
-    has_python_module("import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk")
-}
-
-fn qt6() -> bool {
-    has_python_module("import PySide6.QtWidgets")
-}
-
-/// An app's log, read until it contains `needle` (panics after `secs`).
-pub fn wait_log(log: &str, needle: &str, secs: u64) -> String {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
-        let s = std::fs::read_to_string(log).unwrap_or_default();
-        if s.contains(needle) {
-            return s;
-        }
-        assert!(Instant::now() < deadline, "{needle:?} never appeared in the app log:\n{s}");
-        std::thread::sleep(Duration::from_millis(30));
-    }
-}
-
-/// Center of a widget from the app's `pos NAME X Y W H` line, in output pixels.
-pub fn center(log: &str, name: &str, scale: f64) -> (String, String) {
-    let line = log.lines().find(|l| l.starts_with(&format!("pos {name} "))).unwrap_or_else(|| panic!("no pos for {name}"));
-    let v: Vec<f64> = line.split(' ').skip(2).map(|x| x.parse().unwrap()).collect();
-    let f = |c: f64| format!("{}", (c * scale).round());
-    (f(v[0] + v[2] / 2.0), f(v[1] + v[3] / 2.0))
-}
-
-impl Lab {
-    /// `guilab work`, then `guilab lock`; returns the token.
-    pub fn lock(&self) -> String {
-        self.run(&["work", "testing"]);
-        self.json(&["lock"])["token"].as_str().unwrap().to_string()
-    }
-
-    /// `guilab -t TOKEN input ACTIONS...`
-    pub fn input(&self, token: &str, actions: &[&str]) -> serde_json::Value {
-        let mut a = vec!["-t", token, "input"];
-        a.extend_from_slice(actions);
-        self.json(&a)
-    }
-}
+use crate::*;
 
 #[test]
 fn lock_rules() {
@@ -88,18 +36,18 @@ fn lock_rules() {
     assert_eq!(lab.json(&["-t", &t, "input", "move", "1", "1"])["pointer"], serde_json::json!([1.0, 1.0]));
     // Sleeping chains don't block other commands.
     let start = Instant::now();
-    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "600", "move", "2", "2"]).stdout(std::process::Stdio::null()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "1500", "move", "2", "2"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+    wait_until("the chain to be pending", 10, || if lab.info().pending.inputs == 1 { Ok(()) } else { Err("not yet".into()) });
     lab.run(&["tree"]);
-    assert!(start.elapsed() < Duration::from_millis(500));
+    assert_eq!(lab.info().pending.inputs, 1, "tree waited for the chain");
     assert!(slow.wait().unwrap().success());
-    assert!(start.elapsed() >= Duration::from_millis(600));
+    assert!(start.elapsed() >= Duration::from_millis(1500));
     // A chain whose client gave up (Ctrl-C) stops.
-    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "400", "move", "30", "30"]).stdout(std::process::Stdio::null()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    let mut slow = lab.cmd(&["-t", &t, "input", "sleep", "3000", "move", "30", "30"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+    wait_until("the chain to be pending", 10, || if lab.info().pending.inputs == 1 { Ok(()) } else { Err("not yet".into()) });
     slow.kill().unwrap();
     let _ = slow.wait();
-    std::thread::sleep(Duration::from_millis(600));
+    wait_until("the server to drop the chain", 10, || if lab.info().pending.inputs == 0 { Ok(()) } else { Err("still pending".into()) });
     assert_eq!(lab.input(&t, &["sleep", "1"])["pointer"], serde_json::json!([2.0, 2.0]));
 
     // The server checks limits itself, whatever the client: a glide of 4e9 ms is refused.
@@ -306,13 +254,11 @@ fn kitty_types_unicode() {
     lab.run(&["run", "--", "kitty", "-o", "confirm_os_window_close=0", "sh", "-c", &format!("read l; printf %s \"$l\" > {out}")]);
     lab.wait_tree("s1", 15, |t| t.as_array().is_some_and(|a| !a.is_empty()));
     let t = lab.lock();
-    // kitty takes a moment after mapping before the shell reads.
-    std::thread::sleep(Duration::from_millis(500));
+    // Keys before kitty started the shell are lost; the tty buffers them after that.
+    wait_until("kitty's shell", 10, || if pgrep(&format!("^sh -c read l; printf %s .* > {out}$")).is_empty() { Err("not running".into()) } else { Ok(()) });
     lab.input(&t, &["type", "kitty é→✓ 日本 A!\\n"]);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !std::path::Path::new(&out).exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(std::fs::read_to_string(&out).unwrap(), "kitty é→✓ 日本 A!");
+    wait_until("the typed line in the file", 10, || {
+        let got = std::fs::read_to_string(&out).unwrap_or_default();
+        if got == "kitty é→✓ 日本 A!" { Ok(()) } else { Err(got) }
+    });
 }

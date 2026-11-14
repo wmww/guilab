@@ -219,6 +219,8 @@ pub struct ViewerUi {
     gesture: Option<(GestureTo, String)>,
     /// When (egui time) the human last tried to use an app an agent has locked.
     blocked_at: Option<f64>,
+    /// UI passes in which that happened (for tests and debugging).
+    pub blocked_tries: u64,
     /// Messages for the human (e.g. "Saved to ..."), shown as a toast; and when shown.
     notices: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     notice: Option<(String, f64)>,
@@ -979,6 +981,7 @@ impl ViewerUi {
 
         if tried {
             self.blocked_at = Some(now);
+            self.blocked_tries += 1;
         }
         // A drawing tool or the lock took over while the pointer was in the app.
         if !to_app && self.held_buttons.is_empty() && self.pointer_in.take().is_some() {

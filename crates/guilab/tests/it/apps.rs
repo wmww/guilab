@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{Lab, app, have, lit_fraction, nodes, read_png, rect};
+use crate::*;
 
 #[test]
 fn shm_client_renders() {
@@ -120,13 +120,14 @@ fn qt_renders_tiled() {
 /// the full cap, and windows bigger than the output are reported.
 #[test]
 fn screenshot_settle_cases() {
-    if !have("python3") || !crate::input::gtk4() {
+    if !have("python3") || !gtk4() {
         return;
     }
     let lab = Lab::new();
     lab.run(&["new", "-s", "800x600"]);
     lab.run(&["run", "--", "python3", &app("gtk_app.py"), "--spin"]);
-    lab.wait_tree("s1", 10, |t| !crate::nodes(t).is_empty());
+    lab.wait_tree("s1", 10, |t| !nodes(t).is_empty());
+    // Not a wait: the spinner must have run past ANIM_DETECT (1 s).
     std::thread::sleep(Duration::from_millis(1300));
     let t = Instant::now();
     let s = lab.json(&["screenshot"]);
@@ -142,7 +143,7 @@ fn screenshot_settle_cases() {
 
     lab.run(&["new", "c", "-s", "640x480"]);
     lab.run(&["-S", "c", "run", "--", "python3", &app("gtk_app.py"), "--big"]);
-    lab.wait_tree("c", 10, |t| !crate::nodes(t).is_empty());
+    lab.wait_tree("c", 10, |t| !nodes(t).is_empty());
     let out = lab.run(&["-S", "c", "screenshot"]);
     assert!(out.contains("doesn't fit the output, so it's cut off"), "{out}");
 }

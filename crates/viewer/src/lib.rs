@@ -148,6 +148,11 @@ impl Viewer {
         self.host.dirty = true;
     }
 
+    /// How often the human tried to use a locked app (UI passes).
+    pub fn blocked_tries(&self) -> u64 {
+        self.ui.blocked_tries
+    }
+
     /// The session tab shown (as of the last frame).
     pub fn current(&self) -> Option<&str> {
         self.ui.current()

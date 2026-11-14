@@ -2,21 +2,9 @@
 //! human's desktop. The test drives the host session's pointer (as an agent there), which
 //! the viewer turns into human input in the viewed session.
 
-use std::time::{Duration, Instant};
-
-use guilab_proto::{Client, Request, ServerInfo, Target};
-
-use crate::{
-    Lab, app,
-    input::{center, gtk4, wait_log},
-};
+use crate::*;
 
 impl Lab {
-    fn info(&self) -> ServerInfo {
-        let mut c = Client::connect(&self.rt.join("guilab/control.sock")).unwrap();
-        c.call_as(&Request { proto: guilab_proto::PROTO, target: Target::default(), cmd: guilab_proto::GlobalCmd::Ping.into() }).unwrap()
-    }
-
     /// `guilab show` on `host`'s session socket.
     fn show(&self, host: &str) -> (bool, String, String) {
         self.try_run_env(&[("WAYLAND_DISPLAY", host)], &["show"])
@@ -60,20 +48,16 @@ struct Mapping {
 fn mapping(h: &Lab, t: &str, v: &Lab) -> Mapping {
     // Waits for the session's latest pointer position to differ from `prev`.
     let probe = |x: i64, y: i64, prev: Option<(f64, f64)>| -> (f64, f64) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        wait_until("human motion in the viewed session", 10, || {
             h.input(t, &["move", &x.to_string(), &y.to_string()]);
-            std::thread::sleep(Duration::from_millis(100));
             // `-n` doesn't count motion: this lists every motion event.
             let log = v.json(&["log", "--kind", "motion", "-n", "1"]);
-            if let Some(p) = log["events"].as_array().and_then(|e| e.last()).and_then(|e| e["path"].as_array()).and_then(|p| p.last()) {
-                let at = (p[0].as_f64().unwrap(), p[1].as_f64().unwrap());
-                if Some(at) != prev {
-                    return at;
-                }
+            let last = log["events"].as_array().and_then(|e| e.last()).and_then(|e| e["path"].as_array()).and_then(|p| p.last()).cloned();
+            match last.map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())) {
+                Some(at) if Some(at) != prev => Ok(at),
+                _ => Err(format!("{log}\n{}", v.run(&["log"]))),
             }
-            assert!(Instant::now() < deadline, "no human motion reached the session: {log}\n{}", v.run(&["log"]));
-        }
+        })
     };
     let (ax, ay) = probe(400, 300, None);
     let (bx, _) = probe(700, 300, Some((ax, ay)));
@@ -120,14 +104,22 @@ fn click_through(env: &[(&str, &str)], buffers: &str) {
     h.input(&t, &["move", &x.to_string(), &y.to_string(), "sleep", "100", "pinch", "2"]);
     wait_log(&log, "zoom end", 5);
 
-    // Locked by an agent: the human's clicks are dropped, until it unlocks.
+    // Locked by an agent: the human's clicks are dropped, until it unlocks. (The pinch
+    // after the last click shows the app handled everything before it.)
     let vt = v.lock();
     click_button(&h, &t, &m, &log);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(clicks(&log), 1, "a click got through the lock");
+    wait_until("the viewer to drop the click", 10, || {
+        let d = v.info().viewer.map_or(0, |i| i.dropped);
+        if d > 0 { Ok(()) } else { Err(format!("{d} dropped")) }
+    });
     v.run(&["-t", &vt, "unlock"]);
     click_button(&h, &t, &m, &log);
-    wait_log(&log, "clicked 2", 5);
+    h.input(&t, &["move", &x.to_string(), &y.to_string(), "sleep", "100", "pinch", "2"]);
+    wait_until("the second pinch", 10, || {
+        let l = std::fs::read_to_string(&log).unwrap();
+        if l.matches("zoom end").count() == 2 { Ok(()) } else { Err(l) }
+    });
+    assert_eq!(clicks(&log), 2, "a click got through the lock: {}", v.run(&["log"]));
 }
 
 #[test]
@@ -192,11 +184,7 @@ fn host_killed() {
     assert!(ok, "{err}");
     let pid = h.info().pid;
     rustix::process::kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap(), rustix::process::Signal::KILL).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while v.info().viewer.is_some() {
-        assert!(Instant::now() < deadline, "viewer still shown after the host died");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("the viewer to go when the host died", 10, || v.info().viewer.map_or(Ok(()), |i| Err(format!("{i:?}"))));
     assert_eq!(v.json(&["ps"])[0]["state"], "running");
     v.run(&["screenshot", "--no-settle"]);
     let (ok, _, _) = v.show(&sock);
@@ -231,9 +219,9 @@ fn draw_and_send() {
     let shot = v.json(&["screenshot", "--no-settle"])["image"].as_str().unwrap().to_string();
     v.run(&["done", "here's the app", "--image", &shot]);
 
+    // No pauses needed: the viewer runs a UI pass per click (see `HostState::take_input`).
     let step = |actions: &[&str]| {
         h.input(&t, actions);
-        std::thread::sleep(Duration::from_millis(150));
     };
     step(&["move", "19", "133", "click"]); // box tool
     step(&["move", "500", "300", "down", "move", "700", "400", "100", "up"]);
@@ -251,7 +239,7 @@ fn draw_and_send() {
     assert!(lines.iter().any(|l| l.starts_with("3 red text ") && l.contains("\"label\"")), "{out}");
     assert!(out.contains(&format!("(see what the marks point at: guilab image {id} --crop '")), "{out}");
     let img = v.json(&["image", id])["render"]["path"].as_str().unwrap().to_string();
-    let (w, hh, px, ch) = crate::read_png(&img);
+    let (w, hh, px, ch) = read_png(&img);
     assert_eq!((w, hh), (800, 600));
     let red = px.chunks(ch).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count();
     assert!(red > 300, "the box isn't in the image ({red} red pixels)");
@@ -261,9 +249,10 @@ fn draw_and_send() {
     v.run(&["new", "other"]);
     let (ok, _, err) = v.try_run_env(&[("WAYLAND_DISPLAY", &sock)], &["-S", "other", "show"]);
     assert!(ok, "{err}");
-    std::thread::sleep(Duration::from_millis(100));
-    let ls = v.run(&["ls"]);
-    assert!(ls.lines().any(|l| l.starts_with("other ") && l.ends_with("(shown in the viewer)")), "{ls}");
+    wait_until("the viewer to show `other`", 10, || {
+        let ls = v.run(&["ls"]);
+        if ls.lines().any(|l| l.starts_with("other ") && l.ends_with("(shown in the viewer)")) { Ok(()) } else { Err(ls) }
+    });
 }
 
 /// A key the human holds repeats in the viewer's text boxes (the host session turns client
@@ -277,7 +266,6 @@ fn held_key_repeats() {
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
     h.run(&["debug", "input", "move", "600", "777", "sleep", "100", "click"]); // message box
-    std::thread::sleep(Duration::from_millis(200));
     h.run(&["debug", "input", "keydown", "x", "sleep", "1200", "keyup", "x", "key", "Return"]);
     let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
     let n = out.lines().find_map(|l| l.split("human message: \"").nth(1)).map(|m| m.chars().take_while(|c| *c == 'x').count());
@@ -302,34 +290,33 @@ fn app_cursors() {
     let shot = h.path("cursor.png");
     // The host's pixels around the pointer, after moving it over `area` (60 px below the
     // label's center, off its text).
-    let look = |area: &str| -> Vec<[u8; 3]> {
+    let white = |p: &[[u8; 3]]| p.iter().filter(|c| c.iter().all(|v| *v > 220)).count();
+    let red = |p: &[[u8; 3]]| p.iter().filter(|c| c[0] > 200 && c[1] < 50 && c[2] < 50).count();
+    // Moves the pointer over `area` (60 px below the label's center, off its text) and
+    // waits until the host's pixels around the pointer pass `ok`.
+    let look = |area: &str, what: &str, ok: &dyn Fn(&[[u8; 3]]) -> bool| {
         let (x, y) = center(&applog, area, 1.0);
         let x = (m.origin.0 + x.parse::<f64>().unwrap() * m.scale).round() as i64;
         let y = (m.origin.1 + (y.parse::<f64>().unwrap() + 60.0) * m.scale).round() as i64;
         h.input(&t, &["move", &(x - 5).to_string(), &y.to_string(), "move", &x.to_string(), &y.to_string()]);
-        std::thread::sleep(Duration::from_millis(300));
-        h.run(&["screenshot", "--cursor", "-o", &shot]);
-        let (w, _, px, ch) = crate::read_png(&shot);
-        let mut out = Vec::new();
-        for dy in -12..=12 {
-            for dx in -12..=12 {
-                let i = (((y + dy) * w as i64 + x + dx) as usize) * ch;
-                out.push([px[i], px[i + 1], px[i + 2]]);
+        wait_until(what, 10, || {
+            h.run(&["screenshot", "--cursor", "-o", &shot]);
+            let (w, _, px, ch) = read_png(&shot);
+            let mut out = Vec::new();
+            for dy in -12..=12 {
+                for dx in -12..=12 {
+                    let i = (((y + dy) * w as i64 + x + dx) as usize) * ch;
+                    out.push([px[i], px[i + 1], px[i + 2]]);
+                }
             }
-        }
-        out
+            if ok(&out) { Ok(()) } else { Err(format!("{} white, {} red px", white(&out), red(&out))) }
+        });
     };
-    let white = |p: &Vec<[u8; 3]>| p.iter().filter(|c| c.iter().all(|v| *v > 220)).count();
-    let red = |p: &Vec<[u8; 3]>| p.iter().filter(|c| c[0] > 200 && c[1] < 50 && c[2] < 50).count();
-    let named = look("named");
-    assert!(white(&named) > 10 && red(&named) == 0, "no crosshair");
-    let image = look("image");
-    assert!(red(&image) > 300, "no image cursor ({} red px)", red(&image));
-    let hidden = look("hidden");
-    assert!(white(&hidden) == 0 && red(&hidden) == 0, "the hidden cursor shows");
+    look("named", "a crosshair", &|p| white(p) > 10 && red(p) == 0);
+    look("image", "the image cursor", &|p| red(p) > 300);
+    look("hidden", "no cursor", &|p| white(p) == 0 && red(p) == 0);
     let _vt = v.lock();
-    let blocked = look("image");
-    assert!(red(&blocked) == 0 && white(&blocked) > 10, "locked: not the not-allowed cursor");
+    look("image", "locked: the not-allowed cursor", &|p| red(p) == 0 && white(p) > 10);
 }
 
 /// Scripted input without pauses: a click on the message box that comes with the pointer's
@@ -349,17 +336,22 @@ fn click_then_type() {
 
 impl Lab {
     /// Waits until the session's output size satisfies `pred`; returns it.
+    #[track_caller]
     fn wait_output(&self, secs: u64, pred: impl Fn(u64, u64) -> bool) -> (u64, u64) {
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        loop {
+        wait_until("an output size", secs, || {
             let o = self.json(&["output"]);
             let (w, h) = (o["width"].as_u64().unwrap(), o["height"].as_u64().unwrap());
-            if pred(w, h) {
-                return (w, h);
-            }
-            assert!(Instant::now() < deadline, "output stayed {w}x{h}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            if pred(w, h) { Ok((w, h)) } else { Err(format!("{w}x{h}")) }
+        })
+    }
+
+    /// Waits until the viewer's host window has this size.
+    #[track_caller]
+    fn wait_window(&self, size: [u32; 2]) {
+        wait_until(&format!("a {size:?} viewer window"), 10, || {
+            let w = self.info().viewer.map(|v| v.window);
+            if w == Some(size) { Ok(()) } else { Err(format!("{w:?}")) }
+        });
     }
 }
 
@@ -378,7 +370,6 @@ fn size_to_window() {
     assert!(ok, "{err}");
     let step = |actions: &[&str]| {
         h.input(&t, actions);
-        std::thread::sleep(Duration::from_millis(150));
     };
     step(&["move", "111", "12", "click"]);
     step(&["move", "150", "127", "click"]);
@@ -394,11 +385,11 @@ fn size_to_window() {
     // An agent's lock freezes it; the agent can still resize.
     let vt = v.lock();
     h.run(&["-t", &t, "output", "-s", "1100x750"]);
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(v.wait_output(1, |_, _| true), (1443, 744));
+    v.wait_window([1100, 750]);
     v.run(&["-t", &vt, "output", "-s", "640x480"]);
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(v.wait_output(1, |_, _| true), (640, 480));
+    let log = v.run(&["log", "--kind", "output"]);
+    assert_eq!(log.matches("the human resized it").count(), 2, "resized while locked: {log}");
     v.run(&["-t", &vt, "unlock"]);
     v.wait_output(5, |w, hh| (w, hh) == (1593, 819));
 }
@@ -442,22 +433,23 @@ fn pixel_exact_at_fractional_scale() {
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
     let (vs, hs) = (v.path("v.png"), h.path("h.png"));
-    std::thread::sleep(Duration::from_millis(500));
-    v.run(&["screenshot", "-o", &vs]);
-    std::thread::sleep(Duration::from_millis(300));
-    h.run(&["screenshot", "-o", &hs]);
-    let (vw, vh, vp, vc) = crate::read_png(&vs);
-    let (hw, hh, hp, hc) = crate::read_png(&hs);
-    let (vw, vh, hw, hh) = (vw as usize, vh as usize, hw as usize, hh as usize);
     fn at(p: &[u8], c: usize, w: usize, x: usize, y: usize) -> &[u8] {
         &p[(y * w + x) * c..][..3]
     }
-    let found = (0..=hh - vh).flat_map(|y| (0..=hw - vw).map(move |x| (x, y))).find(|&(ox, oy)| {
-        (0..vh).step_by(7).all(|y| (0..vw).step_by(5).all(|x| at(&vp, vc, vw, x, y) == at(&hp, hc, hw, ox + x, oy + y)))
+    // Until the host shows the viewer's latest frame.
+    wait_until("the session shown pixel for pixel", 10, || {
+        v.run(&["screenshot", "-o", &vs]);
+        h.run(&["screenshot", "-o", &hs]);
+        let (vw, vh, vp, vc) = read_png(&vs);
+        let (hw, hh, hp, hc) = read_png(&hs);
+        let (vw, vh, hw, hh) = (vw as usize, vh as usize, hw as usize, hh as usize);
+        let found = (0..=hh - vh).flat_map(|y| (0..=hw - vw).map(move |x| (x, y))).find(|&(ox, oy)| {
+            (0..vh).step_by(7).all(|y| (0..vw).step_by(5).all(|x| at(&vp, vc, vw, x, y) == at(&hp, hc, hw, ox + x, oy + y)))
+        });
+        let (ox, oy) = found.ok_or("the session isn't in the host's screenshot")?;
+        let differ = (0..vh).flat_map(|y| (0..vw).map(move |x| (x, y))).filter(|&(x, y)| at(&vp, vc, vw, x, y) != at(&hp, hc, hw, ox + x, oy + y)).count();
+        if differ == 0 { Ok(()) } else { Err(format!("{differ} pixels differ at offset {ox},{oy}")) }
     });
-    let (ox, oy) = found.expect("the session isn't shown pixel for pixel");
-    let differ = (0..vh).flat_map(|y| (0..vw).map(move |x| (x, y))).filter(|&(x, y)| at(&vp, vc, vw, x, y) != at(&hp, hc, hw, ox + x, oy + y)).count();
-    assert_eq!(differ, 0, "{differ} pixels differ at offset {ox},{oy}");
 }
 
 /// Host touch: a tap on the app's image reaches the app as touch; a tap on the viewer's
@@ -482,22 +474,17 @@ fn touch_through() {
     // Toolbar: box tool at 19,133 (one session, no tab bar).
     h.input(&t, &["tap", "19", "133", "sleep", "150", "touch", "down", "1", &(x - 100).to_string(), &(y + 150).to_string(), "touch", "move", "1", &(x + 50).to_string(), &(y + 250).to_string(), "300", "touch", "up", "1"]);
     let shot = h.path("touch.png");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    wait_until("a box drawn along its left edge", 10, || {
         h.run(&["screenshot", "-o", &shot]);
-        let (w, _, px, ch) = crate::read_png(&shot);
+        let (w, _, px, ch) = read_png(&shot);
         let red = (y + 150..y + 250)
             .filter(|yy| {
                 let i = ((yy * w as i64 + x - 100) as usize) * ch;
                 px[i] > 180 && px[i + 1] < 80 && px[i + 2] < 80
             })
             .count();
-        if red > 50 {
-            break;
-        }
-        assert!(Instant::now() < deadline, "no box drawn along its left edge ({red} red px)");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        if red > 50 { Ok(()) } else { Err(format!("{red} red px")) }
+    });
 }
 
 /// The host clipboard and the shown session's are bridged (text): host → session always,
@@ -517,17 +504,10 @@ fn clipboard_bridge() {
     let y = (m.origin.1 + ey.parse::<f64>().unwrap() * m.scale).round() as i64;
     h.input(&t, &["move", &x.to_string(), &y.to_string(), "click"]);
     h.run(&["-t", &t, "clip", "set", "from host"]);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while v.try_run(&["clip", "get"]).1.trim() != "from host" {
-        assert!(Instant::now() < deadline, "host text never reached the session");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    v.wait_clip("from host", 10);
     h.input(&t, &["key", "ctrl+v"]);
     wait_log(&log, "entry 'from host'", 5); // pasting is asynchronous
     h.input(&t, &["type", " + app", "key", "ctrl+a", "key", "ctrl+c"]);
     wait_log(&log, "entry 'from host + app'", 5);
-    while h.try_run(&["clip", "get"]).1.trim() != "from host + app" {
-        assert!(Instant::now() < deadline, "the app's copy never reached the host: {}", h.try_run(&["clip", "get"]).1);
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    h.wait_clip("from host + app", 10);
 }

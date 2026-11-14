@@ -53,9 +53,20 @@ fn tmp() -> PathBuf {
     d
 }
 
+/// Writes a file atomically (temp file + rename): tests run in parallel, and several
+/// write the same fixtures (`everything`'s rt.png and rt.svg) that others are reading.
+fn put(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> std::io::Result<()> {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let path = path.as_ref();
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Writes a rendering for checking by eye (target/image-tests/NAME.png).
 fn save(name: &str, r: &Rendered) {
-    std::fs::write(tmp().join(format!("{name}.png")), r.png(None)).unwrap();
+    put(tmp().join(format!("{name}.png")), r.png(None)).unwrap();
 }
 
 fn rend(s: &Store, id: ImageId, opts: RenderOpts) -> Rendered {
@@ -117,7 +128,7 @@ fn numbers_print_compactly() {
 fn everything(s: &mut Store) -> ImageId {
     let shot = screenshot(s, 400, 300, 2.0);
     let svg = tmp().join("rt.svg");
-    std::fs::write(&svg, SVG_RED).unwrap();
+    put(&svg, SVG_RED).unwrap();
     let r = MakeReq {
         crop: Some("10,20 300x200".into()),
         color: Some("#102030".into()),
@@ -140,7 +151,7 @@ fn everything(s: &mut Store) -> ImageId {
     };
     // A plain PNG file for the raster line.
     let png = render(&Body { background: Some(Color::GREEN), ..Body::new([30, 20], 1.0) }, s, fonts(), &RenderOpts::default()).unwrap();
-    std::fs::write(tmp().join("rt.png"), strip_mark(&png.png(None))).unwrap();
+    put(tmp().join("rt.png"), strip_mark(&png.png(None))).unwrap();
     mk(s, &r).unwrap()
 }
 
@@ -357,7 +368,7 @@ fn rendered_pngs_are_refused() {
     let id = screenshot(&mut s, 20, 10, 1.0);
     let r = rend(&s, id, RenderOpts::default());
     let p = tmp().join("refuse.png");
-    std::fs::write(&p, r.png(Some(id))).unwrap();
+    put(&p, r.png(Some(id))).unwrap();
     match load_file(&p) {
         Err(e @ LoadError::Rendering(_)) => assert_eq!(e.to_string(), format!("that file is a rendering of image {id}; use --from {id}")),
         o => panic!("{o:?}"),
@@ -365,10 +376,10 @@ fn rendered_pngs_are_refused() {
     let e = mk(&mut s, &req(None, &["raster ./refuse.png 0,0"])).unwrap_err();
     assert!(e.contains(&format!("rendering of image {id}; use --from {id}")), "{e}");
     // Drafts are marked too.
-    std::fs::write(&p, r.png(None)).unwrap();
+    put(&p, r.png(None)).unwrap();
     assert!(matches!(load_file(&p), Err(LoadError::Rendering(d)) if d == "draft"));
     // With the chunk stripped (an outside tool), it loads.
-    std::fs::write(&p, strip_mark(&r.png(Some(id)))).unwrap();
+    put(&p, strip_mark(&r.png(Some(id)))).unwrap();
     let a = load_file(&p).unwrap();
     assert_eq!(a.as_raster().unwrap().size(), [20, 10]);
 }
@@ -385,16 +396,16 @@ fn loads_png_variants_and_svg() {
         let mut w = enc.write_header().unwrap();
         w.write_image_data(&[200, 128, 10, 255]).unwrap();
         w.finish().unwrap();
-        std::fs::write(&p, out).unwrap();
+        put(&p, out).unwrap();
     }
     let a = load_file(&p).unwrap();
     let r = a.as_raster().unwrap();
     assert_eq!(&r.premultiplied()[..8], &[100, 100, 100, 128, 10, 10, 10, 255]);
     assert_eq!(*r.origin(), Origin::File { name: "ga.png".into() });
-    std::fs::write(d.join("x.svg"), "<svg viewBox='0 0 30 10'><rect width='30' height='10'/></svg>").unwrap();
+    put(d.join("x.svg"), "<svg viewBox='0 0 30 10'><rect width='30' height='10'/></svg>").unwrap();
     let a = load_file(&d.join("x.svg")).unwrap();
     assert_eq!(a.natural_size(), Size { w: 30.0, h: 10.0 });
-    std::fs::write(d.join("junk.png"), "hello").unwrap();
+    put(d.join("junk.png"), "hello").unwrap();
     assert!(load_file(&d.join("junk.png")).unwrap_err().to_string().contains("not a PNG, JPEG or SVG"));
 }
 
@@ -527,7 +538,7 @@ fn render_raster_source_crop_scaled() {
 #[test]
 fn render_svg_opaque_element() {
     let mut s = store();
-    std::fs::write(tmp().join("red.svg"), SVG_RED).unwrap();
+    put(tmp().join("red.svg"), SVG_RED).unwrap();
     let id = mk(
         &mut s,
         &MakeReq {

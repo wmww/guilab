@@ -61,6 +61,10 @@ pub(crate) struct Shown {
     waiters: Vec<UnixStream>,
     deadline: Instant,
     clip: ClipBridge,
+    /// Human presses, keys, scrolls, touches and gestures dropped because the session was
+    /// locked (not motion, leaves or updates); the UI drops
+    /// most itself (`Viewer::blocked_tries`), these got past it before it knew.
+    dropped: u64,
     /// Per session (by tag): the app cursor as of `Session::cursor_seq`.
     cursors: std::collections::HashMap<String, (u64, HostCursor)>,
     next_cursor_id: u64,
@@ -232,6 +236,8 @@ impl Server {
                 }
                 .into(),
                 frames: s.viewer.frames,
+                window: s.viewer.host.size.map_or([0, 0], |(w, h)| [w, h]),
+                dropped: s.dropped + s.viewer.blocked_tries(),
             }),
             _ => None,
         }
@@ -352,7 +358,7 @@ impl Server {
         };
         let shown_on = display.display().to_string();
         tracing::info!("viewer shown on {shown_on}");
-        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, soft, token: Some(token), display, waiters, deadline, clip: ClipBridge::default(), cursors: Default::default(), next_cursor_id: 0, cpu_frames: Default::default() }));
+        self.viewer = ViewerState::Shown(Box::new(Shown { viewer, soft, token: Some(token), display, waiters, deadline, clip: ClipBridge::default(), dropped: 0, cursors: Default::default(), next_cursor_id: 0, cpu_frames: Default::default() }));
     }
 
     /// Closes the viewer (if any). `why`: an error for `show` requests still waiting.
@@ -499,6 +505,11 @@ impl Server {
                 Action::Input { session, input } => {
                     let Some(slot) = self.sessions.get_mut(&session) else { continue };
                     if !input.is_release() && slot.lock.is_locked() {
+                        if let ViewerState::Shown(s) = &mut self.viewer
+                            && matches!(input, Input::Button { .. } | Input::Key { .. } | Input::Scroll { .. } | Input::PinchBegin { .. } | Input::SwipeBegin { .. } | Input::TouchDown { .. })
+                        {
+                            s.dropped += 1;
+                        }
                         continue;
                     }
                     // The human using a session keeps it alive.

@@ -2,21 +2,11 @@
 //! parallel sessions and cleanup. Skipped without Xwayland or Python's tkinter (the X test
 //! app is `apps/tk_app.py`).
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{
-    Lab, app,
-    cleanup::{alive, pgrep},
-    have,
-    input::{center, gtk4, has_python_module, wait_log},
-    nodes, rect,
-};
-
-fn xwayland() -> bool {
-    have("Xwayland") && has_python_module("import tkinter")
-}
+use crate::*;
 
 fn kind<'a>(tree: &'a Value, k: &str) -> Vec<&'a Value> {
     nodes(tree).into_iter().filter(|n| n["kind"] == k).collect()
@@ -46,7 +36,7 @@ fn x11_windows_input_menus_dialogs() {
     assert_eq!(rect(w), (0, 0, 1280, 720), "the first window fills the output");
     let shot = lab.json(&["screenshot"]);
     assert!(shot["settled"].as_bool().unwrap());
-    assert!(crate::lit_fraction(shot["path"].as_str().unwrap()) > 0.5);
+    assert!(lit_fraction(shot["path"].as_str().unwrap()) > 0.5);
 
     // Typing, including characters the keymap lacks (or has only above X's code 255: €).
     let t = lab.lock();
@@ -157,11 +147,7 @@ fn x11_parallel_sessions_and_cleanup() {
 
     // Ending a session takes its Xwayland, X clients, socket and lock file with it.
     lab.run(&["-S", "a", "-t", &t, "end"]);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while (alive(xa[0]) || alive(app_a)) && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(!alive(xa[0]) && !alive(app_a));
+    wait_dead(&[xa[0], app_a], "Xwayland and the app to end with the session");
     assert!(x_files(&a).iter().all(|f| !Path::new(f).exists()));
     assert!(alive(xb[0]));
     lab.run(&["-S", "b", "end"]);
@@ -187,7 +173,7 @@ fn x11_hidpi_and_pids() {
     let (ex, ey) = center(&l, "entry", 1.0);
     lab.input(&t, &["move", &ex, &ey, "click", "type", "hi"]);
     wait_log(&log, "edit 'hi'", 5);
-    if crate::have("xeyes") {
+    if have("xeyes") {
         lab.run(&["-t", &t, "run", "--", "xeyes"]);
         let tree = lab.wait_tree("s1", 10, |t| kind(t, "x11").iter().any(|n| n["class"] == "XEyes"));
         let eyes = kind(&tree, "x11").into_iter().find(|n| n["class"] == "XEyes").unwrap().clone();

@@ -9,26 +9,9 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{Lab, app, have, input::gtk4};
+use crate::*;
 
 impl Lab {
-    /// Runs `guilab ARGS`; returns (exit code, stdout, stderr).
-    fn status(&self, args: &[&str]) -> (i32, String, String) {
-        self.status_in(std::path::Path::new("/"), args)
-    }
-
-    /// `status` with the cwd in `dir` (e.g. a [`Lab::worktree`]).
-    fn status_in(&self, dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-        let out = self.cmd(args).current_dir(dir).output().unwrap();
-        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
-    }
-
-    fn run_in(&self, dir: &std::path::Path, args: &[&str]) -> String {
-        let (code, out, err) = self.status_in(dir, args);
-        assert_eq!(code, 0, "guilab {args:?} failed: {err}");
-        out
-    }
-
     /// A directory that looks like a git worktree root (a client identity for deliveries).
     fn worktree(&self, name: &str) -> std::path::PathBuf {
         let d = self.rt.join(name);
@@ -163,7 +146,7 @@ fn poll_blocks_and_follows() {
     // Two pollers on the same key both get the message.
     let polls: Vec<_> = (0..2).map(|_| lab.cmd(&["poll", "--timeout", "20"]).stdout(Stdio::piped()).spawn().unwrap()).collect();
     let mut follow = lab.cmd(&["poll", "--follow"]).stdout(Stdio::piped()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    lab.wait_polls(3);
     let t = Instant::now();
     lab.run(&["debug", "message", "look\nhere", "--image", drawn]);
     for p in polls {
@@ -183,7 +166,7 @@ fn poll_blocks_and_follows() {
     // The hint renders the marks' area.
     let crop = lab.run(&["image", drawn, "--crop", "18,28 300x104"]);
     let png = crop.lines().next().unwrap();
-    assert_eq!(crate::read_png(png).0, 300);
+    assert_eq!(read_png(png).0, 300);
     assert!(crop.contains("PNG shows canvas 18,28 300x104 at 1x"), "{crop}");
     assert!(t.elapsed() < Duration::from_secs(3));
     // --follow: one line per wake event, and it keeps going.
@@ -199,10 +182,11 @@ fn poll_blocks_and_follows() {
     assert!(line.contains("human message: \"and this\" [their screen: image "), "{line}");
     follow.kill().unwrap();
     let _ = follow.wait();
+    lab.wait_polls(0); // the server noticed the follower is gone
     // Ending the session ends polls with an error.
     lab.run(&["done"]);
     let p = lab.cmd(&["poll"]).stderr(Stdio::piped()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    lab.wait_polls(1);
     lab.run(&["end"]);
     let out = p.wait_with_output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("ended"));
@@ -215,7 +199,7 @@ fn stalled_follower_doesnt_block() {
     let lab = Lab::new();
     lab.run(&["new"]);
     let mut follow = lab.cmd(&["poll", "--follow"]).stdout(Stdio::null()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    lab.wait_polls(1);
     let pid = follow.id().to_string();
     assert!(std::process::Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
     // Enough to fill the socket buffers several times over.
@@ -300,7 +284,7 @@ fn work_done_lock_and_revoke() {
     let (ok, _, err) = lab.try_run(&["debug", "input", "move", "1", "1"]);
     assert!(!ok && err.contains("blocked"), "{err}");
     let mut p = lab.cmd(&["-t", &t, "poll", "--follow"]).stdout(Stdio::piped()).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    lab.wait_polls(1);
     lab.run(&["debug", "revoke"]);
     let mut lines = BufReader::new(p.stdout.take().unwrap()).lines();
     let line = lines.next().unwrap().unwrap();
@@ -334,28 +318,23 @@ fn window_events() {
     let lab = Lab::new();
     lab.run(&["new", "w"]);
     lab.run(&["run", "--", "python3", &app("gtk_app.py"), "--second", "--close-second"]);
-    lab.wait_tree("w", 10, |t| !crate::nodes(t).is_empty());
+    lab.wait_tree("w", 10, |t| !nodes(t).is_empty());
     // Windows are diffed on the next frame, which may come just after `tree` saw it.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let ev = loop {
+    let ev = wait_until("a window event", 10, || {
         let ev = lab.log_json(&["--kind", "window"]);
-        if !kinds(&ev).is_empty() || Instant::now() > deadline {
-            break ev;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+        if ev.is_empty() { Err("none".into()) } else { Ok(ev) }
+    });
     assert_eq!(ev[0]["kind"], "window_map", "{ev:?}");
     assert_eq!(ev[0]["window"], "toplevel");
     // A window the app closed itself says so.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !lab.log_json(&["--kind", "window_unmap"]).iter().any(|e| e["by"] == "app") {
-        assert!(Instant::now() < deadline, "{:?}", lab.log_json(&["--kind", "window"]));
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_until("a window closed by its app", 10, || {
+        let ev = lab.log_json(&["--kind", "window"]);
+        if ev.iter().any(|e| e["kind"] == "window_unmap" && e["by"] == "app") { Ok(()) } else { Err(format!("{ev:?}")) }
+    });
     assert!(lab.run(&["log"]).contains("closed by its app: \"second window\""));
     // Window changes are passive: reported with the next command. `kill` waits for the app
     // to exit, so it reports the close itself.
     let (_, _, err) = lab.status(&["kill"]);
-    assert!(err.contains("window") && err.contains("closed ("), "{err}");
+    assert!(err.contains("window") && err.contains("closed ("), "{err}\nlog:\n{}", lab.run(&["log"]));
     assert!(kinds(&lab.log_json(&["--kind", "window"])).contains(&"window_unmap"));
 }
