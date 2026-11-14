@@ -418,8 +418,12 @@ fn pixel_exact_at_fractional_scale() {
         return;
     }
     let sock = info["wayland_display"].as_str().unwrap().to_string();
-    let (v, _log) = viewed(&[]);
-    v.run(&["output", "-s", "750x450", "--scale", "1.5"]);
+    // Sized at creation: an `output` change would put a note over the image (overlay).
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "750x450", "--scale", "1.5"]);
+    // Labels only: no blinking caret to differ between the two screenshots.
+    let log = v.json(&["run", "--", "python3", &app("gtk_cursors.py")])["log"].as_str().unwrap().to_string();
+    wait_log(&log, "ready", 20);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
     let (vs, hs) = (v.path("v.png"), h.path("h.png"));
