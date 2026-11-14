@@ -63,6 +63,8 @@ Plan steps 1-7 (skeleton, headless compositor, input and locking, Xwayland, even
 ## Viewer
 Start with basic functionality. Don't build UI or features we aren't sure we need.
 
+UI quality: egui means building our own small toolkit (menus, toolbars, dialogs…). Build each widget to feel like a normal desktop app, not subtly off: hover/pressed/disabled states, keyboard navigation and shortcuts, menus that close on outside click or Escape, consistent spacing, correct cursors. Make these pieces composable and reusable with sensible abstractions, scoped to this app (no general framework). Use a third-party egui crate only if it's genuinely good.
+
 Layout:
 - **Top:** one tab per session (🔒 when locked).
 - **Main area:** the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. The human uses the app directly here, unless locked out (then input is dropped and the lock toast shows; releases of held keys/buttons still go through).
