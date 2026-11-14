@@ -1,21 +1,22 @@
-//! A complete host for the editor without guilab: owns the doc, assets, undo history and the
-//! view (fit, wheel zoom, pan). The example and tests use it; real hosts do the same.
+//! A complete host for the editor without guilab: owns the doc, undo history and the view
+//! (fit, wheel zoom, pan). The example and tests use it; real hosts do the same.
 
 use std::sync::Arc;
 
 use egui::{Key, Modifiers, PointerButton, Ui, Vec2};
-use guilab_image::{Asset, Body, Doc, Edit, Fonts, Group, IRect, Limits, Origin, Raster, Store, SvgDoc};
+use guilab_image::{Asset, AssetId, Body, Doc, Edit, Fonts, Group, IRect, Limits, Origin, Raster, Store, SvgDoc};
 use guilab_kit::History;
 
-use crate::{Canvas, CanvasOut, Editor, Picture, Xf};
+use crate::{Canvas, CanvasOut, Editor, Xf};
 
 pub struct DemoHost {
     pub editor: Editor,
+    /// Issues asset ids (it may evict the assets: the doc holds what it uses).
     pub store: Store,
     /// `None` = "live": the host shows `live` itself and a drawing press makes a doc.
     pub doc: Option<Doc>,
     /// The screenshot a new doc is made from.
-    pub live: guilab_image::AssetId,
+    pub live: (AssetId, Arc<Asset>),
     pub history: History<Edit>,
     pub xf: Xf,
     /// The view region `xf` was last fitted to (refit when it changes).
@@ -30,7 +31,8 @@ impl DemoHost {
     /// A host with a synthetic `size` "app screenshot" at UI `scale`, no doc open yet.
     pub fn new(size: [u32; 2], scale: f32) -> DemoHost {
         let mut store = Store::new(Limits::default());
-        let live = store.add_asset(Asset::Raster(fake_app(size, scale)), Group(0));
+        let id = store.add_asset(Asset::Raster(fake_app(size, scale)), Group(0));
+        let live = (id, store.get_asset(id).unwrap());
         DemoHost {
             editor: Editor::new("demo-editor", Arc::new(Fonts::new())),
             store,
@@ -46,13 +48,14 @@ impl DemoHost {
     }
 
     pub fn size(&self) -> [u32; 2] {
-        self.store.get_asset(self.live).unwrap().as_raster().unwrap().size()
+        self.live.1.as_raster().unwrap().size()
     }
 
     /// Opens a doc on the screenshot now (instead of on the first drawing press).
     pub fn open(&mut self) {
         let size = self.size();
-        self.doc = Some(Doc::from_body(Body::screenshot(self.live, size, self.scale)));
+        let live: std::collections::HashMap<_, _> = [self.live.clone()].into();
+        self.doc = Some(Doc::open(Body::screenshot(self.live.0, size, self.scale), &live).unwrap());
     }
 
     pub fn undo(&mut self) {
@@ -69,16 +72,15 @@ impl DemoHost {
 
     /// Inserts a picture asset at the center of the view.
     pub fn insert(&mut self, a: Asset) {
-        let natural = a.natural_size();
-        let svg = a.as_svg().is_some();
         let id = self.store.add_asset(a, Group(0));
+        let a = self.store.get_asset(id).unwrap();
         if self.doc.is_none() {
             self.open();
         }
         let d = self.doc.as_mut().unwrap();
         let region = self.editor.view_region(d.body().canvas, d.body().crop);
         let c = region.to_rect().center();
-        let e = self.editor.insert(d, if svg { Picture::Svg(id) } else { Picture::Raster(id) }, natural, c, region);
+        let e = self.editor.insert(d, id, a, c, region).expect("demo picture");
         self.log.push(e.clone());
         self.history.push(e);
     }
@@ -138,8 +140,7 @@ impl DemoHost {
         if self.doc.is_none() {
             let tex = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("demo-live")));
             let tex = tex.unwrap_or_else(|| {
-                let r = self.store.get_asset(self.live).unwrap();
-                let r = r.as_raster().unwrap();
+                let r = self.live.1.as_raster().unwrap();
                 let img = egui::ColorImage::from_rgba_premultiplied([r.size()[0] as usize, r.size()[1] as usize], r.premultiplied());
                 let h = ui.ctx().load_texture("demo-live", img, egui::TextureOptions::LINEAR);
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("demo-live"), h.clone()));
@@ -151,7 +152,7 @@ impl DemoHost {
 
         let out = self.editor.canvas(
             ui,
-            Canvas { doc: self.doc.as_mut(), assets: &self.store, xf: self.xf, clip, new_doc: (size, self.scale), visible: true },
+            Canvas { doc: self.doc.as_mut(), xf: self.xf, clip, new_doc: (size, self.scale), visible: true },
         );
         if out.begin {
             self.open();

@@ -72,14 +72,14 @@ pub struct Raster { size: [u32; 2], px: Arc<[u8]>, origin: Origin }   // premult
 pub struct SvgDoc { text: Arc<str>, size: Size, tree: usvg::Tree, origin: Origin }
 pub enum Origin { Capture { at_ms: u64 }, File { name: String } }
 
-pub trait Assets { fn asset(&self, id: AssetId) -> Option<Arc<Asset>>; }
+pub trait Assets { fn asset(&self, id: AssetId) -> Option<Arc<Asset>>; }   // Store, Doc, HashMap, NoAssets
 
 pub struct Store { /* images, assets, issued ids, refcounts, bytes, last use */ }
 impl Store {
     pub fn new(limits: Limits) -> Store;
     pub fn add_asset(&mut self, a: Asset, group: Group) -> AssetId;
     pub fn add_image(&mut self, parent: Option<ImageId>, body: Body, made: Made, group: Group,
-                     carried: &[(AssetId, Arc<Asset>)]) -> Result<ImageId, StoreError>; // checks every asset ref; re-adds carried assets that were evicted
+                     carried: &dyn Assets) -> Result<ImageId, StoreError>; // checks every asset ref; re-adds carried assets (a draft's Doc) that were evicted
     pub fn image(&self, id: ImageId) -> Result<Arc<Image>, Lookup>;  // Lookup::{Unknown, Expired}; marks it used
     pub fn lookup(&self, s: &str) -> Result<Arc<Image>, Lookup>;     // + Lookup::Id(IdError) for malformed/other-kind ids
     pub fn get_asset(&self, id: AssetId) -> Result<Arc<Asset>, Lookup>; pub fn status(&self, id: ImageId) -> Result<(), Lookup>;
@@ -93,7 +93,7 @@ impl Assets for Store {}
 - `Group` is an opaque u64. The server uses one per session, so one server-wide store has one id space and one memory budget, and session end drops a group.
 - Assets are refcounted by the live images that use them. An asset no image uses (added, then the image failed) goes at the next `sweep`. A raster is shared by every image built on it, and that sharing is the link between related images.
 - **Expiry** (`Limits`, all tunable): an image that isn't held expires after `idle` (30 min) without use. When decoded asset bytes exceed `budget` (1 GiB server-wide), unheld images go first, least recently used first. Held images go only when held images alone exceed the budget, oldest first. A `parent` link doesn't keep the parent alive: listings say `parent q81c (expired)`.
-- **Holds**: the server holds every image referenced by a message event (human or agent) until its session ends. Drafts aren't in the store. A draft carries `Arc<Asset>`s for what it uses, so eviction can't break it, and `add_image(.., carried)` re-adds them on send.
+- **Holds**: the server holds every image referenced by a message event (human or agent) until its session ends. Drafts aren't in the store. A draft's `Doc` holds `Arc<Asset>`s for what it uses, so eviction can't break painting or sending: `add_image(.., &doc)` re-adds them on send.
 - Limits on pixels: rasters from files at most 16384 px per side and `MAX_PIXELS` (64 Mpx); renders over 64 Mpx are shrunk automatically.
 - Rasters are kept decoded. If memory becomes a problem, cold rasters can be QOI-compressed behind the same `Assets` trait without changing any API.
 
@@ -134,19 +134,24 @@ impl Assets for Store {}
 ```rust
 pub struct ElemKey(u64);                    // stable while editing, unlike indices
 pub struct DocId(u64);                      // process-unique; a clone gets a fresh one, a move keeps it
-pub struct Doc { id: DocId, body: Body, keys: Vec<ElemKey>, next: u64, rev: u64 }   // rev++ on every apply/revert
-pub enum Edit {
+pub struct Doc { id: DocId, body: Body, keys: Vec<ElemKey>, next: u64, rev: u64,   // rev++ on every apply/revert
+                 assets: HashMap<AssetId, Arc<Asset>> }                            // every asset it has used; impl Assets
+pub struct Edit { op: Op, assets: Vec<(AssetId, Arc<Asset>)> }   // opaque: only Doc's builders make one; op() to read
+pub enum Op {
     Add { key: ElemKey, at: usize, el: Element },
     Remove { key: ElemKey, at: usize, el: Element },
     Replace { key: ElemKey, old: Element, new: Element },
     Crop { old: Option<IRect>, new: Option<IRect> },
 }
+pub enum EditError { Gone(ElemKey), MissingAsset(AssetId), WrongAsset(AssetId), Limit(String) }   // Display: a sentence
 impl Doc {
-    pub fn from_body(b: Body) -> Doc; pub fn body(&self) -> &Body;
-    pub fn apply(&mut self, e: &Edit); pub fn revert(&mut self, e: &Edit);
-    // builders: add_edit(el) (on top), remove_edit(key), replace_edit(key, new), crop_edit(new); id(), keys(), index_of(key), element(key), new_key()
+    pub fn open(b: Body, assets: &dyn Assets) -> Result<Doc, StoreError>;   // takes every picture's asset (MissingAsset/WrongAsset)
+    pub fn body(&self) -> &Body; pub fn apply(&mut self, e: &Edit); pub fn revert(&mut self, e: &Edit);
+    // builders: add_edit(el) -> Result (on top), add_picture(id, Arc<Asset>, dst) -> Result (kind from the asset),
+    // replace_edit(key, new) -> Result, remove_edit(key) -> Option, crop_edit(new); id(), keys(), index_of(key), element(key)
 }
 ```
+- **A doc always paints and freezes.** It holds every asset its pictures use. Each edit carries the assets of its elements, and apply/revert put them into the doc, so replaying edits on a fresh doc (copy-on-edit redo) keeps that true. Builders refuse an element that's invalid (NaN, empty pen), would break a `Body` limit (elements, pen points) or names an asset the doc doesn't have or of the wrong kind. Since `Edit` is opaque, nothing else makes edits.
 - Edits replay on any doc with the same elements (copy-on-edit redo applies them to a fresh scratch doc): applying an `Add` moves `next` past its key, so later keys stay unique.
 - History stays valid only if every change to a doc is an `Edit` (`Add`/`Remove` store indices). Nothing inserts under existing marks outside an edit.
 - Drags produce one `Replace` per drag, at release. The editor shows the in-progress state from its own interaction state, so history doesn't fill up with per-frame edits.
@@ -212,8 +217,7 @@ pub enum Tool { Interact, Move, Pen, Box, Ellipse, Line, Arrow, Text, Crop }   /
 pub struct Xf { pub offset: Vec2, pub zoom: f32 }    // canvas px -> screen points; Xf::fit(region, rect, max_zoom)
 pub struct Editor { pub tool: Tool, pub color: Color, /* gesture, typing, pending marks, textures, Fonts */ }
 pub struct Canvas<'a> {
-    pub doc: Option<&'a mut Doc>,     // None = live view: a drawing press asks for a doc
-    pub assets: &'a dyn Assets,
+    pub doc: Option<&'a mut Doc>,     // None = live view: a drawing press asks for a doc. Pictures paint from the doc's assets
     pub xf: Xf,                       // host owns zoom/pan
     pub clip: Rect,                   // screen area the canvas owns
     pub new_doc: ([u32; 2], f32),     // canvas size and scale a new doc would have (live view)
@@ -227,6 +231,7 @@ pub struct CanvasOut {
     pub cursor: Option<egui::CursorIcon>,   // also set on the context
     pub wants_keys: bool,             // a doc is open or text is being typed
     pub shown: Option<Rect>,          // screen rect of view_region (flights, glow)
+    pub refused: Option<String>,      // a mark the doc refused (limits) was dropped: toast this
 }
 pub enum Hit { Key(ElemKey, geom::Key), Item(ElemKey), None }
 impl Editor {
@@ -234,9 +239,9 @@ impl Editor {
     pub fn toolbar(&mut self, ui) -> Option<Tool>;                 // Some = the tool changed
     pub fn canvas(&mut self, ui, c: Canvas) -> CanvasOut;
     pub fn view_region(&self, canvas, crop) -> IRect;             // crop, or the whole canvas with the Crop tool
-    pub fn insert(&mut self, doc, Picture::{Raster,Svg}(AssetId), natural: Size, center: Pt, fit: IRect) -> Edit;
+    pub fn insert(&mut self, doc, id: AssetId, asset: Arc<Asset>, center: Pt, fit: IRect) -> Result<Edit, EditError>;  // kind and size from the asset
     pub fn delete_hovered(&mut self, doc) -> Option<Edit>;
-    pub fn commit(&mut self, doc) -> Vec<Edit>;                    // finish typing/pending marks (before send)
+    pub fn commit(&mut self, doc) -> CanvasOut;                    // finish typing/pending marks (before send): edits + refused
     pub fn reset(&mut self);                                       // host dropped the begun doc
     pub fn pick_color(&mut self, c); pub fn busy(&self) -> bool; pub fn hovered(&self) -> Hit;
 }
@@ -259,7 +264,7 @@ On press, the first match wins (`hit_test`):
 Key points show on every element (not the base or a text being edited) while Move is selected; the hovered one lights up (`key_point_hot`). The element a drag would move (or is moving) glows: strokes get a wider `hover_outline` stroke underneath, text and pictures an outline around their bounds; its key points draw on top. Cursors: `AllScroll` over/moving an item (Adwaita draws `Move` as the arrow), `ResizeNwSe`/`ResizeNeSw` on corners by direction, `Crosshair` on line ends, `Grab`/`Grabbing` for pan; drawing tools `Crosshair`, Text `Text`, Crop by handle. Outside the view region (not panning) the host's cursor.
 
 ### Demo host and screenshots
-- `guilab_editor::demo::DemoHost`: a complete host (doc, `Store` of assets, `History<Edit>`, fit/wheel zoom/middle-drag pan, Ctrl+Z / Ctrl+Shift+Z, live view → doc on `begin`, dropped on `abandon`). Tests (`src/tests.rs`) drive it through `guilab_kit::headless::Headless` with synthetic events.
+- `guilab_editor::demo::DemoHost`: a complete host (doc, a `Store` only to issue asset ids, `History<Edit>`, fit/wheel zoom/middle-drag pan, Ctrl+Z / Ctrl+Shift+Z, live view → doc on `begin`, dropped on `abandon`). Tests (`src/tests.rs`) drive it through `guilab_kit::headless::Headless` with synthetic events.
 - `examples/shots.rs`: scripted scenarios rendered headless (CPU) in both themes and at 2x, with the pointer and cursor name marked: `target/debug/examples/shots [DIR] [FILTER]` after `cargo test --workspace` (default `target/editor-shots`).
 
 ## guilab-chat (built)
@@ -305,7 +310,7 @@ struct Workspace {                    // per session (PerSession)
     flights: Vec<Flight>,
     doc_zoom: Zoom,                   // the open image's own zoom/pan (fit to its crop); never locked to the window
 }
-struct Draft { key: DraftKey, doc: Doc, parent: Option<ImageId>, carried: Vec<(AssetId, Arc<Asset>)> }
+struct Draft { key: DraftKey, doc: Doc, parent: Option<ImageId> }   // the doc holds its assets
 enum Att { Draft(DraftKey), Image(ImageId) }
 enum Open { Live, Capturing { ticket: u64, key: DraftKey }, Draft(DraftKey), Past { image: ImageId, slot: SlotId, doc: Doc } }
 enum Op { Edit(DraftKey, Edit), Create(Draft /* as created */), Remove { at: usize, draft: Draft }, Copy { from: ImageId, slot: SlotId, key: DraftKey } }
@@ -319,7 +324,7 @@ Store access: `Viewer::draw(renderer, sessions, store: &Store, now)`. Reads only
 - **Switch images**: one flight from the view back to the old slot and one from the new slot to the view, at the same time. **Close** (Interact tool selected, or a click on the open image's own slot) → flight back to the slot, then `Open::Live`.
 - **Remove** (`ChatEvent::Remove`): `Op::Remove` (undo puts it back at its index). If the image is open, the editor closes without a flight. Removal never asks for confirmation.
 - **Undo/redo** (Edit menu, Ctrl+Z while no text field has focus): apply or revert the op. If it changes a draft that isn't open, that draft opens first (with a flight), so a change never happens out of sight.
-- **Send** (`ChatEvent::Send`): `Action::Message { session, text, drafts }`. The server freezes each draft (`Store::add_image(.., carried)`) and logs the message with `ImageRef`s. The glue clears `pending` and `history.retain`s ops of other drafts. The feed item arrives from the log the next tick, and its slots show the frozen images.
+- **Send** (`ChatEvent::Send`): `Action::Message { session, text, drafts }`. The server freezes each draft (`Store::add_image(.., &draft.doc)`) and logs the message with `ImageRef`s. The glue clears `pending` and `history.retain`s ops of other drafts. The feed item arrives from the log the next tick, and its slots show the frozen images.
 - The Queue/Discard bar and `Sketch` go away. "Hiding the viewer drops unsent state" goes away too: the server keeps the `ViewerUi` (no GPU state) across hide/show and drops only `Gfx`/`HostState`, and texture caches rebuild lazily.
 
 ### Flights and glow (`ui/flight.rs`)

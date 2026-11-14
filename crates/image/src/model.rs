@@ -303,18 +303,13 @@ impl Body {
         if self.elements.len() > MAX_ELEMENTS {
             return Err(format!("{} elements is too many (at most {MAX_ELEMENTS})", self.elements.len()));
         }
-        let pts: usize = self.elements.iter().map(|e| if let Kind::Pen(p) = &e.kind { p.len() } else { 0 }).sum();
+        let pts: usize = self.elements.iter().map(Element::pen_points).sum();
         if pts > MAX_PEN_POINTS {
             return Err(format!("{pts} pen points is too many (at most {MAX_PEN_POINTS})"));
         }
         for (i, e) in self.elements.iter().enumerate() {
-            if !e.kind.is_finite() {
-                return Err(format!("element {} has a coordinate that isn't a finite number", i + 1));
-            }
-            if let Kind::Pen(p) = &e.kind
-                && p.is_empty()
-            {
-                return Err(format!("element {} is a pen with no points", i + 1));
+            if let Some(why) = e.problem() {
+                return Err(format!("element {} {why}", i + 1));
             }
         }
         Ok(())
@@ -340,6 +335,22 @@ impl Element {
     }
     pub fn is_picture(&self) -> bool {
         matches!(self.kind, Kind::Raster { .. } | Kind::Svg { .. })
+    }
+    /// Pen points it counts against [`MAX_PEN_POINTS`].
+    pub fn pen_points(&self) -> usize {
+        if let Kind::Pen(p) = &self.kind { p.len() } else { 0 }
+    }
+    /// What makes it invalid on its own ("has a coordinate that …"), if anything.
+    pub fn problem(&self) -> Option<&'static str> {
+        if !self.kind.is_finite() {
+            return Some("has a coordinate that isn't a finite number");
+        }
+        if let Kind::Pen(p) = &self.kind
+            && p.is_empty()
+        {
+            return Some("is a pen with no points");
+        }
+        None
     }
 }
 

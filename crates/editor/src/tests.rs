@@ -2,7 +2,7 @@
 
 use egui::{CursorIcon, Event, Key, Modifiers, Pos2, vec2};
 use guilab_image::geom::Key as KeyPt;
-use guilab_image::{Color, Edit, Element, IRect, Kind, Rect, pt};
+use guilab_image::{Color, Edit, Element, IRect, Kind, Op, Rect, pt};
 use guilab_kit::headless::{Headless, ev};
 
 use crate::demo::{DemoHost, sample_svg};
@@ -79,7 +79,7 @@ impl T {
             Element::new(Color::BLUE, Kind::Line(pt(100.0, 300.0), pt(300.0, 300.0))),
             Element::new(Color::RED, Kind::Text { at: pt(400.0, 100.0), size: 18.0, width: None, text: "hello".into() }),
         ] {
-            let e = d.add_edit(el);
+            let e = d.add_edit(el).unwrap();
             d.apply(&e);
         }
         self.run(vec![]);
@@ -97,7 +97,7 @@ fn draw_without_doc_begins_and_commits() {
     let els = t.elements();
     assert_eq!(els.len(), 2, "base + box");
     assert_eq!(els[1].kind, Kind::Box(Rect::new(100.0, 100.0, 100.0, 50.0)));
-    assert!(matches!(t.host.log.as_slice(), [Edit::Add { .. }]));
+    assert!(matches!(t.host.log.as_slice(), [e] if matches!(e.op(), Op::Add { .. })));
 
     // A stray click on a fresh live view makes no doc.
     let mut t = T::new();
@@ -150,7 +150,7 @@ fn hit_priorities() {
     assert_eq!(t.host.editor.hovered(), Hit::Key(k[2], KeyPt::End(0)));
     // Topmost wins: a second box on top of the first's edge.
     let d = t.host.doc.as_mut().unwrap();
-    let e = d.add_edit(Element::new(Color::GREEN, Kind::Box(Rect::new(150.0, 50.0, 100.0, 100.0))));
+    let e = d.add_edit(Element::new(Color::GREEN, Kind::Box(Rect::new(150.0, 50.0, 100.0, 100.0)))).unwrap();
     d.apply(&e);
     let top = d.keys()[4];
     t.mv(150.0, 101.0);
@@ -170,7 +170,7 @@ fn move_reshape_pan_and_undo() {
     t.drag((200.0, 300.0), (200.0, 350.0));
     assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(300.0, 350.0)));
     assert_eq!(t.host.log.len(), 1);
-    assert!(matches!(t.host.log[0], Edit::Replace { .. }));
+    assert!(matches!(t.host.log[0].op(), Op::Replace { .. }));
     // Reshape: the box's bottom-right corner, grabbed slightly off the point.
     t.drag((302.0, 202.0), (352.0, 252.0));
     assert_eq!(t.elements()[1].kind, Kind::Box(Rect::new(100.0, 100.0, 250.0, 150.0)), "no jump by the grab offset");
@@ -235,7 +235,7 @@ fn delete_hovered() {
     t.mv(200.0, 300.0);
     t.key(Key::Delete, Modifiers::NONE);
     assert_eq!(t.elements().len(), 3);
-    assert!(matches!(t.host.log[0], Edit::Remove { at: 2, .. }));
+    assert!(matches!(t.host.log[0].op(), Op::Remove { at: 2, .. }));
     // The base can't be deleted.
     t.mv(500.0, 350.0);
     t.key(Key::Backspace, Modifiers::NONE);
@@ -281,7 +281,7 @@ fn text_new_edit_and_clear() {
     t.key(Key::Enter, Modifiers::NONE);
     let Kind::Text { text, .. } = &t.elements()[1].kind else { panic!() };
     assert_eq!(text, "bye there\ntwo");
-    assert!(matches!(t.host.log.last(), Some(Edit::Replace { .. })));
+    assert!(matches!(t.host.log.last().map(|e| e.op()), Some(Op::Replace { .. })));
 
     // Long text wraps and stores its width.
     t.host.editor.tool = Tool::Text;
@@ -301,7 +301,7 @@ fn text_new_edit_and_clear() {
     t.key(Key::Backspace, Modifiers::NONE);
     t.key(Key::Enter, Modifiers::NONE);
     assert_eq!(t.elements().len(), 2);
-    assert!(matches!(t.host.log.last(), Some(Edit::Remove { .. })));
+    assert!(matches!(t.host.log.last().map(|e| e.op()), Some(Op::Remove { .. })));
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn text_matches_cpu_render() {
     let mut t = T::new();
     t.host.open();
     let d = t.host.doc.as_mut().unwrap();
-    let e = d.add_edit(Element::new(Color::BLACK, Kind::Text { at: pt(50.0, 50.0), size: 30.0, width: Some(200.0), text: "Wrapped words here and there".into() }));
+    let e = d.add_edit(Element::new(Color::BLACK, Kind::Text { at: pt(50.0, 50.0), size: 30.0, width: Some(200.0), text: "Wrapped words here and there".into() })).unwrap();
     d.apply(&e);
     t.run(vec![]);
     t.run(vec![]);
@@ -443,7 +443,7 @@ fn late_doc_gets_pending_mark() {
     let mut edits = Vec::new();
     let frame = |h: &mut Headless, ed: &mut Editor, doc: &mut Option<Doc>, events: Vec<Event>, begun: &mut u32, edits: &mut Vec<Edit>| {
         h.run(events, 0.1, |ui| {
-            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), assets: &host.store, xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true });
+            let out = ed.canvas(ui, Canvas { doc: doc.as_mut(), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true });
             *begun += out.begin as u32;
             edits.extend(out.edits);
         });
@@ -454,7 +454,7 @@ fn late_doc_gets_pending_mark() {
     frame(&mut h, &mut ed, &mut doc, vec![ev::release(b)], &mut begun, &mut edits);
     frame(&mut h, &mut ed, &mut doc, vec![], &mut begun, &mut edits);
     assert!(edits.is_empty(), "nothing to commit into yet");
-    doc = Some(Doc::from_body(Body::screenshot(host.live, [400, 300], 1.0)));
+    doc = Some(Doc::open(Body::screenshot(host.live.0, [400, 300], 1.0), &[host.live.clone()].into_iter().collect::<std::collections::HashMap<_, _>>()).unwrap());
     frame(&mut h, &mut ed, &mut doc, vec![], &mut begun, &mut edits);
     assert_eq!(begun, 1);
     assert_eq!(edits.len(), 1);
@@ -483,8 +483,8 @@ fn doc_switch_drops_gesture() {
     ed.tool = Tool::Move;
     let xf = Xf { offset: vec2(0.0, 0.0), zoom: 1.0 };
     let with_box = |x: f32| {
-        let mut d = Doc::from_body(Body::screenshot(host.live, [400, 300], 1.0));
-        let e = d.add_edit(Element::new(Color::RED, Kind::Box(Rect::new(x, 50.0, 50.0, 50.0))));
+        let mut d = Doc::open(Body::screenshot(host.live.0, [400, 300], 1.0), &[host.live.clone()].into_iter().collect::<std::collections::HashMap<_, _>>()).unwrap();
+        let e = d.add_edit(Element::new(Color::RED, Kind::Box(Rect::new(x, 50.0, 50.0, 50.0)))).unwrap();
         d.apply(&e);
         d
     };
@@ -492,7 +492,7 @@ fn doc_switch_drops_gesture() {
     let mut edits = Vec::new();
     let mut frame = |h: &mut Headless, doc: &mut Doc, events: Vec<Event>| {
         h.run(events, 0.1, |ui| {
-            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), assets: &host.store, xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true }).edits);
+            edits.extend(ed.canvas(ui, Canvas { doc: Some(doc), xf, clip: ui.max_rect(), new_doc: ([400, 300], 1.0), visible: true }).edits);
         });
     };
     let (p, q) = (egui::pos2(50.0, 75.0), egui::pos2(80.0, 75.0));
@@ -500,4 +500,18 @@ fn doc_switch_drops_gesture() {
     frame(&mut h, &mut a, vec![ev::moved(q)]);
     frame(&mut h, &mut b, vec![ev::release(q)]);
     assert!(edits.is_empty(), "{edits:?}");
+}
+
+/// An inserted picture no store image uses yet survives the store's sweep: the doc holds it.
+#[test]
+fn inserted_picture_survives_sweep() {
+    let mut t = T::new();
+    t.host.insert(crate::demo::sample_raster(200, 100));
+    t.host.store.sweep(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    let host = &mut t.host;
+    let out = t.h.run(vec![], 0.1, |ui| host.ui(ui));
+    let screen = t.h.render(&out, egui::Color32::BLACK);
+    let c = t.host.xf.apply(pt(300.0, 200.0));
+    let px = screen.pixels[c.y as usize * screen.size[0] + c.x as usize].to_array();
+    assert!(px[0].abs_diff(127) < 8 && px[2].abs_diff(180) < 8, "{px:?}");
 }

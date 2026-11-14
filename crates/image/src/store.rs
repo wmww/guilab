@@ -21,6 +21,23 @@ impl Assets for HashMap<AssetId, Arc<Asset>> {
     }
 }
 
+/// No assets (bodies without pictures).
+pub struct NoAssets;
+
+impl Assets for NoAssets {
+    fn asset(&self, _: AssetId) -> Option<Arc<Asset>> {
+        None
+    }
+}
+
+/// Whether picture `kind` may show asset `a` under `id` (raster for raster, SVG for SVG).
+pub(crate) fn asset_fits(kind: &Kind, id: AssetId, a: &Asset) -> bool {
+    match kind {
+        Kind::Raster { .. } => matches!(a, Asset::Raster(_)) && id.kind() == IdKind::Raster,
+        _ => matches!(a, Asset::Svg(_)) && id.kind() == IdKind::Svg,
+    }
+}
+
 /// Owner tag (the server uses one per session). Dropping a group drops its images.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Group(pub u64);
@@ -181,32 +198,29 @@ impl Store {
     }
 
     /// Adds an image. Checks limits, the crop and every asset reference; assets in `carried`
-    /// that were evicted (a draft's) are put back under their ids. `parent` may have expired.
+    /// (a draft's `Doc`) that were evicted are put back under their ids. `parent` may have
+    /// expired.
     pub fn add_image(
         &mut self,
         parent: Option<ImageId>,
         body: Body,
         made: Made,
         group: Group,
-        carried: &[(AssetId, Arc<Asset>)],
+        carried: &dyn Assets,
     ) -> Result<ImageId, StoreError> {
         body.check().map_err(StoreError::Invalid)?;
         for (i, e) in body.elements.iter().enumerate() {
             let Some(id) = e.kind.asset() else { continue };
-            let have = self.assets.get(&id).map(|a| a.asset.clone()).or_else(|| carried.iter().find(|c| c.0 == id).map(|c| c.1.clone()));
+            let have = self.assets.get(&id).map(|a| a.asset.clone()).or_else(|| carried.asset(id));
             let Some(a) = have else { return Err(StoreError::MissingAsset { element: i + 1, asset: id }) };
-            let ok = match e.kind {
-                Kind::Raster { .. } => matches!(*a, Asset::Raster(_)) && id.kind() == IdKind::Raster,
-                _ => matches!(*a, Asset::Svg(_)) && id.kind() == IdKind::Svg,
-            };
-            if !ok {
+            if !asset_fits(&e.kind, id, &a) {
                 return Err(StoreError::WrongAsset { element: i + 1, asset: id });
             }
         }
         let used = body.assets();
         for id in &used {
             if !self.assets.contains_key(id) {
-                let a = carried.iter().find(|c| c.0 == *id).unwrap().1.clone();
+                let a = carried.asset(*id).unwrap();
                 self.insert_asset(*id, a, group);
             }
             self.assets.get_mut(id).unwrap().refs += 1;

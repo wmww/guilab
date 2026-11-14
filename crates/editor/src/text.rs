@@ -151,16 +151,14 @@ impl Editor {
             }
             (None, Some(d)) => {
                 let e = d.add_edit(el);
-                d.apply(&e);
-                out.edits.push(e);
+                crate::canvas::apply(d, e, out);
                 self.began = false;
             }
             (None, None) => self.pending.push(el),
             (Some(k), Some(d)) => {
-                let e = if text.trim().is_empty() { d.remove_edit(k) } else if Some(&el) != ty.orig.as_ref() { d.replace_edit(k, el) } else { None };
+                let e = if text.trim().is_empty() { d.remove_edit(k).map(Ok) } else if Some(&el) != ty.orig.as_ref() { Some(d.replace_edit(k, el)) } else { None };
                 if let Some(e) = e {
-                    d.apply(&e);
-                    out.edits.push(e);
+                    crate::canvas::apply(d, e, out);
                 }
             }
             (Some(_), None) => {}

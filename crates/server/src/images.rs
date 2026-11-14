@@ -10,7 +10,7 @@ use std::{
 
 use guilab_compositor::Session;
 use guilab_image::{
-    Asset, AssetId, Body, Element, Fonts, Group, IRect, Image, ImageId, Kind, LoadError, Made, MakeReq, Pt, Raster, Rect, RenderOpts, Store,
+    Asset, AssetId, Body, Element, Fonts, Group, IRect, Image, ImageId, Kind, LoadError, Made, MakeReq, NoAssets, Pt, Raster, Rect, RenderOpts, Store,
     format::{self, ListOpts},
     load_file,
 };
@@ -79,7 +79,7 @@ impl Images {
         };
         let mut body = Body::screenshot(asset, canvas, scale);
         body.crop = crop;
-        self.store.add_image(None, body, Made::Screenshot { at_ms, by_agent }, g, &[]).map_err(|e| e.to_string())
+        self.store.add_image(None, body, Made::Screenshot { at_ms, by_agent }, g, &NoAssets).map_err(|e| e.to_string())
     }
 
     pub fn get(&self, id: &str) -> Result<Arc<Image>, String> {
@@ -164,7 +164,7 @@ impl Images {
         let kind = if is_raster { Kind::Raster { asset, dst, src: None } } else { Kind::Svg { asset, dst } };
         let mut body = Body::new([n.w.ceil().max(1.0) as u32, n.h.ceil().max(1.0) as u32], 1.0);
         body.elements.push(Element::picture(kind));
-        let id = self.store.add_image(None, body, made, g, &[]).map_err(|e| e.to_string())?;
+        let id = self.store.add_image(None, body, made, g, &NoAssets).map_err(|e| e.to_string())?;
         self.store.image(id).map_err(|e| e.to_string())
     }
 
@@ -173,7 +173,7 @@ impl Images {
         let base = self.get(base)?;
         let mut body = (*base.body).clone();
         body.elements.extend(marks);
-        let id = self.store.add_image(Some(base.id), body, Made::Human, g, &[]).map_err(|e| e.to_string())?;
+        let id = self.store.add_image(Some(base.id), body, Made::Human, g, &NoAssets).map_err(|e| e.to_string())?;
         self.store.image(id).map_err(|e| e.to_string())
     }
 

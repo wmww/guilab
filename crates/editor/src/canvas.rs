@@ -2,7 +2,7 @@
 
 use egui::{CursorIcon, Event, Key, Modifiers, PointerButton, Pos2, Sense, Shape, Ui};
 use guilab_image::geom::{self, Mods};
-use guilab_image::{Body, Doc, Edit, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, element_prims, pt};
+use guilab_image::{Body, Doc, Edit, EditError, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, element_prims, pt};
 use guilab_kit::Theme;
 
 use crate::paint::{self, Ctx};
@@ -179,7 +179,15 @@ fn key_cursor(k: geom::Key, el: &Element, scale: f32, fonts: &Fonts) -> CursorIc
     }
 }
 
-fn apply(doc: &mut Doc, e: Edit, out: &mut CanvasOut) {
+/// Applies and reports an edit, or reports why the doc refused it.
+pub(crate) fn apply(doc: &mut Doc, e: Result<Edit, EditError>, out: &mut CanvasOut) {
+    let e = match e {
+        Ok(e) => e,
+        Err(err) => {
+            out.refused = Some(err.to_string());
+            return;
+        }
+    };
     doc.apply(&e);
     out.edits.push(e);
 }
@@ -189,7 +197,7 @@ impl Editor {
     /// input over `c.clip`. The host keeps middle-drag, wheel zoom and Undo for itself.
     pub fn canvas(&mut self, ui: &mut Ui, c: Canvas) -> CanvasOut {
         let mut out = CanvasOut::default();
-        let Canvas { mut doc, assets, xf, clip, new_doc, visible } = c;
+        let Canvas { mut doc, xf, clip, new_doc, visible } = c;
         self.sync_doc(doc.as_ref().map(|d| d.id()));
         let t = Theme::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -348,7 +356,7 @@ impl Editor {
         }
         out.cursor = cursor;
 
-        self.paint(ui, doc.as_deref(), assets, xf, clip, region, scale, &t, fonts_ready);
+        self.paint(ui, doc.as_deref(), xf, clip, region, scale, &t, fonts_ready);
         if self.typing.is_some() {
             self.text_ui(ui, doc.as_deref_mut(), xf, region, scale, fonts_ready, &mut out);
         }
@@ -363,7 +371,7 @@ impl Editor {
             });
             if show_all {
                 let e = d.crop_edit(None);
-                apply(d, e, &mut out);
+                apply(d, Ok(e), &mut out);
             }
         }
         out.wants_keys = doc.is_some() || self.typing.is_some();
@@ -538,8 +546,8 @@ impl Editor {
             Gesture::Move { key, orig, cur, .. } | Gesture::Reshape { key, orig, cur, .. } => {
                 if cur != orig
                     && let Some(d) = doc
-                    && let Some(e) = d.replace_edit(key, cur)
                 {
+                    let e = d.replace_edit(key, cur);
                     apply(d, e, out);
                 }
             }
@@ -551,7 +559,7 @@ impl Editor {
                 let new = if cur == IRect::of_size(d.body().canvas) { None } else { Some(cur) };
                 if new != d.body().crop && (cur != orig || mode == CropMode::New) {
                     let e = d.crop_edit(new);
-                    apply(d, e, out);
+                    apply(d, Ok(e), out);
                 }
             }
             Gesture::Idle | Gesture::Pan { .. } => {}
@@ -559,12 +567,17 @@ impl Editor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint(&mut self, ui: &Ui, doc: Option<&Doc>, assets: &dyn guilab_image::Assets, xf: Xf, clip: egui::Rect, region: IRect, scale: f32, t: &Theme, fonts_ready: bool) {
+    fn paint(&mut self, ui: &Ui, doc: Option<&Doc>, xf: Xf, clip: egui::Rect, region: IRect, scale: f32, t: &Theme, fonts_ready: bool) {
         let shown = xf.rect(region.to_rect()).intersect(clip);
         let painter = ui.painter_at(shown);
         let mut shapes = Vec::new();
         let ppp = ui.ctx().pixels_per_point();
         let ctx = ui.ctx().clone();
+        // Without a doc there are only pending marks, no pictures.
+        let assets: &dyn guilab_image::Assets = match doc {
+            Some(d) => d,
+            None => &guilab_image::NoAssets,
+        };
         let mut pc = Ctx { xf, assets, textures: &mut self.textures, ctx: &ctx, fonts_ready, ppp };
         let fonts = self.fonts.clone();
         let mut prims = Vec::new();

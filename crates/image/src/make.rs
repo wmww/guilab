@@ -8,7 +8,7 @@ use crate::asset::{Asset, Origin, SvgDoc, load_file};
 use crate::format::{self, INLINE, Mark, Source, Spec};
 use crate::id::{AssetId, ImageId};
 use crate::model::{Body, Element, IRect, Kind, MAX_SIDE, Made, Rect};
-use crate::store::{Group, Store};
+use crate::store::{Group, NoAssets, Store};
 use crate::text::Fonts;
 
 /// The request, as the CLI sends it (strings unparsed, so every error comes from here).
@@ -123,7 +123,7 @@ pub fn make(store: &mut Store, fonts: &Fonts, req: &MakeReq, made: Made, group: 
         return Err(format!("crop {c} reaches outside the {w}x{h} canvas"));
     }
     let parent = from.as_ref().map(|f| f.id);
-    store.add_image(parent, body, made, group, &[]).map_err(|e| e.to_string())
+    store.add_image(parent, body, made, group, &NoAssets).map_err(|e| e.to_string())
 }
 
 struct Files<'a> {

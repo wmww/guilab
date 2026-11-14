@@ -31,7 +31,7 @@ fn capture(w: u32, h: u32) -> Raster {
 
 fn screenshot(s: &mut Store, w: u32, h: u32, scale: f32) -> ImageId {
     let a = s.add_asset(Asset::Raster(capture(w, h)), G);
-    s.add_image(None, Body::screenshot(a, [w, h], scale), Made::Screenshot { at_ms: 50_690_000, by_agent: true }, G, &[]).unwrap()
+    s.add_image(None, Body::screenshot(a, [w, h], scale), Made::Screenshot { at_ms: 50_690_000, by_agent: true }, G, &NoAssets).unwrap()
 }
 
 fn req(from: Option<ImageId>, els: &[&str]) -> MakeReq {
@@ -682,12 +682,12 @@ fn assets_refcounts_groups_and_carried() {
     let mut s = store();
     let shot = screenshot(&mut s, 10, 10, 1.0);
     let raster = s.image(shot).unwrap().body.elements[0].kind.asset().unwrap();
-    // A draft carries its assets; after the store evicts them, add_image re-adds them.
-    let carried = vec![(raster, s.asset(raster).unwrap())];
+    // A draft's doc carries its assets; after the store evicts them, add_image re-adds them.
     let body = (*s.image(shot).unwrap().body).clone();
+    let carried = Doc::open(body.clone(), &s).unwrap();
     s.drop_group(G);
     assert!(s.asset(raster).is_none());
-    assert_eq!(s.add_image(None, body.clone(), Made::Human, Group(2), &[]).unwrap_err(), StoreError::MissingAsset { element: 1, asset: raster });
+    assert_eq!(s.add_image(None, body.clone(), Made::Human, Group(2), &NoAssets).unwrap_err(), StoreError::MissingAsset { element: 1, asset: raster });
     let id = s.add_image(Some(shot), body, Made::Human, Group(2), &carried).unwrap();
     assert!(s.asset(raster).is_some());
     assert_eq!(s.image(id).unwrap().body.elements[0].kind.asset(), Some(raster));
@@ -700,7 +700,7 @@ fn assets_refcounts_groups_and_carried() {
     let svg = s.add_asset(Asset::Svg(Box::new(SvgDoc::parse(SVG_RED, Origin::File { name: "x".into() }, None).unwrap())), G);
     let mut b = Body::new([10, 10], 1.0);
     b.elements.push(Element::picture(Kind::Raster { asset: svg, dst: Rect::new(0.0, 0.0, 1.0, 1.0), src: None }));
-    assert!(matches!(s.add_image(None, b, Made::Agent, G, &[]), Err(StoreError::WrongAsset { .. })));
+    assert!(matches!(s.add_image(None, b, Made::Agent, G, &NoAssets), Err(StoreError::WrongAsset { .. })));
     s.drop_group(Group(2));
     s.drop_group(G);
     assert_eq!(s.bytes(), 0);
@@ -711,14 +711,14 @@ fn limits_are_checked() {
     let mut s = store();
     let mut b = Body::new([10, 10], 1.0);
     b.elements = vec![Element::new(Color::RED, Kind::Box(Rect::new(0.0, 0.0, 1.0, 1.0))); model::MAX_ELEMENTS + 1];
-    assert!(s.add_image(None, b, Made::Agent, G, &[]).unwrap_err().to_string().contains("too many"));
+    assert!(s.add_image(None, b, Made::Agent, G, &NoAssets).unwrap_err().to_string().contains("too many"));
     let b = Body::new([20_000, 10], 1.0);
-    assert!(s.add_image(None, b, Made::Agent, G, &[]).unwrap_err().to_string().contains("out of range"));
+    assert!(s.add_image(None, b, Made::Agent, G, &NoAssets).unwrap_err().to_string().contains("out of range"));
     let b = Body { crop: Some(IRect::new(5, 5, 10, 10)), ..Body::new([10, 10], 1.0) };
-    assert!(s.add_image(None, b, Made::Agent, G, &[]).unwrap_err().to_string().contains("isn't inside"));
+    assert!(s.add_image(None, b, Made::Agent, G, &NoAssets).unwrap_err().to_string().contains("isn't inside"));
     let mut b = Body::new([10, 10], 1.0);
     b.elements.push(Element::new(Color::RED, Kind::Pen(vec![pt(0.0, 0.0); model::MAX_PEN_POINTS + 1])));
-    assert!(s.add_image(None, b, Made::Agent, G, &[]).unwrap_err().to_string().contains("pen points"));
+    assert!(s.add_image(None, b, Made::Agent, G, &NoAssets).unwrap_err().to_string().contains("pen points"));
 }
 
 // ------------------------------------------------------------------ geometry and edits
@@ -809,8 +809,8 @@ fn doc_apply_revert() {
     let mut s = store();
     let shot = screenshot(&mut s, 100, 100, 1.0);
     let orig = (*s.image(shot).unwrap().body).clone();
-    let mut d = Doc::from_body(orig.clone());
-    let e1 = d.add_edit(Element::new(Color::BLUE, Kind::Box(Rect::new(1.0, 1.0, 5.0, 5.0))));
+    let mut d = Doc::open(orig.clone(), &s).unwrap();
+    let e1 = d.add_edit(Element::new(Color::BLUE, Kind::Box(Rect::new(1.0, 1.0, 5.0, 5.0)))).unwrap();
     d.apply(&e1);
     let k = d.keys()[1];
     let e2 = d.replace_edit(k, Element::new(Color::GREEN, Kind::Line(pt(0.0, 0.0), pt(1.0, 1.0)))).unwrap();
@@ -835,15 +835,46 @@ fn doc_replay_keeps_keys_unique() {
     let shot = screenshot(&mut s, 100, 100, 1.0);
     let body = (*s.image(shot).unwrap().body).clone();
     let bx = |x: f32| Element::new(Color::BLUE, Kind::Box(Rect::new(x, 1.0, 5.0, 5.0)));
-    let mut a = Doc::from_body(body.clone());
-    let e = a.add_edit(bx(1.0));
+    let mut a = Doc::open(body.clone(), &s).unwrap();
+    let e = a.add_edit(bx(1.0)).unwrap();
     a.apply(&e);
-    let mut b = Doc::from_body(body);
+    let mut b = Doc::open(body, &s).unwrap();
     b.apply(&e);
-    let e2 = b.add_edit(bx(20.0));
+    let e2 = b.add_edit(bx(20.0)).unwrap();
     b.apply(&e2);
     let mut keys = b.keys().to_vec();
     keys.sort();
     keys.dedup();
     assert_eq!(keys.len(), 3, "{:?}", b.keys());
+}
+
+/// A doc holds its pictures' assets: a picture added on one doc replays on a fresh one and
+/// freezes after the store evicted the asset; builders refuse what wouldn't freeze.
+#[test]
+fn doc_carries_assets_and_limits() {
+    let mut s = store();
+    let shot = screenshot(&mut s, 100, 100, 1.0);
+    let body = (*s.image(shot).unwrap().body).clone();
+    let pic = s.add_asset(Asset::Raster(capture(5, 5)), G);
+    let svg = s.add_asset(Asset::Svg(Box::new(SvgDoc::parse(SVG_RED, Origin::File { name: "x".into() }, None).unwrap())), G);
+    let mut a = Doc::open(body.clone(), &s).unwrap();
+    let e = a.add_picture(pic, s.asset(pic).unwrap(), Rect::new(1.0, 1.0, 5.0, 5.0)).unwrap();
+    let mut b = Doc::open(body.clone(), &s).unwrap();
+    b.apply(&e);
+    s.drop_group(G);
+    assert!(s.asset(pic).is_none());
+    s.add_image(Some(shot), b.body().clone(), Made::Human, Group(2), &b).unwrap();
+    // A picture whose asset the doc doesn't have, or of the wrong kind.
+    let raster_el = |asset| Element::picture(Kind::Raster { asset, dst: Rect::new(0.0, 0.0, 1.0, 1.0), src: None });
+    assert_eq!(a.add_edit(raster_el(svg)).unwrap_err(), EditError::MissingAsset(svg));
+    let k = a.keys()[0];
+    assert!(matches!(a.replace_edit(k, raster_el(svg)), Err(EditError::MissingAsset(_))));
+    assert!(Doc::open(body.clone(), &NoAssets).is_err());
+    // Limits and invalid geometry.
+    let pen = |n: usize| Element::new(Color::RED, Kind::Pen(vec![pt(1.0, 1.0); n]));
+    assert!(matches!(a.add_edit(pen(model::MAX_PEN_POINTS + 1)), Err(EditError::Limit(_))));
+    assert!(matches!(a.add_edit(Element::new(Color::RED, Kind::Line(pt(f32::NAN, 0.0), pt(1.0, 1.0)))), Err(EditError::Limit(_))));
+    let e = a.add_edit(pen(model::MAX_PEN_POINTS)).unwrap();
+    a.apply(&e);
+    assert!(a.add_edit(pen(1)).unwrap_err().to_string().contains("pen points"));
 }

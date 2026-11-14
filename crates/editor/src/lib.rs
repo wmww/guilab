@@ -1,7 +1,8 @@
 //! The image editor widget: drawing tools, the move tool (move, reshape by key points,
 //! pan), text editing, crop and inserted pictures, over a host-owned [`Doc`].
 //!
-//! Data in, edits out: the host passes the doc, assets and the view transform each frame
+//! Data in, edits out: the host passes the doc (which holds its pictures' assets) and the
+//! view transform each frame
 //! ([`Canvas`]) and gets back the [`Edit`]s already applied to the doc ([`CanvasOut`]). Undo
 //! is the host's (e.g. a `guilab_kit::History<Edit>`), and so are zoom and pan: the editor
 //! only reports pan drags. No guilab app types; [`demo::DemoHost`] is a complete host.
@@ -15,7 +16,7 @@ mod toolbar;
 use std::sync::Arc;
 
 use egui::{CursorIcon, Id, Pos2, Vec2, pos2};
-use guilab_image::{AssetId, Assets, Color, Doc, DocId, Edit, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, Size, pt};
+use guilab_image::{Asset, AssetId, Color, Doc, DocId, Edit, EditError, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, pt};
 
 pub use paint::{FAMILY, install_fonts};
 
@@ -103,7 +104,6 @@ pub struct Canvas<'a> {
     /// `None` = no document yet (e.g. the live app): a drawing press asks for one
     /// ([`CanvasOut::begin`]), and the mark is committed once it's there.
     pub doc: Option<&'a mut Doc>,
-    pub assets: &'a dyn Assets,
     pub xf: Xf,
     /// The screen area the canvas owns.
     pub clip: egui::Rect,
@@ -132,6 +132,9 @@ pub struct CanvasOut {
     pub wants_keys: bool,
     /// Screen rect of the part of the canvas shown ([`Editor::view_region`]).
     pub shown: Option<egui::Rect>,
+    /// A mark the doc refused (it would break an image limit) and was dropped: tell the
+    /// human why.
+    pub refused: Option<String>,
 }
 
 /// What a press would grab, by priority.
@@ -259,25 +262,27 @@ impl Editor {
         self.doc_id = id;
     }
 
-    /// Commits text being typed (e.g. before sending), returning the edits applied.
-    pub fn commit(&mut self, doc: &mut Doc) -> Vec<Edit> {
+    /// Commits text being typed and pending marks (e.g. before sending). Returns the edits
+    /// applied (`edits`) and any refusal; nothing else in the result is set.
+    pub fn commit(&mut self, doc: &mut Doc) -> CanvasOut {
         self.sync_doc(Some(doc.id()));
         let mut out = CanvasOut::default();
         for el in self.pending.drain(..) {
             let e = doc.add_edit(el);
-            doc.apply(&e);
-            out.edits.push(e);
+            canvas::apply(doc, e, &mut out);
         }
         if let Some(t) = self.typing.take() {
             self.finish_typing(t, Some(doc), &mut out);
         }
         self.began = false;
-        out.edits
+        out
     }
 
-    /// Adds a picture (File > Insert image) centered at `center`, at its natural size or
-    /// shrunk to fit in `fit` (canvas px, e.g. the visible region). Returns the edit, applied.
-    pub fn insert(&mut self, doc: &mut Doc, kind: Picture, natural: Size, center: Pt, fit: IRect) -> Edit {
+    /// Adds picture `asset` (File > Insert image) centered at `center`, at its natural size
+    /// or shrunk to fit in `fit` (canvas px, e.g. the visible region). Returns the edit,
+    /// applied; the doc keeps the asset from then on.
+    pub fn insert(&mut self, doc: &mut Doc, id: AssetId, asset: Arc<Asset>, center: Pt, fit: IRect) -> Result<Edit, EditError> {
+        let natural = asset.natural_size();
         let k = ((fit.w as f32 * 0.9) / natural.w.max(1.0)).min((fit.h as f32 * 0.9) / natural.h.max(1.0)).min(1.0);
         let (w, h) = ((natural.w * k).max(1.0).round(), (natural.h * k).max(1.0).round());
         let mut dst = Rect::new((center.x - w / 2.0).round(), (center.y - h / 2.0).round(), w, h);
@@ -286,13 +291,9 @@ impl Editor {
         while doc.body().elements.iter().any(|e| matches!(&e.kind, Kind::Raster { dst: d, .. } | Kind::Svg { dst: d, .. } if d.min == dst.min)) {
             dst = dst.translate(pt(step, step));
         }
-        let kind = match kind {
-            Picture::Raster(asset) => Kind::Raster { asset, dst, src: None },
-            Picture::Svg(asset) => Kind::Svg { asset, dst },
-        };
-        let e = doc.add_edit(Element::picture(kind));
+        let e = doc.add_picture(id, asset, dst)?;
         doc.apply(&e);
-        e
+        Ok(e)
     }
 
     /// Removes the element a move-tool press would grab (Delete / Backspace).
@@ -318,13 +319,6 @@ impl Editor {
             self.tool = Tool::Pen;
         }
     }
-}
-
-/// An inserted picture's asset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picture {
-    Raster(AssetId),
-    Svg(AssetId),
 }
 
 #[cfg(test)]
