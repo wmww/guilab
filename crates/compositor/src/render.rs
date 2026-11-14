@@ -40,6 +40,8 @@ pub struct Gpu {
     pub node: Option<DrmNode>,
     /// Human-readable description, e.g. "gles /dev/dri/renderD128".
     pub name: String,
+    /// GBM device of the render node (the viewer allocates its host buffers here). None with pixman.
+    pub gbm: Option<GbmDevice<DrmDeviceFd>>,
 }
 
 impl Gpu {
@@ -67,18 +69,18 @@ impl Gpu {
             tracing::warn!("no usable render node, falling back to pixman");
         }
         let r = PixmanRenderer::new().map_err(|e| anyhow!("pixman: {e}"))?;
-        Ok(Gpu { renderer: Renderer::Pixman(r), node: None, name: "pixman".into() })
+        Ok(Gpu { renderer: Renderer::Pixman(r), node: None, name: "pixman".into(), gbm: None })
     }
 
     fn gles(path: &std::path::Path) -> anyhow::Result<Gpu> {
         let f = OpenOptions::new().read(true).write(true).open(path)?;
         let fd = DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(f)));
         let gbm = GbmDevice::new(fd).context("gbm")?;
-        let egl = unsafe { EGLDisplay::new(gbm) }.context("egl display")?;
+        let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("egl display")?;
         let node = EGLDevice::device_for_display(&egl).ok().and_then(|d| d.try_get_render_node().ok().flatten());
         let ctx = EGLContext::new(&egl).context("egl context")?;
         let r = unsafe { GlesRenderer::new(ctx) }.context("gles renderer")?;
-        Ok(Gpu { renderer: Renderer::Gles(r), node, name: format!("gles {}", path.display()) })
+        Ok(Gpu { renderer: Renderer::Gles(r), node, name: format!("gles {}", path.display()), gbm: Some(gbm) })
     }
 
     pub fn import_dmabuf(&mut self, buf: &Dmabuf) -> bool {
@@ -170,6 +172,15 @@ impl Frame {
         };
         self.age = 1;
         Ok(out)
+    }
+
+    /// The GLES texture holding the last rendered frame (None with pixman or before the
+    /// first render), and its pixel size.
+    pub fn gles_texture(&self) -> Option<(&GlesTexture, (i32, i32))> {
+        match &self.target {
+            Some((Target::Gles(t), s)) => Some((t, (s.w, s.h))),
+            _ => None,
+        }
     }
 
     /// Reads the last rendered frame back as tightly packed RGBA8.

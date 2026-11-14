@@ -1,0 +1,184 @@
+//! The viewer window, shown on a headless host: a second guilab server's session plays the
+//! human's desktop. The test drives the host session's pointer (as an agent there), which
+//! the viewer turns into human input in the viewed session.
+
+use std::time::{Duration, Instant};
+
+use guilab_proto::{Client, Command, Request, ServerInfo, Target};
+
+use crate::{
+    Lab, app,
+    input::{center, gtk4, wait_log},
+};
+
+impl Lab {
+    fn info(&self) -> ServerInfo {
+        let mut c = Client::connect(&self.rt.join("guilab/control.sock")).unwrap();
+        c.call_as(&Request { target: Target::default(), cmd: Command::Ping }).unwrap()
+    }
+
+    /// `guilab show` on `host`'s session socket.
+    fn show(&self, host: &str) -> (bool, String, String) {
+        self.try_run_env(&[("WAYLAND_DISPLAY", host)], &["show"])
+    }
+}
+
+/// A host server with one session; returns (lab, its socket path, lock token). None if the
+/// machine can't run the viewer (no GLES).
+fn host() -> Option<(Lab, String, String)> {
+    let h = Lab::new();
+    let info = h.json(&["new", "host", "-s", "1200x800"]);
+    if !h.info().renderer.starts_with("gles") {
+        eprintln!("skipping: the viewer needs GLES");
+        return None;
+    }
+    let sock = info["wayland_display"].as_str().unwrap().to_string();
+    let t = h.lock();
+    Some((h, sock, t))
+}
+
+/// A viewed server running gtk_input.py in session "app"; returns (lab, app log).
+fn viewed(env: &[(&str, &str)]) -> (Lab, String) {
+    let v = Lab::new();
+    // The server autostarts with this command's environment.
+    let (ok, _, err) = v.try_run_env(env, &["new", "app", "-s", "800x600"]);
+    assert!(ok, "{err}");
+    let p = v.json(&["run", "--", "python3", &app("gtk_input.py")]);
+    let log = p["log"].as_str().unwrap().to_string();
+    wait_log(&log, "ready", 20);
+    (v, log)
+}
+
+/// Host pixel -> viewed-session pixel offset, found by moving the host pointer and reading
+/// the viewed session's human motion event.
+fn offset(h: &Lab, t: &str, v: &Lab) -> (i64, i64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for i in 0.. {
+        let (x, y) = (600 + i % 7, 400 + i % 5);
+        h.input(t, &["move", &x.to_string(), &y.to_string()]);
+        std::thread::sleep(Duration::from_millis(100));
+        let log = v.json(&["log", "--kind", "motion", "-n", "1"]);
+        if let Some(p) = log["events"][0]["path"].as_array().and_then(|p| p.last()) {
+            let (sx, sy) = (p[0].as_i64().unwrap(), p[1].as_i64().unwrap());
+            return (x - sx, y - sy);
+        }
+        assert!(Instant::now() < deadline, "no human motion reached the session: {log}\n{}", v.run(&["log"]));
+    }
+    unreachable!()
+}
+
+fn click_button(h: &Lab, t: &str, (dx, dy): (i64, i64), log: &str) {
+    let (bx, by) = center(&std::fs::read_to_string(log).unwrap(), "button", 1.0);
+    let (x, y) = (bx.parse::<i64>().unwrap() + dx, by.parse::<i64>().unwrap() + dy);
+    h.input(t, &["move", &x.to_string(), &y.to_string(), "click"]);
+}
+
+fn clicks(log: &str) -> usize {
+    std::fs::read_to_string(log).unwrap().lines().filter(|l| l.starts_with("clicked")).count()
+}
+
+fn click_through(env: &[(&str, &str)], buffers: &str) {
+    let Some((h, sock, t)) = host() else { return };
+    if !gtk4() {
+        return;
+    }
+    let (v, log) = viewed(env);
+    let (ok, out, err) = v.show(&sock);
+    assert!(ok && out.contains("viewer shown"), "{out}{err}");
+    let info = v.info().viewer.expect("viewer info");
+    assert_eq!(info.buffers, buffers);
+
+    let off = offset(&h, &t, &v);
+    click_button(&h, &t, off, &log);
+    wait_log(&log, "clicked 1", 5);
+
+    // Locked by an agent: the human's clicks are dropped, until shared.
+    let vt = v.lock();
+    click_button(&h, &t, off, &log);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(clicks(&log), 1, "a click got through the lock");
+    v.run(&["debug", "share", "on"]);
+    click_button(&h, &t, off, &log);
+    wait_log(&log, "clicked 2", 5);
+    v.run(&["-t", &vt, "unlock"]);
+}
+
+#[test]
+fn click_through_dmabuf() {
+    click_through(&[], "dmabuf");
+}
+
+#[test]
+fn click_through_shm() {
+    click_through(&[("GUILAB_VIEWER_SHM", "1")], "shm");
+}
+
+/// Showing and hiding, also mid-connect, never touches sessions.
+#[test]
+fn show_hide_cycles() {
+    let Some((h, sock, _t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "640x480"]);
+    let p = v.json(&["run", "--", "sleep", "600"]);
+    for i in 0..15 {
+        let (ok, _, err) = v.show(&sock);
+        assert!(ok, "show {i}: {err}");
+        assert!(v.info().viewer.is_some_and(|i| i.frames > 0));
+        v.run(&["hide"]);
+        assert!(v.info().viewer.is_none());
+    }
+    // Hide while connecting: the pending show fails, nothing else happens.
+    for _ in 0..5 {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_guilab"));
+        c.args(["show"]).env("XDG_RUNTIME_DIR", &v.rt).env("WAYLAND_DISPLAY", &sock).current_dir("/");
+        let child = c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        v.run(&["hide"]);
+        child.wait_with_output().unwrap();
+    }
+    v.run(&["hide"]);
+    let ps = v.json(&["ps"]);
+    assert_eq!(ps[0]["id"], p["id"]);
+    assert_eq!(ps[0]["state"], "running", "{ps}");
+    let log = v.json(&["log"]);
+    let kinds: Vec<&str> = log["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.iter().all(|k| matches!(*k, "command" | "app_start")), "the viewer touched the session: {kinds:?}");
+    // The host saw windows come and go, and none is left.
+    h.wait_tree("host", 5, |t| t.as_array().unwrap().is_empty());
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+}
+
+/// The host compositor dying closes the viewer only.
+#[test]
+fn host_killed() {
+    let Some((h, sock, _t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "640x480"]);
+    v.run(&["run", "--", "sleep", "600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    let pid = h.info().pid;
+    rustix::process::kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap(), rustix::process::Signal::KILL).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while v.info().viewer.is_some() {
+        assert!(Instant::now() < deadline, "viewer still shown after the host died");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(v.json(&["ps"])[0]["state"], "running");
+    v.run(&["screenshot", "--no-settle"]);
+    let (ok, _, _) = v.show(&sock);
+    assert!(!ok, "show on a dead host worked");
+}
+
+#[test]
+fn show_refuses_own_session() {
+    let v = Lab::new();
+    let info = v.json(&["new", "app"]);
+    if !v.info().renderer.starts_with("gles") {
+        return;
+    }
+    let (ok, _, err) = v.show(info["wayland_display"].as_str().unwrap());
+    assert!(!ok && err.contains("its own sessions"), "{err}");
+    let (ok, _, err) = v.try_run(&["show"]);
+    assert!(!ok && err.contains("WAYLAND_DISPLAY"), "{err}");
+}

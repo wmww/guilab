@@ -29,6 +29,23 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
     }
 }
 
+/// The socket a `WAYLAND_DISPLAY` value names: relative to `XDG_RUNTIME_DIR` unless absolute.
+pub fn wayland_socket(display: &str, xdg_runtime_dir: Option<&Path>) -> Option<PathBuf> {
+    let p = Path::new(display);
+    match display {
+        "" => None,
+        _ if p.is_absolute() => Some(p.to_path_buf()),
+        _ => xdg_runtime_dir.map(|d| d.join(p)),
+    }
+}
+
+/// The socket of this process's `WAYLAND_DISPLAY`, or an error saying what's missing.
+pub fn own_wayland_socket() -> Result<PathBuf, String> {
+    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
+    let rt = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    wayland_socket(&display, rt.as_deref()).ok_or_else(|| "WAYLAND_DISPLAY is not set; the viewer needs a Wayland desktop to show on".into())
+}
+
 pub fn socket_path() -> io::Result<PathBuf> {
     Ok(runtime_dir()?.join("control.sock"))
 }
@@ -63,6 +80,12 @@ pub enum Command {
     Ping,
     /// Stop the server (ends all sessions). Reply: null.
     Shutdown,
+    /// Open the viewer window on the Wayland display at `display` (a socket path; the CLI
+    /// sends its own `WAYLAND_DISPLAY`, since the server's environment may be stale).
+    /// Reply: [`ViewerInfo`], once the first frame is up.
+    Show { display: PathBuf },
+    /// Close the viewer window. Sessions are unaffected. Reply: null.
+    Hide,
     /// Reply: [`SessionInfo`]. Uses `target.root` as the session's root.
     New {
         name: Option<String>,
@@ -184,7 +207,7 @@ impl Command {
     pub fn log_text(&self) -> Option<String> {
         let opt = |name: &str, v: Option<String>| v.map(|v| format!(" {name} {v}")).unwrap_or_default();
         Some(match self {
-            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => return None,
+            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => return None,
             Command::Poll { .. } | Command::Log { .. } | Command::Say { .. } | Command::Human { .. } => return None,
             Command::End => "end".into(),
             Command::Run { argv, .. } => format!("run -- {}", argv.join(" ")),
@@ -240,6 +263,20 @@ pub struct ServerInfo {
     /// Seconds since the epoch of the server binary's mtime when it started.
     pub exe_mtime: u64,
     pub renderer: String,
+    /// The viewer window, if shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ViewerInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerInfo {
+    /// The host display's socket.
+    pub display: PathBuf,
+    /// How frames reach the host: "dmabuf" or "shm" (CPU copy).
+    pub buffers: String,
+    /// Frames presented so far (the viewer draws only when something changed).
+    #[serde(default)]
+    pub frames: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

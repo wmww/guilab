@@ -12,6 +12,8 @@ doctest = false
 [dependencies]
 guilab-proto.workspace = true
 guilab-compositor.workspace = true
+guilab-viewer.workspace = true
+smithay.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 rustix.workspace = true

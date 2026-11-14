@@ -2,19 +2,19 @@
 
 guilab lets humans and agents work on a GUI app together. It replaces the gui-testing skill (`~/agent-skills/gui-testing`: `guibox` wrapping headless sway + grim + wdotool). It must do everything guibox does (disposable headless sessions, screenshots, mouse/keyboard input, resize/scale, Xwayland, independent parallel sessions, automatic cleanup) as one self-contained package with no external tools. On top of that it adds a human-facing viewer with chat and drawing over screenshots. Drawing is the most important extra.
 
-Plan steps 1-5 (skeleton, headless compositor, input and locking, Xwayland, event log) are built; see `plan.md` for what's next and `code-map.md` for the code.
+Plan steps 1-6 (skeleton, headless compositor, input and locking, Xwayland, event log, viewer window) are built; see `plan.md` for what's next and `code-map.md` for the code.
 
 ## Stack
 - **Rust**, one `guilab` binary for both the server and the CLI. Split into workspace crates if it helps build times (see the reasonable-rust-builds skill).
 - **smithay** compositor in-process. guilab *is* the compositor, so screenshots read our own buffers, input is injected directly (touch included), and frame timing is under our control.
 - Reuse existing code for tricky logic (popup placement/constraints, Xwayland WM, grabs) rather than writing our own: smithay helpers first, then anvil (MIT), then cosmic-comp/niri.
-- **egui** for the viewer, drawn with the same renderer as the compositor so the app's frames are just textures.
-- GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer always needs GL (egui has no software renderer); Mesa llvmpipe covers GPU-less machines.
+- **egui** for the viewer, drawn with the same GLES renderer as the sessions (so session frames are GPU textures; the visible one is GPU-copied into an egui texture when it changes) and presented to the host as dmabufs (shm CPU copy as fallback).
+- GLES renderer on a DRM render node, pixman software fallback for sessions. The viewer needs GLES (egui has no software renderer); a server that fell back to pixman can't show it yet (`issues/viewer-gaps.md`).
 - Details and verified APIs: `smithay.md` (core compositor), `viewer.md` (viewer window, egui).
 - Public repo. MIT by default; switching to GPL is fine if borrowing from cosmic-comp/niri needs it.
 
 ## Server
-- Runs without any parent Wayland connection. The viewer window is optional: `--show` at startup, `guilab show`/`hide` at runtime. Opening or closing the host connection must never affect sessions. Host disconnects or protocol errors close the viewer only, and never stop the server. `show` sends the CLI's own `WAYLAND_DISPLAY`, since the auto-started server's environment may be stale.
+- Runs without any parent Wayland connection. The viewer window is optional: `--show` at startup, `guilab show`/`hide` at runtime. Opening or closing the host connection never affects sessions. Host disconnects, protocol errors and closing the window close the viewer only, and never stop the server. `show` sends the CLI's own `WAYLAND_DISPLAY` (as a socket path), since the auto-started server's environment may be stale; it replies once the first frame is up, and refuses the server's own session sockets.
 - While the viewer is hidden, the server's own clock drives frame callbacks, so apps behave the same either way.
 - Starts automatically on the first CLI command that needs it, and then exits after 10 minutes without sessions. `guilab server --stop` stops it (ending all sessions).
 - Sessions end after an idle TTL (default 30 minutes without commands targeting them; `new --ttl SECS`, 0 = never). Ending a session kills everything spawned in it, including double-forked daemons.
@@ -58,14 +58,17 @@ Plan steps 1-5 (skeleton, headless compositor, input and locking, Xwayland, even
 - `guilab poll [--timeout SECS]` blocks until a wake event, prints it and everything else since the previous delivery, and exits 0 (2 on timeout, still printing what happened). `--follow` keeps going with one line per wake event (passive events appended as `(meanwhile: ...)`), for Monitor-style tools.
 - A human message has text, image attachments (copied into the session dir as `msg-SEQ-N.EXT`, path given) and text annotations (`{text, image?, x?, y?}`, positions in image pixels). How the viewer delivers annotation text (baked into the image, as data, or both) is decided in step 7; the event carries both kinds.
 - `guilab say TEXT [--image PATH]` logs an agent → human message (images copied as `say-SEQ-N.EXT`) for the viewer's feed.
-- Until the viewer exists, the hidden `guilab debug message|input|revoke|share` acts as the human (tests use it). Human input goes through `Session::inject(.., InputSource::Human)`, which logs it; it's refused while locked and not shared.
+- The hidden `guilab debug message|input|revoke|share` acts as the human for tests (and for messages until step 7 adds the viewer's input box). Human input goes through `Session::inject(.., InputSource::Human)`, which logs it; it's refused while locked and not shared.
 
 ## Viewer
 Start with basic functionality. Don't build UI or features we aren't sure we need.
 
 Layout:
-- **Top:** one tab per session.
-- **Main area:** the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. Scroll to zoom, drag to pan, touchpad pinch/pan. The human uses the app directly here, unless locked out. Lock controls (revoke/share) live here too.
+- **Top:** one tab per session (🔒 when locked).
+- **Main area:** a bar with the lock controls (Revoke, Share, status) and zoom controls (−, %, +, Fit, 1:1), then the session. The viewer's size never changes the session's output size; that changes only via the CLI or an explicit control. The human uses the app directly here, unless locked out (then a banner says so and input is dropped; releases of held keys/buttons still go through).
+  - Zoom is host physical pixels per session pixel (100% = pixel-exact). Fit is the default and follows the window, capped at the larger of 1:1 and the session's logical size (so a scale-2 session on a 1x host shows pixel-exact, a scale-1 session on a 2x host at its normal size).
+  - Mouse scheme: plain clicks, drags and scrolling over the image go to the app. Ctrl+scroll anywhere, scroll outside the image, or pinch zooms at the pointer; middle-drag anywhere or any drag outside the image pans. A middle click that doesn't move still reaches the app (sent on release). Rejected: plain scroll to zoom and space+drag (both take input the app needs).
+  - Keys go to the session unless an egui text field has focus (step 7's input box). Human input to a session counts as activity for its TTL.
 - **Left edge:** a narrow drawing toolbar for diagramming, not art. One fixed-width pen, box, ellipse, line, arrow, text (as a tool or by double-click), and a few colors. Nothing more.
 - **Bottom:** the message input, plus a feed of the conversation: human messages, agent `say` output, and each agent command as a log line, so you can see what the agent is doing. A drag handle resizes it.
 

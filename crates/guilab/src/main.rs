@@ -61,7 +61,14 @@ enum Cmd {
         /// Exit after this many seconds without sessions (0 = never).
         #[arg(long, default_value_t = 0)]
         idle_exit: u64,
+        /// Open the viewer window on this shell's Wayland display.
+        #[arg(long)]
+        show: bool,
     },
+    /// Open the viewer window (on this shell's Wayland display) to watch and use sessions.
+    Show,
+    /// Close the viewer window. Sessions keep running.
+    Hide,
     /// Start a session. NAME defaults to the git worktree's directory name.
     New {
         name: Option<String>,
@@ -288,7 +295,12 @@ fn main() {
 fn real_main(cli: Cli) -> Result<(), String> {
     let fmt = guilab_proto::text::Fmt { tz: tz_offset() };
     let cmd = match cli.cmd {
-        Cmd::Server { stop: false, idle_exit } => return client::run_server(idle_exit),
+        Cmd::Server { stop: false, idle_exit, show } => {
+            let show = show.then(guilab_proto::own_wayland_socket).transpose()?;
+            return client::run_server(idle_exit, show);
+        }
+        Cmd::Show => Command::Show { display: guilab_proto::own_wayland_socket()? },
+        Cmd::Hide => Command::Hide,
         Cmd::Server { stop: true, .. } => return client::stop_server(),
         Cmd::New { name, size, scale, ttl, xwayland } => Command::New { name, size, scale, ttl, xwayland },
         Cmd::End => Command::End,

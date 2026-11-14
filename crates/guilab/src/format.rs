@@ -192,7 +192,12 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             out.extend(l.events.iter().map(|e| fmt.log_line(e)));
             if out.is_empty() { "no events".into() } else { out.join("\n") }
         }
-        Command::Ping | Command::Shutdown => return Ok(()),
+        Command::Show { .. } => {
+            let i: guilab_proto::ViewerInfo = get(v)?;
+            let how = if i.buffers == "shm" { ", shm: CPU copy" } else { "" };
+            format!("viewer shown on {}{how}", i.display.display())
+        }
+        Command::Ping | Command::Shutdown | Command::Hide => return Ok(()),
     };
     println!("{text}");
     Ok(())

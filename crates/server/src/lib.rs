@@ -3,6 +3,7 @@
 
 pub mod lock;
 mod requests;
+mod viewer;
 
 use std::{
     collections::BTreeMap,
@@ -32,6 +33,8 @@ use guilab_proto::{Response, ServerInfo};
 pub struct Options {
     /// Exit after this long without sessions (autostarted servers).
     pub idle_exit: Option<Duration>,
+    /// Open the viewer on this Wayland display (socket path) at startup.
+    pub show: Option<PathBuf>,
 }
 
 /// Default idle TTL of a session, in seconds.
@@ -121,6 +124,9 @@ pub struct Server {
     pub(crate) stop: bool,
     idle_exit: Option<Duration>,
     idle_since: Instant,
+    pub(crate) viewer: viewer::ViewerState,
+    pub(crate) viewer_gen: u64,
+    pub(crate) viewer_tx: calloop::channel::Sender<viewer::ConnectResult>,
     last_slow_tick: Instant,
 }
 
@@ -151,7 +157,7 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let info = ServerInfo { pid: std::process::id(), exe, exe_mtime, renderer: gpu.name.clone() };
+    let info = ServerInfo { pid: std::process::id(), exe, exe_mtime, renderer: gpu.name.clone(), viewer: None };
 
     let mut event_loop: EventLoop<'static, Server> = EventLoop::try_new()?;
     let handle = event_loop.handle();
@@ -183,6 +189,8 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         })
         .map_err(|e| e.error)?;
 
+    let viewer_tx = viewer::insert_channel(&handle)?;
+
     let now = Instant::now();
     let mut srv = Server {
         handle,
@@ -200,12 +208,21 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         idle_exit: opts.idle_exit,
         idle_since: now,
         last_slow_tick: now,
+        viewer: Default::default(),
+        viewer_gen: 0,
+        viewer_tx,
     };
+    if let Some(display) = opts.show
+        && let Some(Response { ok: false, error, .. }) = srv.show(display, None)
+    {
+        bail!("{}", error.unwrap_or_default());
+    }
     eprintln!("guilab server {} listening on {}", std::process::id(), sock_path.display());
     while !srv.stop {
         event_loop.dispatch(None, &mut srv)?;
     }
 
+    srv.hide_viewer(Some("server stopping"));
     let names: Vec<String> = srv.sessions.keys().cloned().collect();
     for n in names {
         srv.end_session(&n);
@@ -279,6 +296,7 @@ impl Server {
         self.check_news(now);
         self.check_waiters(now);
         self.check_polls(now);
+        self.viewer_tick(now);
         self.reap_graves(now);
         if now.duration_since(self.last_slow_tick) >= Duration::from_secs(1) {
             self.last_slow_tick = now;

@@ -5,8 +5,8 @@
 //!   while the session is locked, so an unlocked session stays easy to script.
 //! - Read-only commands never need it.
 //!
-//! The viewer (not built yet) hooks in via [`LockState::revoke`] (its Revoke button),
-//! [`LockState::set_shared`] (Share) and [`LockState::human_input_allowed`].
+//! The viewer's Revoke/Share buttons go through `Server::revoke_lock` / `Server::share`
+//! (which log the events); its input is gated by [`LockState::human_input_allowed`].
 
 use std::time::Instant;
 

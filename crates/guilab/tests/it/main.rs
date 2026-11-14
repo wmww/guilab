@@ -7,6 +7,7 @@ mod cleanup;
 mod events;
 mod input;
 mod sessions;
+mod viewer;
 mod xwayland;
 
 use std::{
@@ -38,8 +39,17 @@ impl Lab {
 
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_guilab"));
-        c.args(args).env("XDG_RUNTIME_DIR", &self.rt).env_remove("GUILAB_SESSION").current_dir("/");
+        // No WAYLAND_DISPLAY: a test's `show` must never open on the real desktop.
+        c.args(args).env("XDG_RUNTIME_DIR", &self.rt).env_remove("GUILAB_SESSION").env_remove("WAYLAND_DISPLAY").current_dir("/");
         c
+    }
+
+    /// Runs `guilab ARGS` with extra environment; returns (success, stdout, stderr).
+    pub fn try_run_env(&self, env: &[(&str, &str)], args: &[&str]) -> (bool, String, String) {
+        let mut c = self.cmd(args);
+        c.envs(env.iter().copied());
+        let out = c.output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
     }
 
     /// Runs `guilab ARGS`; returns (success, stdout, stderr).

@@ -103,12 +103,12 @@ impl Conn {
     }
 }
 
-pub fn run_server(idle_exit: u64) -> Result<(), String> {
+pub fn run_server(idle_exit: u64, show: Option<PathBuf>) -> Result<(), String> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("GUILAB_LOG").unwrap_or_else(|_| "warn,guilab_server=info,guilab_compositor=info".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("GUILAB_LOG").unwrap_or_else(|_| "warn,guilab_server=info,guilab_compositor=info,guilab_viewer=info".into()))
         .with_writer(std::io::stderr)
         .init();
-    let opts = guilab_server::Options { idle_exit: (idle_exit > 0).then(|| Duration::from_secs(idle_exit)) };
+    let opts = guilab_server::Options { idle_exit: (idle_exit > 0).then(|| Duration::from_secs(idle_exit)), show };
     guilab_server::run(opts).map_err(|e| format!("{e:#}"))
 }
 

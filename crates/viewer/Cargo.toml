@@ -1,0 +1,25 @@
+[package]
+name = "guilab-viewer"
+description = "guilab's viewer window: egui on a host Wayland window, drawn with the server's GLES renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+test = false # links smithay; see notes/code-map.md
+doctest = false
+
+[dependencies]
+smithay.workspace = true
+calloop.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+rustix.workspace = true
+libc.workspace = true
+sctk = { package = "smithay-client-toolkit", version = "0.20", default-features = false, features = ["xkbcommon"] }
+wayland-client = "0.31"
+wayland-backend = "0.3"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+egui_glow = "0.35"
+glow = "0.17"

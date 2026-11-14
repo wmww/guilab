@@ -218,7 +218,15 @@ fn window_events() {
     lab.run(&["new", "w"]);
     lab.run(&["run", "--", "python3", &app("gtk_app.py")]);
     lab.wait_tree("w", 10, |t| !crate::nodes(t).is_empty());
-    let ev = lab.log_json(&["--kind", "window"]);
+    // Windows are diffed on the next frame, which may come just after `tree` saw it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let ev = loop {
+        let ev = lab.log_json(&["--kind", "window"]);
+        if !kinds(&ev).is_empty() || Instant::now() > deadline {
+            break ev;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(ev[0]["kind"], "window_map", "{ev:?}");
     assert_eq!(ev[0]["window"], "toplevel");
     lab.run(&["kill"]);

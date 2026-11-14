@@ -83,7 +83,19 @@ impl Server {
     pub(crate) fn handle(&mut self, req: Request, stream: &UnixStream) -> Option<Response> {
         let Request { target, cmd } = req;
         let r = match cmd {
-            Command::Ping => Response::ok(&self.info),
+            Command::Ping => {
+                let mut info = self.info.clone();
+                info.viewer = self.viewer_info();
+                Response::ok(info)
+            }
+            Command::Show { display } => {
+                let Ok(stream) = stream.try_clone() else { return Some(Response::err("internal: clone stream")) };
+                return self.show(display, Some(stream));
+            }
+            Command::Hide => {
+                self.hide_viewer(None);
+                Response::ok(())
+            }
             Command::Shutdown => {
                 self.stop = true;
                 Response::ok(())
@@ -303,7 +315,7 @@ impl Server {
                     Response::ok(())
                 }
             },
-            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } => unreachable!(),
+            Command::Ping | Command::Shutdown | Command::Ls | Command::New { .. } | Command::Show { .. } | Command::Hide => unreachable!(),
         };
         Some(r)
     }
