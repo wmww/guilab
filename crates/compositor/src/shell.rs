@@ -4,8 +4,11 @@
 //!
 //! Policy: a parentless toplevel fills the output (tiled, maximized, activated) if no other
 //! tiled toplevel exists. Dialogs (with a parent) and later toplevels float, centered on the
-//! output. Placement is decided at the initial configure, since `set_parent` arrives after
-//! `get_toplevel`. Windows enter the space on their first buffer.
+//! output, cascaded (offset down-right) where another float already sits, so none hides
+//! another for good. Floats keep that offset from the center as they resize; a move
+//! (`xdg_toplevel.move`, i.e. a title-bar drag) changes it. Placement is decided at the
+//! initial configure, since `set_parent` arrives after `get_toplevel`. Windows enter the
+//! space on their first buffer.
 
 use std::{cell::Cell, time::Instant};
 
@@ -37,7 +40,16 @@ use crate::{focus::KbFocus, session::Session, xwayland::is_or};
 #[derive(Default)]
 pub struct WindowState {
     pub tiled: Cell<bool>,
+    /// A floating window's offset from the centered position (cascade or user moves).
+    pub offset: Cell<Point<i32, Logical>>,
 }
+
+fn offset(w: &Window) -> Point<i32, Logical> {
+    w.user_data().get::<WindowState>().map(|s| s.offset.get()).unwrap_or_default()
+}
+
+/// Cascade step for floats that would land on another one.
+const CASCADE: i32 = 32;
 
 pub fn is_tiled(w: &Window) -> bool {
     w.user_data().get::<WindowState>().is_some_and(|s| s.tiled.get())
@@ -90,13 +102,54 @@ impl Session {
         });
     }
 
-    /// Where a floating window goes: centered on the output, top-left kept on screen.
-    fn centered(&self, w: &Window) -> Point<i32, Logical> {
+    /// Where a floating Wayland window goes: centered on the output plus its offset, kept
+    /// on screen (all of it if it fits, else its top-left).
+    fn float_loc(&self, w: &Window) -> Point<i32, Logical> {
         let area = self.output_rect();
         let size = w.geometry().size;
         let x = area.loc.x + ((area.size.w - size.w) / 2).max(0);
         let y = area.loc.y + ((area.size.h - size.h) / 2).max(0);
-        (x, y).into()
+        clamp_on(area, size, Point::from((x, y)) + offset(w))
+    }
+
+    /// Picks a new float's offset: the first cascade step (from the center) where it
+    /// neither covers nor hides behind another floating window entirely, nor shares its
+    /// top-left (either could leave one unreachable). `base`: its spot with no offset.
+    pub(crate) fn cascade(&self, w: &Window, base: Point<i32, Logical>) {
+        let area = self.output_rect();
+        let size = w.geometry().size;
+        let others: Vec<Rectangle<i32, Logical>> = self
+            .space
+            .elements()
+            .filter(|o| *o != w && !is_tiled(o) && !is_or(o))
+            .filter_map(|o| Some(Rectangle::new(self.space.element_location(o)?, o.geometry().size)))
+            .collect();
+        let clash = |r: Rectangle<i32, Logical>| {
+            others.iter().any(|o| o.contains_rect(r) || r.contains_rect(*o) || ((o.loc.x - r.loc.x).abs() < CASCADE / 2 && (o.loc.y - r.loc.y).abs() < CASCADE / 2))
+        };
+        let fits = |p: Point<i32, Logical>| p.x + size.w <= area.loc.x + area.size.w && p.y + size.h <= area.loc.y + area.size.h;
+        let off = (1..16)
+            .map(|k| Point::<i32, Logical>::from((k * CASCADE, k * CASCADE)))
+            .take_while(|o| fits(base + *o))
+            .find(|o| !clash(Rectangle::new(base + *o, size)));
+        let off = if clash(Rectangle::new(base, size)) { off.unwrap_or_default() } else { Point::default() };
+        if let Some(st) = w.user_data().get::<WindowState>() {
+            st.offset.set(off);
+        }
+    }
+
+    /// Moves a floating window to `loc` (an interactive move) and keeps it there as an
+    /// offset from the center.
+    pub(crate) fn drag_window(&mut self, w: &Window, loc: Point<i32, Logical>) {
+        let Some(cur) = self.space.element_location(w) else { return };
+        let Some(st) = w.user_data().get::<WindowState>() else { return };
+        st.offset.set(st.offset.get() + (loc - cur));
+        if w.x11_surface().is_some() {
+            self.x_place(w);
+        } else {
+            let loc = self.float_loc(w);
+            self.move_window(w, loc);
+        }
     }
 
     /// xdg-shell part of the commit handler.
@@ -110,7 +163,10 @@ impl Session {
                 self.last_configure = Instant::now();
             } else if has_buffer(surface) {
                 self.unmapped.remove(idx);
-                let loc = if is_tiled(&w) { self.output_rect().loc } else { self.centered(&w) };
+                if !is_tiled(&w) {
+                    self.cascade(&w, self.float_loc(&w));
+                }
+                let loc = if is_tiled(&w) { self.output_rect().loc } else { self.float_loc(&w) };
                 self.space.map_element(w.clone(), loc, false);
                 self.focus_window(&w);
             }
@@ -125,7 +181,7 @@ impl Session {
                 self.unmapped.push(w);
                 self.focus_top();
             } else if !is_tiled(&w) {
-                let loc = self.centered(&w);
+                let loc = self.float_loc(&w);
                 self.move_window(&w, loc);
             }
             return;
@@ -231,7 +287,7 @@ impl Session {
                 tl.send_pending_configure();
             }
             if self.space.element_location(&w).is_some() {
-                let loc = if is_tiled(&w) { area.loc } else { self.centered(&w) };
+                let loc = if is_tiled(&w) { area.loc } else { self.float_loc(&w) };
                 self.move_window(&w, loc);
             }
         }
@@ -323,6 +379,12 @@ impl XdgShellHandler for Session {
         }
     }
 
+    fn move_request(&mut self, surface: ToplevelSurface, _: wl_seat::WlSeat, serial: Serial) {
+        if let Some(w) = self.window_for_surface(surface.wl_surface()) {
+            self.start_move(&w, surface.wl_surface(), Some(serial));
+        }
+    }
+
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         // Tiled windows are already maximized; floating ones stay as they are.
         self.reply_configure(&surface);
@@ -378,4 +440,11 @@ pub fn has_pending_configure(surface: &WlSurface) -> bool {
         let committed = s.cached_state.get::<ToplevelCachedState>().current().last_acked.as_ref().map(|c| c.serial);
         !d.pending_configures().is_empty() || acked != committed
     })
+}
+
+/// `loc` moved so a window of `size` stays inside `area` (its top-left, if it's bigger).
+pub(crate) fn clamp_on(area: Rectangle<i32, Logical>, size: smithay::utils::Size<i32, Logical>, loc: Point<i32, Logical>) -> Point<i32, Logical> {
+    let max_x = area.loc.x + (area.size.w - size.w).max(0);
+    let max_y = area.loc.y + (area.size.h - size.h).max(0);
+    (loc.x.clamp(area.loc.x, max_x), loc.y.clamp(area.loc.y, max_y)).into()
 }

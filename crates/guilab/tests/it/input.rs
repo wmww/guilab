@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::{Lab, app, have, nodes};
+use crate::{Lab, app, have, nodes, rect};
 
 pub fn has_python_module(check: &str) -> bool {
     let ok = std::process::Command::new("python3").args(["-c", check]).status().is_ok_and(|s| s.success());
@@ -184,15 +184,31 @@ fn gtk_focus_between_floating_windows() {
     lab.wait_tree("s1", 10, |t| t.as_array().unwrap().len() == 3);
     let t = lab.lock();
     let (ex, ey) = center(&l, "entry", 1.0);
-    // float A (300x200, centered) is on top of float B; the main window is tiled below.
-    lab.input(&t, &["move", "400", "300", "click", "type", "a", "move", &ex, &ey, "click", "type", "m"]);
+    let float = |title: &str| {
+        let tree = lab.json(&["tree"]);
+        rect(tree.as_array().unwrap().iter().find(|n| n["title"] == title).unwrap_or_else(|| panic!("no {title}: {tree}")))
+    };
+    let (a, b) = (float("float A"), float("float B"));
+    // Cascaded: neither float can hide the other entirely.
+    let inside = |i: (i64, i64, i64, i64), o: (i64, i64, i64, i64)| i.0 >= o.0 && i.1 >= o.1 && i.0 + i.2 <= o.0 + o.2 && i.1 + i.3 <= o.1 + o.3;
+    assert!(!inside(a, b) && !inside(b, a), "A {a:?} B {b:?}");
+    let s = |v: i64| v.to_string();
+    let (acx, acy) = (a.0 + a.2 / 2, a.1 + a.3 / 2);
+    lab.input(&t, &["move", &s(acx), &s(acy), "click", "type", "a", "move", &ex, &ey, "click", "type", "m"]);
     wait_log(&log, "A 'a'", 5);
     wait_log(&log, "entry 'm'", 5);
     // Focusing the tiled window keeps the floats above it.
     let tree = lab.json(&["tree"]);
     let titles: Vec<&str> = tree.as_array().unwrap().iter().map(|n| n["title"].as_str().unwrap()).collect();
     assert_eq!(titles.last(), Some(&"guilab input"), "{titles:?}");
-    assert_eq!(lab.input(&t, &["move", "400", "300"])["under"], tree[0]["id"]);
+    assert_eq!(lab.input(&t, &["move", &s(acx), &s(acy)])["under"], tree[0]["id"]);
+    // A title-bar drag moves a float (xdg_toplevel.move), and it stays put on resize.
+    lab.input(&t, &["move", &s(acx), &s(a.1 + 12), "down", "move", &s(acx - 20), &s(a.1 + 2), "50", "move", &s(acx - 100), &s(a.1 - 68), "200", "up"]);
+    let moved = float("float A");
+    assert_eq!((moved.0, moved.1), (a.0 - 100, a.1 - 80), "A didn't follow the drag: {moved:?}");
+    lab.run(&["-t", &t, "output", "-s", "900x700"]);
+    let after = float("float A");
+    assert_eq!((after.0, after.1), (moved.0 + 50, moved.1 + 50), "A lost its offset from the center: {after:?}");
 }
 
 #[test]

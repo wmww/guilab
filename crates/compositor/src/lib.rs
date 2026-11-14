@@ -8,6 +8,7 @@ mod clipboard;
 mod cursor;
 mod focus;
 mod frame;
+mod grabs;
 mod handlers;
 mod input;
 mod keys;

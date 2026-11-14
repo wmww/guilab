@@ -138,9 +138,10 @@ impl Session {
         let full = x.last_configure().size;
         let size = (full.w.clamp(1, area.size.w.max(1)), full.h.clamp(1, area.size.h.max(1)));
         let vis = (geo.size.w.min(area.size.w), geo.size.h.min(area.size.h));
-        let x0 = area.loc.x + ((area.size.w - vis.0) / 2).max(0) - geo.loc.x;
-        let y0 = area.loc.y + ((area.size.h - vis.1) / 2).max(0) - geo.loc.y;
-        Rectangle::new((x0, y0).into(), size.into())
+        let off = w.user_data().get::<WindowState>().map(|s| s.offset.get()).unwrap_or_default();
+        let centered = smithay::utils::Point::<i32, Logical>::from((area.loc.x + ((area.size.w - vis.0) / 2).max(0), area.loc.y + ((area.size.h - vis.1) / 2).max(0)));
+        let at = crate::shell::clamp_on(area, vis.into(), centered + off) - geo.loc;
+        Rectangle::new(at, size.into())
     }
 
     /// Configures a managed X window per the policy and puts it in the space there.
@@ -211,6 +212,9 @@ impl XwmHandler for Session {
         w.user_data().get::<WindowState>().unwrap().tiled.set(tiled);
         if tiled {
             let _ = x.set_maximized(true);
+        } else {
+            let base = self.x_rect(&w, &x).loc + w.geometry().loc;
+            self.cascade(&w, base);
         }
         self.x_place(&w);
         self.focus_window(&w);
@@ -302,7 +306,11 @@ impl XwmHandler for Session {
     }
 
     fn resize_request(&mut self, _: XwmId, _: X11Surface, _: u32, _: ResizeEdge) {}
-    fn move_request(&mut self, _: XwmId, _: X11Surface, _: u32) {}
+    fn move_request(&mut self, _: XwmId, x: X11Surface, _: u32) {
+        if let (Some(w), Some(s)) = (self.x_window(&x), x.wl_surface()) {
+            self.start_move(&w, &s, None);
+        }
+    }
 
     fn active_window_request(&mut self, _: XwmId, x: X11Surface, _: u32, _: Option<X11Surface>) {
         if let Some(w) = self.x_window(&x) {

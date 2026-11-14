@@ -7,6 +7,7 @@
   - `handlers.rs`: all smithay handler traits except xdg-shell and X11, `delegate_dispatch2!`, surface ids (`SurfaceId` in each surface's data map, assigned in `new_surface`), dmabuf blocker pre-commit hook, `SelData` (owner of a compositor-side selection: `clip set` text or an X client).
   - `shell.rs`: xdg-shell + decoration. Window policy, focus and stacking for Wayland and X windows (`focus_window`, `parent_window`, `move_window`), popups (anvil's unconstrain + grab), `relayout` after output changes.
   - `xwayland.rs`: per-session Xwayland + `XwmHandler` (from anvil's `shell/x11.rs`): spawn on our display range, X window policy (`x_place`), override-redirect stacking (`xw.or`), clipboard/primary bridging.
+  - `grabs.rs`: `MoveGrab`, the pointer grab for interactive window moves.
   - `focus.rs`: `KbFocus` (keyboard focus: `WlSurface` or `X11Surface`; the X arm does SetInputFocus/WM_TAKE_FOCUS). Pointer/touch focus stay `WlSurface` (smithay's X11Surface targets only forward to it; X menus grab inside Xwayland).
   - `cursor.rs`: the apps' cursor (`AppCursor`: named, hidden, or a rendered cursor surface), theme cursors, drawing it into `screenshot --cursor`.
   - `frame.rs`: `tick()` (render, presentation feedback, frame callbacks), settle detection, PNG writing, `set_output`.
@@ -39,7 +40,7 @@
 - The server blocks SIGTERM/SIGINT/SIGHUP (calloop signalfd) and ignores SIGPIPE; `std::process::Command` doesn't reset either, so `spawn` clears the mask in `pre_exec`. Without that, apps ignore SIGTERM.
 - At fractional scales a tiled window can be one pixel larger than the output (500 px / 1.5 = 333.3 logical, rounded up to 334). `tree` reports it honestly.
 - `tree` lists toplevels topmost first, coordinates in output pixels (edges rounded half-down).
-- Window policy: a parentless toplevel tiles if no other tiled one exists; otherwise it floats, centered, with `bounds` = output (so an oversized default size fills the output anyway).
+- Window policy: a parentless toplevel tiles if no other tiled one exists; otherwise it floats, centered plus `WindowState::offset` (set by `cascade` at first map, changed by moves: `grabs.rs` `MoveGrab` → `drag_window`), clamped on screen (`clamp_on`), with `bounds` = output (so an oversized default size fills the output anyway). X floats use the same offset in `x_rect`.
 - Popups are positioned by smithay's positioner (flip/slide/resize) against the output, relative to their parent window.
 - Stacking: floating windows always above tiled, dialogs above their parents (`focus_window`), X override-redirect windows above all (re-raised in X order after every restack). Click/touch-down focuses and raises, unless a grab is active; override-redirect windows never take focus. `Space::map_element` always raises, so moving a window goes through `move_window`.
 - X windows live in the same `Space<Window>` (`Window::new_x11_window`), so rendering, hit-testing, `on ID` and screenshots need nothing special. Space position = X position (`configure_notify` keeps them in sync), which X menus rely on. X surfaces get a new wl_surface (and so a new `tree` id) on every map; the xid stays. Settle counts mapped X windows: one without a buffer yet is "drawing".
