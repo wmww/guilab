@@ -119,10 +119,10 @@ impl Chat {
                     ui.weak("+ open drawing").on_hover_text("Sent with the next message");
                 }
                 let has_images = sketch.queued() > 0 || sketch.drawing_open();
-                let can_send = !self.draft.trim().is_empty() || has_images;
                 let draft_id = self.id.with("draft");
                 let focused = ui.memory(|m| m.has_focus(draft_id));
-                // Plain Enter sends; take it before the text box turns it into a newline.
+                // Plain Enter sends; take it before the text box turns it into a newline (and
+                // decide after the box took this pass's typing, which may precede the Enter).
                 let enter = focused && ui.input_mut(crate::consume_plain_enter);
                 // A rounded box holding the text and a round send button; a dim outline,
                 // a little brighter while typing.
@@ -149,6 +149,7 @@ impl Chat {
                                 .min_size(vec2(0.0, button))
                                 .desired_width(ui.available_width() - button - 8.0);
                             ui.add(edit);
+                            let can_send = !self.draft.trim().is_empty() || has_images;
                             click = send_button(ui, button, can_send).clicked();
                         });
                     });
@@ -156,7 +157,7 @@ impl Chat {
                 if boxed.response.interact(Sense::click()).clicked() {
                     ui.memory_mut(|m| m.request_focus(draft_id));
                 }
-                if (enter || click) && can_send {
+                if (enter || click) && (!self.draft.trim().is_empty() || has_images) {
                     sent = Some(Outgoing { text: self.draft.trim().to_string(), images: sketch.take_all() });
                     self.draft.clear();
                     // Follow the conversation again (the sent message arrives as a feed item).

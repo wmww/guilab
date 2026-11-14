@@ -316,3 +316,18 @@ fn app_cursors() {
     let blocked = look("image");
     assert!(red(&blocked) == 0 && white(&blocked) > 10, "locked: not the not-allowed cursor");
 }
+
+/// Scripted input without pauses: a click on the message box that comes with the pointer's
+/// first move still focuses it, and keys typed right after the click go to it, not the app.
+#[test]
+fn click_then_type() {
+    let Some((h, sock, t)) = host() else { return };
+    h.run(&["-t", &t, "unlock"]);
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "800x600"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    h.run(&["debug", "input", "move", "600", "777", "click", "type", "hello", "key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    assert!(out.contains("human message: \"hello\""), "{out}{err}");
+}

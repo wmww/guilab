@@ -54,7 +54,8 @@ impl LockState {
             if !force {
                 return Err(format!(
                     "session '{session}' is already locked (since {}, last used {}). Wait for the holder to \
-                     `guilab unlock`, or take it over with `guilab lock --force` if they're gone.",
+                     `guilab unlock`, or take it over with `guilab lock --force` if they're gone. If it's your own \
+                     lock and you lost the token: `guilab lock --force` gives you a new one.",
                     ago(l.since),
                     ago(l.last_used)
                 ));

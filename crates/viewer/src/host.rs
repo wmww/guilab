@@ -339,9 +339,26 @@ impl HostState {
         !self.events.is_empty() || self.keyboard_left
     }
 
-    /// Takes the recorded input.
+    /// Takes the recorded input, up to where egui must run a pass before seeing the rest
+    /// (the rest stays for the next pass):
+    /// - after a button press or release: a click moves focus, and the keys typed right
+    ///   after it must be routed by the new focus; egui also detects one click per pass;
+    /// - before a press that follows motion: egui needs a pass with the pointer there
+    ///   (hover) first, or the click is lost when it comes with the pointer's first move.
     pub fn take_input(&mut self) -> Vec<HostInput> {
-        std::mem::take(&mut self.events)
+        let mut moved = false;
+        let mut end = self.events.len();
+        for (i, e) in self.events.iter().enumerate() {
+            match e {
+                HostInput::Egui(egui::Event::PointerButton { pressed, .. }) => {
+                    end = if *pressed && moved { i } else { i + 1 };
+                    break;
+                }
+                HostInput::Egui(egui::Event::PointerMoved(_)) => moved = true,
+                _ => {}
+            }
+        }
+        self.events.drain(..end).collect()
     }
 
     /// Buffer size in physical pixels.

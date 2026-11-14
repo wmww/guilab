@@ -24,6 +24,8 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 
 ## Input (host.rs, ui.rs)
 - Host input is one ordered list (`HostInput`: egui events and raw evdev keys), so "click, type, click" stays in order when one frame has all of it. egui gets the egui events (minus Key/Text when keys go to the session); the UI walks the full list.
+- `HostState::take_input` hands out one batch per UI pass: it ends after a button event, and before a press that follows motion. So keys typed right after a click are routed by the focus that click gave (keys go to the session unless egui wants them, decided per pass), a click arriving with the pointer's first move isn't lost (egui needs a hover pass), and egui sees one click per pass. Leftover input keeps `has_input` true, so the next tick runs the next batch. Scripted viewer tests need no sleeps between steps for this.
+- `Chat` decides Enter-sends after the text box took the pass's typing ("type hello key Return" in one pass sends "hello").
 - Keys are forwarded as raw evdev codes (+8 = xkb code), so the session keeps its own keymap. Modifiers reach egui via `update_modifiers`.
 - The UI tracks the buttons and keys it pressed in a session and releases them on tab switch, lock (blocked), keyboard leave and hide.
 - Pinch and swipe (`zwp_pointer_gesture_*_v1`, bound by hand) arrive as `HostInput::Gesture`. A gesture that begins over the image with "Use the app" goes to the app whole; otherwise a pinch zooms the view at the pointer and a swipe does nothing.
@@ -42,7 +44,6 @@ Built in plan steps 6-7 (`crates/viewer`, `crates/markup`, `crates/server/src/vi
 - Panel order matters in egui: tabs (top), toolbar (left, full height), chat (bottom), then the central session view. The toolbar must come before the chat panel or a tall chat panel cuts it off.
 - The UI only runs when the viewer draws. When it ran on input but couldn't present (waiting for a frame callback), `Viewer::draw` sets `host.dirty` so the new state still gets shown.
 - The frozen screenshot arrives one frame after the press (`Action::Freeze` -> server -> `set_screenshot`); the first mark is already being dragged on the live image meanwhile.
-- Several clicks inside one UI pass (a chain without sleeps) confuse egui's click detection; tests sleep ~150 ms between steps.
 - Feed scrolling: egui's `stick_to_bottom` lost track after `scroll_to_cursor`; `Chat` tracks "at the end" itself from the `ScrollArea` output and follows new items only then (and after sending). A frame that asked to scroll to the end counts as at the end (the scroll lands next frame).
 - The text box uses a non-wrapping layouter: computing its width before the TextEdit sees the frame's typed text made it wrap.
 
