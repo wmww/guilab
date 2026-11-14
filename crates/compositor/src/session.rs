@@ -18,7 +18,6 @@ use std::{
 
 use anyhow::Context;
 use smithay::{
-    backend::renderer::element::RenderElementStates,
     desktop::{PopupManager, Space, Window},
     input::{Seat, SeatState, keyboard::{Keycode, Keysym, XkbConfig, xkb}, pointer::CursorImageStatus},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
@@ -138,25 +137,11 @@ pub struct Session {
     pub unmapped: Vec<Window>,
 
     pub frame: Frame,
-    /// Element states of the last render, for primary-scanout tracking.
-    pub last_states: Option<RenderElementStates>,
     pub frame_seq: u64,
 
     pub procs: Procs,
     pub next_surface_id: u32,
-    /// Settle tracking.
-    pub last_commit: Instant,
-    pub last_render: Instant,
-    /// When we last sent a toplevel configure.
-    pub last_configure: Instant,
-    /// When input was last delivered (settle waits for the app to react).
-    pub last_input: Instant,
-    /// Start of the current run of commits without a `SETTLE_QUIET` gap (animation check).
-    pub busy_since: Instant,
-    /// The last `run`: when, and the app's id (settle waits for its first window).
-    pub last_spawn: Option<(Instant, u32)>,
-    /// When a toplevel last appeared.
-    pub last_map: Instant,
+    pub(crate) settle: crate::settle::Times,
     /// Something may have changed what's on screen since the last render (client
     /// requests, commands, input). Idle sessions skip rendering.
     pub dirty: bool,
@@ -297,7 +282,6 @@ impl Session {
         space.map_output(&output, (0, 0));
         let frame = Frame::new(&output);
 
-        let now = Instant::now();
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let session = Session {
             tag: format!("{}-{}-{nonce:x}", std::process::id(), cfg.name),
@@ -334,17 +318,10 @@ impl Session {
             popups: PopupManager::default(),
             unmapped: Vec::new(),
             frame,
-            last_states: None,
             frame_seq: 0,
             procs: Procs::default(),
             next_surface_id: 1,
-            last_commit: now,
-            last_render: now,
-            last_configure: now,
-            last_input: now,
-            busy_since: now,
-            last_spawn: None,
-            last_map: now,
+            settle: crate::settle::Times::new(),
             dirty: true,
             keymap,
             extra_keys: Vec::new(),

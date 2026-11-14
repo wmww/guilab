@@ -4,7 +4,7 @@
 //!
 //! Positions here are global logical coordinates; callers convert from output pixels.
 
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use smithay::{
     backend::input::{AxisSource, ButtonState, InputTime, KeyState},
@@ -273,7 +273,7 @@ impl Session {
 
     /// Delivers one event to the seat. The only way input reaches clients.
     pub fn inject(&mut self, ev: InputEvent, source: InputSource) {
-        self.last_input = Instant::now();
+        self.settle.note_input();
         self.dirty = true;
         let time = InputTime::now();
         if source == InputSource::Human {

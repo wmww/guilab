@@ -10,7 +10,7 @@
 //! initial configure, since `set_parent` arrives after `get_toplevel`. Windows enter the
 //! space on their first buffer.
 
-use std::{cell::Cell, time::Instant};
+use std::cell::Cell;
 
 use smithay::{
     desktop::{
@@ -165,8 +165,7 @@ impl Session {
             let tl = w.toplevel().unwrap().clone();
             if !tl.is_initial_configure_sent() {
                 self.apply_policy(&w);
-                tl.send_configure();
-                self.last_configure = Instant::now();
+                self.configure(&tl, true);
             } else if has_buffer(surface) {
                 self.unmapped.remove(idx);
                 if !is_tiled(&w) {
@@ -247,12 +246,10 @@ impl Session {
             self.space.raise_element(c, false);
         }
         self.raise_or();
-        self.last_configure = Instant::now();
-        for e in self.space.elements() {
-            if let Some(tl) = e.toplevel()
-                && tl.is_initial_configure_sent()
-            {
-                tl.send_pending_configure();
+        let toplevels: Vec<ToplevelSurface> = self.space.elements().filter_map(|e| e.toplevel().cloned()).collect();
+        for tl in toplevels {
+            if tl.is_initial_configure_sent() {
+                self.configure(&tl, false);
             }
         }
         self.x_sync_stacking(w);
@@ -275,7 +272,6 @@ impl Session {
     /// floating ones the new bounds and are re-centered.
     pub(crate) fn relayout(&mut self) {
         let area = self.output_rect();
-        self.last_configure = Instant::now();
         let windows: Vec<Window> = self.space.elements().chain(self.unmapped.iter()).cloned().collect();
         for w in windows {
             if w.x11_surface().is_some_and(|x| !x.is_override_redirect()) && self.space.element_location(&w).is_some() {
@@ -290,7 +286,8 @@ impl Session {
                 }
             });
             if tl.is_initial_configure_sent() {
-                tl.send_pending_configure();
+                let tl = tl.clone();
+                self.configure(&tl, false);
             }
             if self.space.element_location(&w).is_some() {
                 let loc = if is_tiled(&w) { area.loc } else { self.float_loc(&w) };
@@ -313,11 +310,24 @@ impl Session {
 }
 
 impl Session {
+    /// Sends a toplevel configure (only if its state changed, unless `always`). Every
+    /// configure goes through here, so settle knows one may be unanswered.
+    pub(crate) fn configure(&mut self, tl: &ToplevelSurface, always: bool) {
+        let sent = if always {
+            tl.send_configure();
+            true
+        } else {
+            tl.send_pending_configure().is_some()
+        };
+        if sent {
+            self.settle.note_configure();
+        }
+    }
+
     fn reply_configure(&mut self, surface: &ToplevelSurface) {
         // The protocol wants a configure in reply even when we change nothing.
         if surface.is_initial_configure_sent() {
-            surface.send_configure();
-            self.last_configure = Instant::now();
+            self.configure(surface, true);
         }
     }
 }
@@ -414,8 +424,7 @@ impl XdgDecorationHandler for Session {
     fn request_mode(&mut self, toplevel: ToplevelSurface, _: DecoMode) {
         self.new_decoration(toplevel.clone());
         if toplevel.is_initial_configure_sent() {
-            toplevel.send_pending_configure();
-            self.last_configure = Instant::now();
+            self.configure(&toplevel, false);
         }
     }
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {

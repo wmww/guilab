@@ -1,6 +1,6 @@
 //! smithay handler traits for `Session` (except xdg-shell, see `shell.rs`).
 
-use std::{os::fd::OwnedFd, sync::Arc, time::Instant};
+use std::{os::fd::OwnedFd, sync::Arc};
 
 use smithay::{
     backend::{allocator::dmabuf::Dmabuf, renderer::utils::on_commit_buffer_handler},
@@ -105,11 +105,7 @@ impl CompositorHandler for Session {
         if self.cursor_commit(surface) {
             return;
         }
-        let now = Instant::now();
-        if now.duration_since(self.last_commit) >= crate::frame::SETTLE_QUIET {
-            self.busy_since = now;
-        }
-        self.last_commit = now;
+        self.settle.note_commit();
         self.dirty = true;
         tracing::trace!(surface = surface_id(surface), "commit");
         if !is_sync_subsurface(surface) {

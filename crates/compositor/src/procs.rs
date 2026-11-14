@@ -128,7 +128,7 @@ impl Session {
             })
             .map_err(|e| e.error)?;
         self.procs.list.push(Proc { info: info.clone(), child: Some(child), kill_at: None, killed: false });
-        self.last_spawn = Some((Instant::now(), id));
+        self.settle.note_spawn(id);
         Ok(info)
     }
 

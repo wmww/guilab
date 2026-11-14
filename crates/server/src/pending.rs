@@ -8,18 +8,14 @@ use std::{
     io::{ErrorKind, Read},
     os::unix::net::UnixStream,
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use guilab_compositor::{Chain, Settle, XState};
+use guilab_compositor::{Chain, XState};
 use guilab_image::RenderOpts;
 use guilab_proto::{ProcInfo, Response, ShotInfo, Tiers, events::PollInfo};
 
 use crate::{Server, requests::read_messages};
-
-/// Settle wait caps: once a window is up, and while waiting for the first window.
-const SETTLE_CAP: Duration = Duration::from_secs(3);
-const MAP_CAP: Duration = Duration::from_secs(10);
 
 pub(crate) struct Pending {
     pub session: String,
@@ -145,18 +141,7 @@ impl Server {
         let s = &mut slot.session;
         match &mut p.wait {
             Wait::Shot { path, settle, cursor, crop, max, start } => {
-                let waited = now.duration_since(*start);
-                let state = s.settle_state(now);
-                let settled = match state {
-                    Settle::Settled => Some(true),
-                    Settle::Animating => Some(false),
-                    // Nothing that could ever draw: don't wait.
-                    Settle::NoWindow if s.running_apps() == 0 => Some(true),
-                    Settle::NoWindow => (waited >= MAP_CAP).then_some(false),
-                    Settle::Busy => (waited >= SETTLE_CAP).then_some(false),
-                };
-                let settled = if *settle { settled } else { Some(state == Settle::Settled) };
-                let Some(settled) = settled else { return Step::Wait };
+                let Some(ready) = s.shot_ready(now, now.duration_since(*start), *settle) else { return Step::Wait };
                 let shot = images.capture(s, slot.group, *cursor, true, *crop).and_then(|id| {
                     let img = images.get(id.as_str())?;
                     let r = images.render_file(&img, &RenderOpts { max: *max, ..Default::default() }, &s.dir, path.as_deref())?;
@@ -165,12 +150,11 @@ impl Server {
                 Step::Reply(match shot {
                     Ok((img, r)) => {
                         s.log.push(guilab_proto::EventData::Screenshot { image: img.id.to_string(), path: r.path.clone() }, p.key.as_deref());
-                        let animating = state == Settle::Animating;
                         let [cw, ch] = img.body.canvas;
                         let cropped = cropped_windows(&s.tree(), cw as i32, ch as i32);
                         let header = images.header(&img);
                         let (path, width, height, shows, zoom) = (r.path, r.width, r.height, r.shows, r.zoom);
-                        Response::ok(ShotInfo { image: img.id.to_string(), header, path, width, height, shows, zoom, settled, animating, cropped })
+                        Response::ok(ShotInfo { image: img.id.to_string(), header, path, width, height, shows, zoom, settled: ready.settled, animating: ready.animating, cropped })
                     }
                     Err(e) => Response::err(e),
                 })

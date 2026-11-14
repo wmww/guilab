@@ -18,35 +18,7 @@ use smithay::{
     wayland::{compositor::send_surface_state, fractional_scale::with_fractional_scale, presentation::Refresh},
 };
 
-use smithay::desktop::PopupManager;
-
-use crate::{
-    session::Session,
-    shell::{has_buffer, has_pending_configure},
-};
-
-/// No commits for this long counts as "done drawing" (a blinking cursor still passes).
-pub const SETTLE_QUIET: Duration = Duration::from_millis(150);
-/// Commits without a quiet gap for this long count as an animation (spinner, video): its
-/// screenshots stop waiting for quiet (see [`Settle::Animating`]).
-pub const ANIM_DETECT: Duration = Duration::from_secs(1);
-/// While animating, how long after the last input a screenshot waits (the app reacting).
-pub const ANIM_REACT: Duration = Duration::from_millis(300);
-/// A window from the last `run` is expected this long; until then the session is busy.
-pub const NEW_APP_WAIT: Duration = Duration::from_secs(3);
-/// How long an unanswered configure (not acked, or acked but not committed) keeps a session
-/// busy. Bounded because clients may ack without committing when nothing changes for them.
-pub const CONFIGURE_WAIT: Duration = Duration::from_secs(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Settle {
-    /// No toplevel has a buffer yet.
-    NoWindow,
-    Busy,
-    /// Done except that something keeps redrawing: as settled as it gets.
-    Animating,
-    Settled,
-}
+use crate::session::Session;
 
 impl Session {
     /// One frame: render (only if something may have changed), frame callbacks, cleanup.
@@ -80,7 +52,7 @@ impl Session {
         let icon = self.dnd_icon.clone();
         let pointer = self.pointer_location();
         let res = self.frame.render(&mut gpu.borrow_mut(), &self.output, &self.space, icon.as_ref().map(|s| (s, pointer)));
-        self.last_render = Instant::now();
+        self.settle.note_render();
         let now = self.clock.now();
         let output = self.output.clone();
         match res {
@@ -102,51 +74,12 @@ impl Session {
                     }
                     fb.presented(now, Refresh::fixed(self.refresh_interval()), self.frame_seq, wp_presentation_feedback::Kind::Vsync);
                 }
-                self.last_states = Some(r.states);
             }
             Err(e) => {
                 tracing::warn!("{}: render failed: {e:#}", self.name);
                 self.dirty = true;
             }
         }
-    }
-
-    pub fn settle_state(&self, now: Instant) -> Settle {
-        let mapped: Vec<_> = self.space.elements().filter_map(|w| w.toplevel()).collect();
-        // A configured toplevel without a buffer is still drawing its first frame; so is
-        // a mapped X window without one.
-        let mut drawing = self.unmapped.iter().any(|w| w.toplevel().is_some_and(|t| t.is_initial_configure_sent()));
-        let mut x_windows = 0;
-        for x in self.space.elements().filter_map(|w| w.x11_surface()).filter(|x| !x.is_override_redirect()) {
-            if x.wl_surface().is_some_and(|s| has_buffer(&s)) {
-                x_windows += 1;
-            } else {
-                drawing = true;
-            }
-        }
-        if mapped.is_empty() && x_windows == 0 {
-            return Settle::NoWindow;
-        }
-        // A popup (menu) that hasn't drawn its first frame yet.
-        drawing |= mapped.iter().any(|t| PopupManager::popups_for_surface(t.wl_surface()).any(|(p, _)| !has_buffer(p.wl_surface())));
-        let acked = now.duration_since(self.last_configure) >= CONFIGURE_WAIT
-            || mapped.iter().all(|t| !has_pending_configure(t.wl_surface()));
-        // The app from the last `run` hasn't shown a window yet (another one is up).
-        let starting = self
-            .last_spawn
-            .is_some_and(|(t, id)| t > self.last_map && now.duration_since(t) < NEW_APP_WAIT && self.is_running(id));
-        if drawing || !acked || starting {
-            return Settle::Busy;
-        }
-        // Input counts as activity: the app hasn't necessarily reacted (committed) yet.
-        let since_input = now.duration_since(self.last_input);
-        let quiet = now.duration_since(self.last_commit) >= SETTLE_QUIET && since_input >= SETTLE_QUIET;
-        let drawn = self.last_render > self.last_commit;
-        if quiet && drawn {
-            return Settle::Settled;
-        }
-        let animating = !quiet && now.duration_since(self.busy_since) >= ANIM_DETECT;
-        if animating && since_input >= ANIM_REACT && drawn { Settle::Animating } else { Settle::Busy }
     }
 
     /// The last rendered frame as opaque RGBA8 (clients may leave alpha 0, e.g. GL areas),
