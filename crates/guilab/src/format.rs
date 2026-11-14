@@ -233,7 +233,7 @@ pub fn print(cmd: &Command, v: serde_json::Value, fmt: &Fmt) -> Result<(), Strin
             if info.unlocked {
                 lines.push("released your lock".into());
             }
-            lines.push("marked done: the human sees you're waiting for them. Wait for their reply with: guilab poll --timeout 600".into());
+            lines.push("marked done: the human sees you're waiting for them. Wait for their reply with: guilab poll --timeout 300 (keep it below your shell's time limit; on timeout, poll again)".into());
             lines.join("\n")
         }
         Command::ClipSet { .. } | Command::Human { .. } | Command::Poll { .. } => return Ok(()),

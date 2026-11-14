@@ -20,17 +20,17 @@ guilab work "testing the login form"   # shown live to the human; needed before 
 guilab lock                         # input needs the lock; prints a token, e.g. gfm7b785
 guilab -t gfm7b785 input move 200 150 click type 'hello' key Return
 guilab done "Login works now, have a look" --image k3f9   # message the human (image optional), release the lock
-guilab poll --timeout 600           # wait for their reply
+guilab poll --timeout 300           # wait for their reply
 guilab end                          # kill everything in the session
 ```
 
-- Commands pick the session automatically: `-S NAME`, else `$GUILAB_SESSION`, else the one started from this worktree, else the only one. Outside git with several sessions, pass `-S` every time. The server starts itself.
+- Commands pick the session automatically: `-S NAME`, else `$GUILAB_SESSION`, else the one started from this worktree, else the only one (outside git, `new` names sessions s1, s2, ...). Outside git with several sessions, pass `-S` every time. The server starts itself.
 - Screenshots go in the session dir, which is deleted by `end`. Use `screenshot -o PATH` for anything you want to keep. `--crop 'X,Y WxH'` shows only that part, `--max WxH` shrinks the PNG, `--cursor` draws the mouse cursor in.
 - `new` prints the session's `WAYLAND_DISPLAY`. You only need it to run a client by hand; `guilab run` sets it up for you.
 - Coordinates everywhere (screenshots, `tree`, `input`) are screenshot pixels, at any scale.
 - Shells don't keep variables between your tool calls, so pass the literal token with `-t` on every command that needs it. While the session is locked, `run`, `kill`, `output`, `clip set` and `end` need it too. Read-only commands never do. If your token stops working, the human revoked it: run `poll` or ask before you `lock` again. Lost your token? `guilab done` releases the lock without it.
 - After a rebuild: `guilab kill && guilab run -- CMD` (`kill` returns once the app is gone).
-- A window can be bigger than the output (apps have minimum sizes); `screenshot` then says it's cut off. Make the output bigger with `guilab output -s WxH`.
+- The first window fills the output, like a maximized window, whatever size it asks for. Dialogs and later windows float on top at their own size. A window can be bigger than the output (apps have minimum sizes); `screenshot` then says it's cut off. Make the output bigger with `guilab output -s WxH`.
 - Each session ends after 30 idle minutes. Don't end sessions you didn't start.
 
 ## Input
@@ -57,11 +57,11 @@ The human runs `guilab show` to open the viewer. There they can watch, use the a
 
 - `guilab work "STATUS"` marks you working, with STATUS shown live (e.g. "rebuilding after the toolbar fix"). Run it again to update it. Add `-m "MSG"` (and `--image ID`) to also post a message while you keep working. `lock` and `input` need it.
 - `guilab done "MSG"` posts MSG (what you did, or what you need from them), releases your lock and shows the human you're waiting for them. Then `guilab poll`. It refuses while a human message is unread. Not needed before `end`.
-- `guilab poll --timeout 600` waits for the next message, revoke, app exit or session expiry. It prints that plus everything else that happened. It exits 2 on timeout; then just poll again. Keep the timeout below your shell tool's own time limit. A blocking poll needs `done` first. `poll --follow` prints one line per event, for tools that watch output (allowed while working).
+- `guilab poll --timeout 300` waits for the next message, revoke, app exit or session expiry. It prints that plus everything else that happened. It exits 2 on timeout; then just poll again. Keep the timeout below your shell tool's own time limit. A blocking poll needs `done` first. `poll --follow` prints one line per event, for tools that watch output (allowed while working).
 - When a human message arrives, every command says so on stderr (`[guilab: a human message waiting since ...; read it now: guilab poll]`), until you run `guilab poll`, which then returns it at once, even while working. Only `poll` shows messages. Reading one marks you working ("read your message"), so finish with `done`.
 - `--image` takes an image id (a screenshot, or one you made with `image make`) or a PNG/JPEG/SVG file.
 - Messages may come with drawings; see Images.
-- Short messages refer to what the human is looking at: read the human input lines printed with them (where they clicked, where the pointer rests). A message without images comes with the image id of their screen as they sent it; look at it.
+- Short messages refer to what the human is looking at: read the human input lines printed with them (where they clicked, where the pointer rests). A message without images comes with the image id of their screen as they sent it, their pointer drawn in; look at it.
 - Every command prints, on stderr, what happened since your previous command (human clicks and typing, windows opening, apps exiting). Those lines are context, not errors.
 
 ## Images
@@ -92,7 +92,7 @@ image m2x8 1280x720 scale 2, parent k3f9, crop 300,200 700x400
   - Options you leave out take their defaults. Listings also leave out options that have their default.
 - Pictures:
   - `raster ID|FILE X,Y [WxH] [from X,Y WxH]` places the pixels of a raster or of a PNG/JPEG file at X,Y. Raster ids start with `r`, and every screenshot is a raster. By default one source pixel is one canvas pixel. WxH scales it. `from` takes only that part of the source, in the source's pixels, and the default size is then that part's size.
-  - `svg ID|FILE|<svg ...</svg> X,Y [WxH]` is an SVG picture, drawn and moved as a unit. SVG ids start with `s`. Inline SVG runs from `<svg` to the matching `</svg>` and may contain spaces and quotes; `xmlns` is optional. The size defaults to the SVG's own width/height or viewBox.
+  - `svg ID|FILE|<svg ...</svg> X,Y [WxH]` is an SVG picture, drawn and moved as a unit. SVG ids start with `s`. Inline SVG runs from `<svg` to the matching `</svg>` and may contain spaces and quotes; `xmlns` is optional. Keep the `svg` keyword in front: `'svg <svg width="20" height="20"><circle cx="10" cy="10" r="9" fill="red"/></svg> 40,40'`. The size defaults to the SVG's own width/height or viewBox.
   - FILE paths must contain a `/` or an extension, e.g. `./mock.png`. Files are read once, when the image is made. A PNG that guilab rendered is refused; use its image id instead.
 
 ### Making images

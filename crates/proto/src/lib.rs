@@ -247,6 +247,10 @@ pub enum HumanOp {
         text: String,
         #[serde(default)]
         images: Vec<String>,
+        /// Element lines drawn on a screenshot the human takes now (like drawing in the
+        /// viewer); sent as one more image.
+        #[serde(default)]
+        draw: Vec<String>,
     },
     /// Input as the human (blocked while the session is locked and not shared).
     Input { actions: Vec<Action> },

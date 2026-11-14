@@ -473,7 +473,7 @@ impl Fmt {
                     });
                 }
                 if let Some(id) = screen {
-                    v.push(format!("  (their screen as they sent it: image {id}; see it: guilab image {id})"));
+                    v.push(format!("  (their screen as they sent it, with their pointer: image {id}; see it: guilab image {id})"));
                 }
                 v.push("  (you're marked working on it; reply when finished with: guilab done \"...\")".into());
                 v

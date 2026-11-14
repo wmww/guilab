@@ -20,7 +20,7 @@ Quick start:
   guilab lock                      take the session's lock; prints a TOKEN
   guilab -t TOKEN input move 100 200 click     send input (guilab input --help)
   guilab done \"Fixed, have a look\" message the human, release the lock, wait for them
-  guilab poll --timeout 600        wait for the human's reply; prints it
+  guilab poll --timeout 300        wait for the human's reply; prints it
   guilab end                       end the session and kill its apps
 
 Coordinates everywhere are screenshot pixels, at any scale. Sessions end after 30 idle
@@ -279,6 +279,9 @@ enum DebugOp {
         text: String,
         #[arg(long, value_name = "ID|PATH")]
         image: Vec<String>,
+        /// Draw this element on a screenshot taken now (repeatable; like the viewer's tools).
+        #[arg(long, value_name = "ELEMENT")]
+        draw: Vec<String>,
     },
     /// Send input as the human (same actions as `guilab input`).
     Input {
@@ -450,7 +453,9 @@ fn real_main(cli: Cli) -> Result<(), String> {
         }
         Cmd::Debug { op } => Command::Human {
             op: match op {
-                DebugOp::Message { text, image } => guilab_proto::HumanOp::Message { text, images: image.iter().map(|i| image_arg(i)).collect() },
+                DebugOp::Message { text, image, draw } => {
+                    guilab_proto::HumanOp::Message { text, images: image.iter().map(|i| image_arg(i)).collect(), draw }
+                }
                 DebugOp::Input { actions } => guilab_proto::HumanOp::Input { actions: guilab_proto::input::parse(&actions)? },
                 DebugOp::Revoke => guilab_proto::HumanOp::Revoke,
                 DebugOp::Share { on } => guilab_proto::HumanOp::Share { on: matches!(on.as_str(), "on" | "1" | "true" | "yes") },

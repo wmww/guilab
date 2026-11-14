@@ -143,8 +143,14 @@ impl Server {
                     Ok(n) => n,
                     Err(e) => return Some(Response::err(e)),
                 };
-                // One delivery cursor per worktree (one agent each); see guilab_proto::log.
-                let key = target.root.as_ref().map_or(ANON.to_string(), |r| r.display().to_string());
+                // One delivery cursor per agent (see guilab_proto::log): requests from the
+                // session's own worktree or from outside git share the default cursor, so an
+                // agent that changes directories doesn't see events twice; another worktree
+                // (another agent, picking the session by name) gets its own.
+                let key = match &target.root {
+                    Some(r) if self.sessions[&name].root.as_ref() != Some(r) => r.display().to_string(),
+                    _ => ANON.to_string(),
+                };
                 // Not deliveries: the human's actions (the viewer's), reading the log, and
                 // polls (they deliver themselves).
                 let attach = !matches!(cmd, Command::Human { .. } | Command::Log { .. } | Command::Poll { .. });
@@ -403,8 +409,12 @@ impl Server {
                 Response::ok(DoneInfo { unlocked })
             }
             Command::Human { op } => match op {
-                HumanOp::Message { text, images } => {
-                    match human_message(&mut self.images, slot, text, images.into_iter().map(MsgImage::Spec).collect()) {
+                HumanOp::Message { text, images, draw } => {
+                    let mut imgs: Vec<MsgImage> = images.into_iter().map(MsgImage::Spec).collect();
+                    if !draw.is_empty() {
+                        imgs.push(MsgImage::Draw(draw));
+                    }
+                    match human_message(&mut self.images, slot, text, imgs) {
                         Ok(()) => Response::ok(()),
                         Err(e) => Response::err(e),
                     }
@@ -733,23 +743,31 @@ pub(crate) enum MsgImage {
     Spec(String),
     /// A drawing from the current viewer: the frozen screenshot's image id and the marks.
     Drawing { base: String, marks: Vec<guilab_image::Element> },
+    /// Element lines to draw on a screenshot taken now (`debug message --draw`).
+    Draw(Vec<String>),
 }
 
 /// Logs a human message (wakes polls). Its images are held while the session lives. A
-/// message without images gets the current screen, since it refers to what they look at.
+/// message without images gets the current screen with the pointer drawn in, since it
+/// refers to what they look at (or point at).
 pub(crate) fn human_message(images: &mut Images, slot: &mut Slot, text: String, imgs: Vec<MsgImage>) -> Result<(), String> {
     let mut refs = Vec::new();
     for (i, m) in imgs.into_iter().enumerate() {
         let img = match m {
             MsgImage::Spec(spec) => images.attach(&spec, Made::Human, slot.group),
             MsgImage::Drawing { base, marks } => images.drawing(&base, marks, slot.group),
+            MsgImage::Draw(lines) => images.capture(&mut slot.session, slot.group, false, false, None).and_then(|base| {
+                let req = MakeReq { from: Some(base.to_string()), elements: lines, cwd: "/".into(), ..Default::default() };
+                let id = guilab_image::make(&mut images.store, &images.fonts, &req, Made::Human, slot.group)?;
+                images.get(id.as_str())
+            }),
         }
         .map_err(|e| format!("image {}: {e}", i + 1))?;
         images.hold(&img);
         refs.push(images.image_ref(&img));
     }
     let screen = if refs.is_empty() {
-        let id = images.capture(&mut slot.session, slot.group, false, false, None)?;
+        let id = images.capture(&mut slot.session, slot.group, true, false, None)?;
         let img = images.get(id.as_str())?;
         images.hold(&img);
         Some(id.to_string())

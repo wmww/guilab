@@ -114,6 +114,12 @@ fn delivery_on_next_command() {
     let ev: Value = serde_json::from_slice(&out.stderr).unwrap();
     let last = ev["events"].as_array().unwrap().last().unwrap().clone();
     assert_eq!((last["kind"].as_str(), last["tier"].as_str()), (Some("motion"), Some("passive")), "{ev}");
+    // A session's own worktree and outside git share one cursor (an agent changing dirs).
+    let c = lab.worktree("c");
+    lab.run_in(&c, &["new", "own"]);
+    lab.run_in(&c, &["-S", "own", "run", "--", "true"]);
+    let (_, _, err) = lab.status(&["-S", "own", "ps"]);
+    assert!(!err.contains("started"), "{err}");
 }
 
 #[test]
@@ -185,9 +191,12 @@ fn poll_blocks_and_follows() {
     assert!(lines.next().unwrap().unwrap().contains(&format!("human message: \"look\\nhere\" [image {drawn}: 3 elements]")));
     lab.run(&["run", "--", "false"]);
     assert!(lines.next().unwrap().unwrap().contains("app 1 (false) exited with code 1"));
-    lab.run(&["debug", "message", "again"]);
+    lab.run(&["debug", "message", "again", "--draw", "green ellipse 5,5 20x10"]);
     let line = lines.next().unwrap().unwrap();
-    assert!(line.contains("human message: \"again\" [their screen: image "), "{line}");
+    assert!(line.contains("human message: \"again\" [image ") && line.contains(": 2 elements]"), "{line}");
+    lab.run(&["debug", "message", "and this"]);
+    let line = lines.next().unwrap().unwrap();
+    assert!(line.contains("human message: \"and this\" [their screen: image "), "{line}");
     follow.kill().unwrap();
     let _ = follow.wait();
     // Ending the session ends polls with an error.
