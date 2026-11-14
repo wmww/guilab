@@ -31,10 +31,11 @@ pub(crate) struct Typing {
     click: Option<(egui::Pos2, bool)>,
 }
 
-/// The default wrap width of text at `x`: [`WRAP_EMS`] or up to the region's right edge.
+/// The default wrap width of text at `x`: [`WRAP_EMS`] or up to the region's right edge,
+/// in whole pixels (it may be stored).
 fn default_wrap(x: f32, size: f32, scale: f32, region: IRect) -> f32 {
     let right = region.right() as f32 - TEXT_PAD * scale;
-    (WRAP_EMS * size).min(right - x).max(size)
+    (WRAP_EMS * size).min(right - x).max(size).floor()
 }
 
 impl Typing {
@@ -52,7 +53,7 @@ impl Typing {
         Typing {
             key: None,
             orig: None,
-            at: pt(x, y),
+            at: pt(x.round(), y.round()),
             size,
             wrap: default_wrap(x, size, scale, region),
             fixed_width: false,
@@ -69,7 +70,7 @@ impl Typing {
         let el = d.element(key).unwrap().clone();
         let Kind::Text { at, size, width, text } = &el.kind else { unreachable!("text_at finds text") };
         let scale = d.body().scale;
-        let wrap = width.unwrap_or_else(|| fonts.layout(text, *size, None).size[0].max(default_wrap(at.x, *size, scale, region)));
+        let wrap = width.unwrap_or_else(|| fonts.layout(text, *size, None).size[0].ceil().max(default_wrap(at.x, *size, scale, region)));
         Typing {
             key: Some(key),
             at: *at,
@@ -230,7 +231,7 @@ impl Editor {
         let l = fonts.layout(&ty.text, ty.size, Some(ty.wrap));
         let bottom = region.bottom() as f32 - pad;
         if ty.at.y + l.size[1] > bottom {
-            ty.at.y = (bottom - l.size[1]).max(region.y as f32 + pad);
+            ty.at.y = (bottom - l.size[1]).max(region.y as f32 + pad).floor();
         }
         if ty.focus && !ui.input(|i| i.pointer.any_down()) {
             te.request_focus();

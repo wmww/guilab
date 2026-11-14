@@ -167,6 +167,41 @@ impl Element {
         out
     }
 
+    /// Its geometry on whole canvas pixels, for what a human drew (listings stay clean).
+    /// Rect corners round on their own; pen points drop consecutive duplicates; text rounds
+    /// its position, size and width (size and width at least 1). `image make` keeps exact
+    /// values and doesn't use this.
+    pub fn snapped(&self) -> Element {
+        let r = |p: Pt| pt(p.x.round(), p.y.round());
+        let rect = |x: &Rect| Rect::from_corners(r(x.min), r(x.max()));
+        let mut out = self.clone();
+        match &mut out.kind {
+            Kind::Pen(p) => {
+                p.iter_mut().for_each(|q| *q = r(*q));
+                p.dedup();
+            }
+            Kind::Box(x) | Kind::Ellipse(x) => *x = rect(x),
+            Kind::Raster { dst: x, .. } | Kind::Svg { dst: x, .. } => {
+                let mut n = rect(x);
+                n.size.w = n.size.w.max(1.0);
+                n.size.h = n.size.h.max(1.0);
+                *x = n;
+            }
+            Kind::Line(a, b) | Kind::Arrow(a, b) => {
+                *a = r(*a);
+                *b = r(*b);
+            }
+            Kind::Text { at, size, width, .. } => {
+                *at = r(*at);
+                *size = size.round().max(1.0);
+                if let Some(w) = width {
+                    *w = w.round().max(1.0);
+                }
+            }
+        }
+        out
+    }
+
     pub fn translated(&self, d: Pt) -> Element {
         let mut out = self.clone();
         match &mut out.kind {
@@ -212,6 +247,33 @@ impl Element {
         }
         out
     }
+}
+
+/// `pts` with the points dropped that lie within `eps` of the line through their kept
+/// neighbors (Ramer–Douglas–Peucker). Ends are kept.
+pub fn simplify(pts: &[Pt], eps: f32) -> Vec<Pt> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut keep = vec![false; pts.len()];
+    keep[0] = true;
+    keep[pts.len() - 1] = true;
+    let mut stack = vec![(0, pts.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (pa, pb) = (pts[a], pts[b]);
+        let d = pb - pa;
+        let len = d.len();
+        let dist = |p: Pt| if len == 0.0 { (p - pa).len() } else { ((p.x - pa.x) * d.y - (p.y - pa.y) * d.x).abs() / len };
+        let far = (a + 1..b).map(|i| (dist(pts[i]), i)).max_by(|x, y| x.0.total_cmp(&y.0));
+        if let Some((dmax, i)) = far
+            && dmax > eps
+        {
+            keep[i] = true;
+            stack.push((a, i));
+            stack.push((i, b));
+        }
+    }
+    pts.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
 }
 
 /// Moves corner `i` of `r` to `to`, keeping the opposite corner. Optionally keeps the aspect

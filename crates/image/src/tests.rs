@@ -878,3 +878,13 @@ fn doc_carries_assets_and_limits() {
     a.apply(&e);
     assert!(a.add_edit(pen(1)).unwrap_err().to_string().contains("pen points"));
 }
+
+#[test]
+fn snapped_and_simplify() {
+    let e = Element::new(Color::RED, Kind::Pen(vec![pt(0.2, 0.3), pt(0.4, -0.2), pt(5.6, 0.1), pt(10.4, 0.0), pt(10.0, 5.0)]));
+    assert_eq!(e.snapped().kind, Kind::Pen(vec![pt(0.0, 0.0), pt(6.0, 0.0), pt(10.0, 0.0), pt(10.0, 5.0)]));
+    let b = Element::new(Color::RED, Kind::Box(Rect::new(0.4, 0.6, 10.2, 3.8))).snapped();
+    assert_eq!(b.kind, Kind::Box(Rect::new(0.0, 1.0, 11.0, 3.0)));
+    let pts = [pt(0.0, 0.0), pt(1.0, 0.2), pt(2.0, -0.3), pt(3.0, 0.0), pt(3.0, 4.0)];
+    assert_eq!(geom::simplify(&pts, 0.5), vec![pt(0.0, 0.0), pt(3.0, 0.0), pt(3.0, 4.0)]);
+}

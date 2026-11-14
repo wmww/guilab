@@ -191,6 +191,10 @@ pub struct Editor {
 const MIN_MARK: f32 = 3.0;
 /// Pen points closer than this (screen points) are skipped.
 const PEN_STEP: f32 = 1.0;
+/// A finished pen stroke drops points within this many canvas px of its simplified line.
+const PEN_TOLERANCE: f32 = 0.5;
+/// A moved element keeps at least this much (screen points) inside the view region.
+const REACH: f32 = 12.0;
 /// Text wraps at this many font sizes (or the right edge), and a new box gets at least
 /// `MIN_TEXT_EMS` before the edge.
 pub const WRAP_EMS: f32 = 16.0;

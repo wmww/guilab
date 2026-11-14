@@ -7,7 +7,7 @@ use guilab_kit::Theme;
 
 use crate::paint::{self, Ctx};
 use crate::text::Typing;
-use crate::{Canvas, CanvasOut, CropMode, Editor, Gesture, Hit, MIN_MARK, PEN_STEP, Tool, Xf};
+use crate::{Canvas, CanvasOut, CropMode, Editor, Gesture, Hit, MIN_MARK, PEN_STEP, PEN_TOLERANCE, REACH, Tool, Xf};
 
 /// Element under `p` by the move tool's priority: key points (topmost element first), then
 /// elements within `hit_slop` (topmost first). The locked base never hits.
@@ -389,6 +389,8 @@ impl Editor {
     #[allow(clippy::too_many_arguments)]
     fn press(&mut self, p: Pos2, double: bool, mut doc: Option<&mut Doc>, canvas: [u32; 2], scale: f32, xf: Xf, region: IRect, t: &Theme, out: &mut CanvasOut) {
         let q = xf.invert(p);
+        // Marks start on whole canvas pixels (`q` stays exact for hit tests and grabs).
+        let qs = pt(q.x.round(), q.y.round());
         let in_region = region.to_rect().contains(q);
         // A press outside the text box ends typing. With the text tool that's all it does.
         if let Some(ty) = self.typing.take() {
@@ -453,13 +455,13 @@ impl Editor {
                     return;
                 }
                 let kind = match self.tool {
-                    Tool::Pen => Kind::Pen(vec![q]),
-                    Tool::Box => Kind::Box(Rect::from_corners(q, q)),
-                    Tool::Ellipse => Kind::Ellipse(Rect::from_corners(q, q)),
-                    Tool::Line => Kind::Line(q, q),
-                    _ => Kind::Arrow(q, q),
+                    Tool::Pen => Kind::Pen(vec![qs]),
+                    Tool::Box => Kind::Box(Rect::from_corners(qs, qs)),
+                    Tool::Ellipse => Kind::Ellipse(Rect::from_corners(qs, qs)),
+                    Tool::Line => Kind::Line(qs, qs),
+                    _ => Kind::Arrow(qs, qs),
                 };
-                self.gesture = Gesture::Draw { el: Element::new(self.color, kind), start: q };
+                self.gesture = Gesture::Draw { el: Element::new(self.color, kind), start: qs };
                 if doc.is_none() && !self.began {
                     self.began = true;
                     out.begin = true;
@@ -480,7 +482,8 @@ impl Editor {
     fn drag_to(&mut self, p: Pos2, mods: Modifiers, canvas: [u32; 2], scale: f32, xf: Xf, region: IRect, out: &mut CanvasOut) {
         let q = xf.invert(p);
         let r = region.to_rect();
-        let clamp = |q: Pt| pt(q.x.clamp(r.min.x, r.max().x), q.y.clamp(r.min.y, r.max().y));
+        // The region has whole-pixel edges, so a snapped point stays inside it.
+        let clamp = |q: Pt| pt(q.x.clamp(r.min.x, r.max().x).round(), q.y.clamp(r.min.y, r.max().y).round());
         match &mut self.gesture {
             Gesture::Idle => {}
             Gesture::Draw { el, start } => {
@@ -488,7 +491,7 @@ impl Editor {
                 let q = clamp(q);
                 match &mut el.kind {
                     Kind::Pen(pts) => {
-                        if pts.last().is_none_or(|l| (*l - q).len() * xf.zoom >= PEN_STEP) {
+                        if pts.last().is_none_or(|l| *l != q && (*l - q).len() * xf.zoom >= PEN_STEP) {
                             pts.push(q);
                         }
                     }
@@ -507,10 +510,20 @@ impl Editor {
                 if mods.shift {
                     if d.x.abs() > d.y.abs() { d.y = 0.0 } else { d.x = 0.0 }
                 }
+                // Whole pixels (an element with exact values keeps them), and the element
+                // keeps overlapping the region so it can be grabbed again.
+                let b = orig.bounds(scale, &self.fonts);
+                let m = (REACH / xf.zoom).min(r.size.w / 2.0).min(r.size.h / 2.0);
+                let keep = |d: f32, lo: f32, hi: f32| if lo <= hi { d.clamp(lo, hi) } else { d };
+                d.x = keep(d.x, (r.min.x + m - b.max().x).ceil(), (r.max().x - m - b.min.x).floor()).round();
+                d.y = keep(d.y, (r.min.y + m - b.max().y).ceil(), (r.max().y - m - b.min.y).floor()).round();
                 *cur = orig.translated(d);
             }
             Gesture::Reshape { k, orig, cur, grab, .. } => {
-                *cur = orig.drag_key(*k, q - *grab, Mods { shift: mods.shift }, scale, &self.fonts);
+                // The dragged key point stays in the region (so it can be grabbed again).
+                let to = q - *grab;
+                let to = pt(to.x.clamp(r.min.x, r.max().x), to.y.clamp(r.min.y, r.max().y));
+                *cur = orig.drag_key(*k, to, Mods { shift: mods.shift }, scale, &self.fonts).snapped();
             }
             Gesture::Pan { last } => {
                 out.pan += p - *last;
@@ -525,7 +538,10 @@ impl Editor {
     fn release(&mut self, doc: Option<&mut Doc>, xf: Xf, out: &mut CanvasOut) {
         let g = std::mem::replace(&mut self.gesture, Gesture::Idle);
         match g {
-            Gesture::Draw { el, .. } => {
+            Gesture::Draw { mut el, .. } => {
+                if let Kind::Pen(p) = &mut el.kind {
+                    *p = geom::simplify(p, PEN_TOLERANCE);
+                }
                 let tiny = frame_of(&el).is_none_or(|f| f.size.w.hypot(f.size.h) * xf.zoom < MIN_MARK);
                 if tiny {
                     if self.began && self.pending.is_empty() && self.typing.is_none() {

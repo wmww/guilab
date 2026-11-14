@@ -515,3 +515,68 @@ fn inserted_picture_survives_sweep() {
     let px = screen.pixels[c.y as usize * screen.size[0] + c.x as usize].to_array();
     assert!(px[0].abs_diff(127) < 8 && px[2].abs_diff(180) < 8, "{px:?}");
 }
+
+fn whole(v: f32) -> bool {
+    v == v.round()
+}
+
+fn all_whole(k: &Kind) -> bool {
+    match k {
+        Kind::Pen(p) => p.iter().all(|p| whole(p.x) && whole(p.y)),
+        Kind::Box(r) | Kind::Ellipse(r) => [r.min.x, r.min.y, r.size.w, r.size.h].into_iter().all(whole),
+        Kind::Line(a, b) | Kind::Arrow(a, b) => [a.x, a.y, b.x, b.y].into_iter().all(whole),
+        Kind::Text { at, size, .. } => whole(at.x) && whole(at.y) && whole(*size),
+        _ => true,
+    }
+}
+
+/// At a fractional zoom, committed geometry is still whole canvas pixels.
+#[test]
+fn committed_geometry_is_whole_pixels() {
+    let mut t = T::new();
+    t.host.xf = crate::Xf { offset: vec2(13.3, 7.7), zoom: 1.37 };
+    for tool in [Tool::Box, Tool::Ellipse, Tool::Line, Tool::Arrow, Tool::Pen] {
+        t.host.editor.tool = tool;
+        t.drag((100.3, 100.6), (200.45, 150.2));
+    }
+    t.host.editor.tool = Tool::Move;
+    t.drag((100.4, 125.2), (130.1, 140.7));
+    // (That moved the ellipse, which is above the box.) Reshape it by its top-left corner.
+    t.drag((130.0, 117.0), (120.3, 96.7));
+    t.host.editor.tool = Tool::Text;
+    t.click(300.3, 300.7);
+    t.run(vec![Event::Text("hi".into())]);
+    t.key(Key::Enter, Modifiers::NONE);
+    let els = t.elements();
+    assert_eq!(els.len(), 7);
+    assert_eq!(els[2].kind, Kind::Ellipse(Rect::new(120.0, 96.0, 110.0, 69.0)));
+    for e in &els {
+        assert!(all_whole(&e.kind), "{:?}", e.kind);
+    }
+}
+
+/// A straight pen stroke drawn with many points keeps only what its shape needs.
+#[test]
+fn pen_is_simplified() {
+    let mut t = T::new();
+    t.host.editor.tool = Tool::Pen;
+    let mut evs = vec![ev::moved(t.at(100.0, 100.0)), ev::press(t.at(100.0, 100.0))];
+    for i in 1..=100 {
+        evs.push(ev::moved(t.at(100.0 + i as f32 * 2.0, 100.0)));
+    }
+    evs.push(ev::release(t.at(300.0, 100.0)));
+    t.run(evs);
+    t.run(vec![]);
+    assert_eq!(t.elements()[1].kind, Kind::Pen(vec![pt(100.0, 100.0), pt(300.0, 100.0)]));
+}
+
+/// An element dragged far off the image stays within reach.
+#[test]
+fn move_keeps_element_reachable() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    t.drag((100.0, 150.0), (-900.0, 150.0));
+    let b = t.elements()[1].bounds(1.0, t.host.editor.fonts());
+    assert!(b.max().x > 0.0, "{b:?}");
+}
