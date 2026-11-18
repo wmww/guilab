@@ -205,6 +205,8 @@ impl Default for Zoom {
     }
 }
 
+/// Chat panel ids (bottom, right); the view leaves presses on their dividers to egui.
+const CHAT_PANELS: [&str; 2] = ["chat", "chat-side"];
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
 /// Middle-button movement (points) that turns a click into a pan.
@@ -543,8 +545,8 @@ impl ViewerUi {
         });
         let panel = match self.chat_place {
             ChatPlace::Off => None,
-            ChatPlace::Bottom => Some(egui::Panel::bottom("chat").default_size(t.size.chat_h[0]).size_range(t.size.chat_h[1]..=t.size.chat_h[2])),
-            ChatPlace::Right => Some(egui::Panel::right("chat-side").default_size(t.size.chat_w[0]).size_range(t.size.chat_w[1]..=t.size.chat_w[2])),
+            ChatPlace::Bottom => Some(egui::Panel::bottom(CHAT_PANELS[0]).default_size(t.size.chat_h[0]).size_range(t.size.chat_h[1]..=t.size.chat_h[2])),
+            ChatPlace::Right => Some(egui::Panel::right(CHAT_PANELS[1]).default_size(t.size.chat_w[0]).size_range(t.size.chat_w[1]..=t.size.chat_w[2])),
         };
         if panel.is_none() {
             p.ws.slots.clear();

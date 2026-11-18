@@ -15,7 +15,7 @@ use std::{
     fs::{self, File},
     io::{ErrorKind, Read},
     os::unix::{
-        fs::{DirBuilderExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::PathBuf,
@@ -95,6 +95,9 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
     let _ = fs::remove_file(&sock_path);
     let listener = UnixListener::bind(&sock_path).with_context(|| format!("binding {}", sock_path.display()))?;
     listener.set_nonblocking(true)?;
+    // Our socket's inode: at exit, remove the path only if it's still ours (the runtime dir may
+    // have been deleted and recreated with a new server in it, e.g. a nested session reused).
+    let sock_ino = fs::metadata(&sock_path).map(|m| m.ino()).ok();
 
     // Sessions of a previous (crashed) server are gone; their apps died with it (PDEATHSIG).
     let sessions_dir = rt.join("s");
@@ -198,7 +201,9 @@ pub fn run(opts: Options) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     srv.reap_graves(deadline + Duration::from_secs(1));
-    let _ = fs::remove_file(&sock_path);
+    if sock_ino.is_some() && fs::metadata(&sock_path).map(|m| m.ino()).ok() == sock_ino {
+        let _ = fs::remove_file(&sock_path);
+    }
     drop(lock);
     Ok(())
 }

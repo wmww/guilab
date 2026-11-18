@@ -8,7 +8,7 @@ use guilab_kit::Theme;
 
 use super::workspace::{Open, open_doc};
 use crate::flight::Place;
-use super::{Action, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
+use super::{Action, CHAT_PANELS, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
 use crate::{
     input::{Gesture, HostCursor, HostInput},
     sizing::{self, Resizing},
@@ -256,7 +256,9 @@ impl ViewerUi {
                         }
                         continue;
                     }
-                    if !ours(pos) || menu_was_open || self.panning.is_some() || self.resizing.is_some() {
+                    // The chat divider's grab zone overlaps the view; a press there is egui's.
+                    let on_divider = ui.ctx().interaction_snapshot(|i| CHAT_PANELS.iter().any(|id| i.contains_pointer.contains(&egui::Id::new(id).with("__resize"))));
+                    if !ours(pos) || on_divider || menu_was_open || self.panning.is_some() || self.resizing.is_some() {
                         continue;
                     }
                     pressed_view = true;
