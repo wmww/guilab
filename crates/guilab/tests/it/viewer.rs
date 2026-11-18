@@ -427,12 +427,12 @@ impl Lab {
     }
 }
 
-/// Session menu sizing: "Resize to window" sets the session's logical size to the view;
-/// "Lock to window" keeps it there as the window resizes, except while an agent holds
-/// the lock (the agent may still resize); unlocking fits it again.
-/// Layout (1200x800 host window, one session): Session menu at 118,12, its "Resize to
-/// window" row at y=106, "Lock to window" at y=132; the view is the window minus the
-/// 40 px toolbar, 24 px menu bar and 240 px chat panel.
+/// App menu "Zoom: Resize to window": the session's logical size follows the view as the
+/// window resizes, except while an agent holds the lock (the agent may still resize);
+/// unlocking fits it again. Picking another zoom restores the size from before.
+/// Layout (1200x800 host window, one session): App menu at 108,12, its "Resize to window"
+/// row at y=113, "Fit to window" at y=61; the view is the window minus the 40 px toolbar,
+/// 24 px menu bar and 240 px chat panel.
 #[test]
 fn size_to_window() {
     let Some((h, sock, t)) = host() else { return };
@@ -443,15 +443,13 @@ fn size_to_window() {
     let step = |actions: &[&str]| {
         h.input(&t, actions);
     };
-    step(&["move", "118", "12", "click"]);
-    step(&["move", "150", "106", "click"]);
+    step(&["move", "108", "12", "click"]);
+    step(&["move", "150", "113", "click"]);
     // Logical size = the view (1160x536 points), at scale 1.5.
     v.wait_output(5, |w, hh| (w, hh) == (1740, 804));
     let log = v.run(&["log", "--kind", "output"]);
     assert!(log.contains("output is now 1740x804 scale 1.5 (the human resized it)"), "{log}");
 
-    step(&["move", "118", "12", "click"]);
-    step(&["move", "150", "132", "click"]);
     h.run(&["-t", &t, "output", "-s", "1000x700"]);
     v.wait_output(5, |w, hh| (w, hh) == (1440, 654));
     // An agent's lock freezes it; the agent can still resize.
@@ -464,6 +462,10 @@ fn size_to_window() {
     assert_eq!(log.matches("the human resized it").count(), 2, "resized while locked: {log}");
     v.run(&["-t", &vt, "unlock"]);
     v.wait_output(5, |w, hh| (w, hh) == (1590, 729));
+    // Fit to window: back to the size from before.
+    step(&["move", "108", "12", "click"]);
+    step(&["move", "150", "61", "click"]);
+    v.wait_output(5, |w, hh| (w, hh) == (800, 600));
 }
 
 /// A message without images refers to the screen as the human started typing it, not as it
@@ -581,8 +583,8 @@ fn touch_through() {
 }
 
 /// Menus and tooltips are real popups of the viewer window (and a tooltip in a menu a popup
-/// of the menu), so they can be larger than the window. Layout: View menu at 178,12, its
-/// "Zoom +" button at 327,21.
+/// of the menu). That they may extend past the window is kit's `native_popups_leave_the_window`.
+/// Layout: App menu at 108,12, its Scale "+" button at 278,203.
 #[test]
 fn menus_are_popups() {
     let Some((h, sock, t)) = host() else { return };
@@ -590,16 +592,13 @@ fn menus_are_popups() {
     v.run(&["new", "app", "-s", "400x300"]);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
-    h.run(&["-t", &t, "output", "-s", "1200x260"]);
-    v.wait_window([1200, 260]);
-    h.input(&t, &["move", "178", "12", "sleep", "100", "click"]);
+    h.input(&t, &["move", "108", "12", "sleep", "100", "click"]);
     let tree = h.wait_tree("host", 10, |t| nodes(t).iter().any(|n| n["kind"] == "popup"));
     let menu = nodes(&tree).into_iter().find(|n| n["kind"] == "popup").unwrap().clone();
-    let (_, y, _, hh) = rect(&menu);
-    // Taller than the window: the compositor slid it up to fit the screen.
-    assert!(hh > 260 && y <= 0, "{menu}");
+    let (x, y, w, hh) = rect(&menu);
+    assert!(x > 0 && y > 0 && w > 100 && hh > 100, "{menu}");
     // Hovering "+" shows its tooltip as the menu's child.
-    h.input(&t, &["move", "326", "22", "sleep", "100", "move", "327", "21"]);
+    h.input(&t, &["move", "277", "203", "sleep", "100", "move", "278", "203"]);
     h.wait_tree("host", 10, |t| nodes(t).iter().any(|n| n["kind"] == "popup" && nodes(&n["children"]).iter().any(|c| c["kind"] == "popup")));
     h.input(&t, &["key", "Escape"]);
     h.wait_tree("host", 10, |t| !nodes(t).iter().any(|n| n["kind"] == "popup"));

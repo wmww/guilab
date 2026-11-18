@@ -8,7 +8,7 @@ use guilab_kit::Theme;
 
 use super::workspace::{Open, open_doc};
 use crate::flight::Place;
-use super::{Action, CHAT_PANELS, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
+use super::{Action, CHAT_PANELS, DRAG_SLOP, GestureTo, Input, MAX_ZOOM, MIN_ZOOM, ZoomMode, NavMode, PerSession, SessionView, VIEW_TOASTS, ViewerUi, WHEEL_PX, Zoom, linux_button};
 use crate::{
     input::{Gesture, HostCursor, HostInput},
     sizing::{self, Resizing},
@@ -31,10 +31,10 @@ impl ViewerUi {
             None => (IRect::of_size([s.size.0, s.size.1]), s.scale as f32),
         };
         let mut z = if doc_view { ws.doc_zoom } else { p.zoom };
-        // "Lock to window" (the live app only): always fit, no zoom or pan.
+        // "Resize to window" (the live app only): always fit, no zoom or pan.
         let fixed = p.sizing.follow && !doc_view;
         if fixed {
-            z.fit = true;
+            z.mode = ZoomMode::Fit;
         }
         if self.resizing.as_ref().is_some_and(|(n, _)| n != s.name) {
             self.resizing = None;
@@ -42,12 +42,12 @@ impl ViewerUi {
         // Handles: on the live app only, not while the agent holds it or following the window.
         let handles = !s.locked && !fixed && live && s.texture.is_some();
         if !handles && let Some((_, r)) = self.resizing.take() {
-            z.fit = r.was_fit;
+            z.mode = r.was;
         }
         let ppp = ui.ctx().pixels_per_point();
         // Image pixels in points at zoom 1.
         let px = vec2(region.w as f32, region.h as f32) / ppp;
-        if z.fit {
+        if z.fit() {
             let cap = (ppp / content_scale).max(1.0);
             let fit = (view.width() / px.x).min(view.height() / px.y).min(cap);
             z.zoom = fit.max(MIN_ZOOM);
@@ -84,8 +84,7 @@ impl ViewerUi {
             let new = (z.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
             let c = view.center();
             z.pan = (p - c) - (p - c - z.pan) * (new / z.zoom);
-            z.zoom = new;
-            z.fit = false;
+            z.set(new);
             *img = image(z);
         };
         // Where scrolling and touchpad gestures at the pointer go: the one rule for all of them.
@@ -214,7 +213,7 @@ impl ViewerUi {
                     }
                     if let Some(last) = self.panning {
                         z.pan += p - last;
-                        z.fit = false;
+                        z.panned();
                         self.panning = Some(p);
                         img = image(&z);
                         continue;
@@ -225,7 +224,7 @@ impl ViewerUi {
                     {
                         self.middle = None;
                         z.pan += p - start;
-                        z.fit = false;
+                        z.panned();
                         self.panning = Some(p);
                         img = image(&z);
                         continue;
@@ -246,7 +245,7 @@ impl ViewerUi {
                             && let Some((_, r)) = self.resizing.take()
                         {
                             out.push(Action::Resize { session: s.name.to_string(), size: Some(r.size), scale: None });
-                            z.fit = r.was_fit;
+                            z.mode = r.was;
                             continue;
                         }
                         if self.panning.is_some() && (button == PointerButton::Middle || self.held_buttons.is_empty()) {
@@ -324,7 +323,7 @@ impl ViewerUi {
                             };
                             if delta != Vec2::ZERO && !fixed {
                                 z.pan += delta * k;
-                                z.fit = false;
+                                z.panned();
                                 img = image(&z);
                             }
                             continue;
@@ -433,7 +432,7 @@ impl ViewerUi {
         }
         if cout.pan != Vec2::ZERO && !fixed {
             z.pan += cout.pan;
-            z.fit = false;
+            z.panned();
         }
         ws.wants_keys = cout.wants_keys;
         ws.view_place = ws.doc().filter(|_| doc_view).map(|d| Place { canvas: xf.rect(IRect::of_size(d.body().canvas).to_rect()), clip: xf.rect(region.to_rect()).intersect(view), alpha: 1.0 });
@@ -450,8 +449,9 @@ impl ViewerUi {
                     && self.panning.is_none()
                     && let Some(start) = ui.input(|i| i.pointer.press_origin())
                 {
-                    self.resizing = Some((s.name.to_string(), Resizing::new(e, start, img, s.size, z.fit)));
-                    z.fit = false;
+                    // The zoom holds still while dragging (mode restored on release).
+                    self.resizing = Some((s.name.to_string(), Resizing::new(e, start, img, s.size, z.mode)));
+                    z.mode = ZoomMode::Other;
                 }
                 if hot_handle.is_none() && r.hovered() && hovered && self.panning.is_none() {
                     hot_handle = Some(e);
@@ -514,8 +514,8 @@ const PAN_KEEP: f32 = 48.0;
 /// Where the live app shows in `view` at zoom `z` (while an open image has the view).
 fn live_rect(view: Rect, z: &Zoom, s: &SessionView, ppp: f32) -> Rect {
     let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
-    let zoom = if z.fit { (view.width() / px.x).min(view.height() / px.y).min((ppp / s.scale as f32).max(1.0)).max(MIN_ZOOM) } else { z.zoom };
-    let pan = if z.fit { Vec2::ZERO } else { z.pan };
+    let zoom = if z.fit() { (view.width() / px.x).min(view.height() / px.y).min((ppp / s.scale as f32).max(1.0)).max(MIN_ZOOM) } else { z.zoom };
+    let pan = if z.fit() { Vec2::ZERO } else { z.pan };
     let size = px * zoom;
     let min = view.center() + pan - size / 2.0;
     Rect::from_min_size(pos2((min.x * ppp).round() / ppp, (min.y * ppp).round() / ppp), size)

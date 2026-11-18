@@ -43,7 +43,7 @@
 
 ## Sizing (sizing.rs, ui.rs)
 - `Action::Resize { size, scale }` → server `requests::set_output(.., key: None)` (ignored while locked; logs `output` with `human: true` only if something changed). The agent path uses the same function with its key.
-- `sizing::fit_pixels(view, scale)`: floor(view points) × scale, rounded. "Lock to window" (`Sizing::follow`; `before_follow` = the size restored on uncheck) runs `follow_window` each frame before `view()`; zoom forced to fit, zoom/pan inputs ignored (`fixed`).
+- `sizing::fit_pixels(view, scale)`: floor(view points) × scale, rounded. "Resize to window" (`Sizing::follow`; `before_follow` = the size restored when another zoom is picked) runs `follow_window` each frame before `view()`; zoom forced to fit, zoom/pan inputs ignored (`fixed`).
 - Handles: `handle_at` (10 pt band outside the image, only where it fits in the view); a drag (`Resizing`, in `ViewerUi` like `panning`) freezes the zoom and sets the pan each frame so the anchor (opposite edge/corner) stays put while the frames catch up; restores fit on release. Input loop: handle presses come before the off-image pan.
 - At matching host/session scales a fitting session is pixel-exact (tested at 1.5: `viewer::pixel_exact_at_fractional_scale`). Fractional scaling checked by eye with GTK4, Qt6 (PySide6) and Chromium at 1.25/1.5 incl. live changes: crisp.
 

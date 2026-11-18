@@ -276,8 +276,29 @@ impl MenuUi<'_> {
     }
 
     /// An item with a radio mark.
-    pub fn radio(&mut self, selected: bool, label: &str) -> bool {
-        self.row(label, None, Some(Mark::Radio(selected)), true)
+    pub fn radio(&mut self, selected: bool, label: &str, enabled: bool) -> bool {
+        self.row(label, None, Some(Mark::Radio(selected)), enabled)
+    }
+
+    /// A radio item with its own controls on the right (laid out right to left, e.g. a
+    /// value with − / + buttons), dimmed while it isn't selected. Choosing it keeps the menu
+    /// open (its controls are next). Returns whether it was chosen.
+    pub fn radio_with(&mut self, selected: bool, label: &str, enabled: bool, right: impl FnOnce(&mut Ui)) -> bool {
+        let close = self.close;
+        let rect_before = self.ui.cursor().min;
+        let chosen = self.row(label, None, Some(Mark::Radio(selected)), enabled);
+        self.close = close;
+        let t = self.theme.clone();
+        let s = &t.size;
+        let rect = Rect::from_min_size(rect_before, vec2(self.width, s.menu_item_h));
+        let inner = rect.shrink2(vec2(s.menu_item_pad, 0.0));
+        let mut child = self.ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        child.spacing_mut().item_spacing = vec2(t.space.sm, 0.0);
+        child.add_enabled_ui(enabled && selected, right);
+        let label_w = self.ui.painter().layout_no_wrap(label.to_string(), t.font.body.clone(), t.colors.text).size().x;
+        let right_w = child.min_rect().width();
+        self.natural = self.natural.max(2.0 * s.menu_item_pad + s.menu_mark_w + label_w + right_w + 2.0 * t.space.lg);
+        chosen
     }
 
     /// An item with a check box. Returns whether it was activated (the caller toggles).

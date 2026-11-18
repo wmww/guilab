@@ -1,4 +1,4 @@
-//! Session sizing from the viewer: "Resize to window" / "Lock to window" (the
+//! Session sizing from the viewer: "Resize to window" (the
 //! session's logical size follows the view) and resize handles around the session image.
 
 use egui::{CursorIcon, Pos2, Rect, Stroke, Vec2, pos2, vec2};
@@ -132,8 +132,8 @@ pub struct Resizing {
     /// The image point that stays put, as a fraction of its size, and where it is on screen.
     frac: Vec2,
     anchor: Pos2,
-    /// Fit was on before (restored after).
-    pub was_fit: bool,
+    /// The zoom mode before (restored after).
+    pub was: crate::ZoomMode,
     /// The size the pointer asks for now.
     pub size: (u32, u32),
     /// Last size sent, and when (egui time).
@@ -141,10 +141,10 @@ pub struct Resizing {
 }
 
 impl Resizing {
-    pub fn new(edge: Edge, start: Pos2, img: Rect, size: (u32, u32), was_fit: bool) -> Resizing {
+    pub fn new(edge: Edge, start: Pos2, img: Rect, size: (u32, u32), was: crate::ZoomMode) -> Resizing {
         let frac = vec2(if edge.x < 0 { 1.0 } else if edge.x > 0 { 0.0 } else { 0.5 }, if edge.y < 0 { 1.0 } else if edge.y > 0 { 0.0 } else { 0.5 });
         let anchor = img.min + frac * img.size();
-        Resizing { edge, start, start_size: size, k: size.0 as f32 / img.width(), frac, anchor, was_fit, size, sent: None }
+        Resizing { edge, start, start_size: size, k: size.0 as f32 / img.width(), frac, anchor, was, size, sent: None }
     }
 
     pub fn moved(&mut self, p: Pos2) {
