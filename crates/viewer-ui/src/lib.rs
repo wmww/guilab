@@ -26,6 +26,7 @@ mod view;
 pub mod viz;
 pub mod workspace;
 
+use guilab_kit::Tip as _;
 use std::{collections::HashMap, sync::Arc};
 
 use egui::{CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Vec2, pos2, vec2};
@@ -600,7 +601,7 @@ impl ViewerUi {
                 let mut stop = false;
                 let r = guilab_kit::toast(ui, egui::Id::new("blocked-toast"), egui::Id::new(VIEW_TOASTS), view, |ui| {
                     ui.label("Agent using app");
-                    stop = ui.button("Stop").on_hover_text("Take the app back from the agent").clicked();
+                    stop = ui.button("Stop").tip("Take the app back from the agent").clicked();
                 });
                 if stop {
                     out.push(Action::Revoke { session: s.name.to_string() });
@@ -790,7 +791,7 @@ impl ViewerUi {
                         },
                         |ui| {
                             ui.add_enabled_ui(!fixed, |ui| {
-                                if ui.add(egui::Button::new("+").min_size(step)).on_hover_text("Zoom in").clicked() {
+                                if ui.add(egui::Button::new("+").min_size(step)).tip("Zoom in").clicked() {
                                     z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
                                     z.fit = false;
                                 }
@@ -800,7 +801,7 @@ impl ViewerUi {
                                     z.zoom = pct / 100.0;
                                     z.fit = false;
                                 }
-                                if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Zoom out").clicked() {
+                                if ui.add(egui::Button::new("−").min_size(step)).tip("Zoom out").clicked() {
                                     z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
                                     z.fit = false;
                                 }
@@ -883,14 +884,14 @@ fn session_menu(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizi
                 let cur = sz.edit_scale;
                 let mut pick = None;
                 // Right to left: + value −.
-                if ui.add(egui::Button::new("+").min_size(step)).on_hover_text("Larger").clicked() {
+                if ui.add(egui::Button::new("+").min_size(step)).tip("Larger").clicked() {
                     pick = Some(((cur / SCALE_STEP).floor() + 1.0) * SCALE_STEP);
                 }
                 let r = ui.add_sized(vec2(step.x * 2.0, step.y), egui::DragValue::new(&mut sz.edit_scale).range(SCALE_RANGE).speed(0.01).max_decimals(2).update_while_editing(false));
                 if (r.changed() && !r.dragged()) || r.drag_stopped() {
                     pick = Some(sz.edit_scale);
                 }
-                if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Smaller").clicked() {
+                if ui.add(egui::Button::new("−").min_size(step)).tip("Smaller").clicked() {
                     pick = Some(((cur / SCALE_STEP).ceil() - 1.0) * SCALE_STEP);
                 }
                 if let Some(sc) = pick.map(|sc| sc.clamp(*SCALE_RANGE.start(), *SCALE_RANGE.end())).filter(|sc| *sc != s.scale) {
@@ -913,7 +914,7 @@ fn session_menu(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizi
                 // Esc restores the old value.
                 let range = sizing::MIN_PX..=sizing::MAX_PX;
                 let field = |ui: &mut egui::Ui, v: &mut u32| {
-                    let r = ui.add(egui::DragValue::new(v).range(range.clone()).speed(4).update_while_editing(false)).on_hover_text("Output size in pixels");
+                    let r = ui.add(egui::DragValue::new(v).range(range.clone()).speed(4).update_while_editing(false)).tip("Output size in pixels");
                     (r.changed() && !r.dragged()) || r.drag_stopped()
                 };
                 let h = field(ui, &mut sz.edit_size.1);

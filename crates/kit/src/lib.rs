@@ -8,12 +8,14 @@ pub mod anim;
 pub mod headless;
 pub mod history;
 pub mod menu;
+pub mod popup;
 pub mod theme;
 pub mod widgets;
 
 pub use anim::{Easing, Motion, tween};
 pub use history::History;
 pub use menu::MenuBar;
+pub use popup::{Popup, Tip};
 pub use theme::{Theme, ThemePref};
 pub use widgets::*;
 

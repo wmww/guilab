@@ -1,0 +1,15 @@
+# Popups go through guilab_kit::popup (one place decides in-window vs native popups).
+disallowed-methods = [
+    { path = "egui::Response::on_hover_text", reason = "use guilab_kit::Tip::tip" },
+    { path = "egui::Response::on_hover_ui", reason = "use guilab_kit::Tip or guilab_kit::Popup" },
+    { path = "egui::Response::on_hover_text_at_pointer", reason = "use guilab_kit::Tip" },
+    { path = "egui::Response::on_disabled_hover_text", reason = "use guilab_kit::Tip" },
+    { path = "egui::Response::on_disabled_hover_ui", reason = "use guilab_kit::Popup" },
+    { path = "egui::Response::show_tooltip_text", reason = "use guilab_kit::Tip" },
+    { path = "egui::Response::show_tooltip_ui", reason = "use guilab_kit::Popup" },
+    { path = "egui::Response::context_menu", reason = "use guilab_kit::Popup" },
+    { path = "egui::Tooltip::show", reason = "use guilab_kit::Popup" },
+    { path = "egui::Popup::show", reason = "use guilab_kit::Popup" },
+    { path = "egui::ComboBox::show_ui", reason = "use guilab_kit::Popup" },
+    { path = "egui::Ui::menu_button", reason = "use guilab_kit::Popup" },
+]

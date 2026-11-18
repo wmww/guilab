@@ -2,6 +2,7 @@
 //! foreground layer, no relayout), empty and outlined states with optional cross-fades,
 //! center-cropped extreme aspects, the remove badge, click to open.
 
+use guilab_kit::Tip as _;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -134,7 +135,7 @@ impl<K: Clone + Eq + Hash> Slots<K> {
             // input wins over the thumbnail's.
             let badge_hover = look.removable && a.badge.to > 0.5 && {
                 let r = Rect::from_center_size(badge_center(t, drawn), egui::Vec2::splat(t.size.close_badge));
-                let b = ui.interact(r, id.with("x"), Sense::click()).on_hover_text("Remove");
+                let b = ui.interact(r, id.with("x"), Sense::click()).tip("Remove");
                 if b.clicked() {
                     out.events.push(ChatEvent::Remove { key: key.clone() });
                 }

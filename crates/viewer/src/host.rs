@@ -12,6 +12,8 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+
+use crate::surface::{Env, Mode, SurfaceBuffers};
 pub use guilab_viewer_ui::input::{CursorImage, Gesture, HostCursor, HostInput, RawKey, Touch, WindowOp};
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
@@ -35,18 +37,15 @@ use sctk::{
     },
     shm::{Shm, ShmHandler, slot::{Buffer as ShmBuffer, SlotPool}},
 };
-use smithay::{
-    backend::{
-        allocator::{
-            Fourcc, Modifier, Swapchain,
-            dmabuf::{AsDmabuf, Dmabuf},
-            gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
-            Buffer as _,
-        },
-        drm::{DrmDeviceFd, DrmNode},
-        renderer::{Bind, ExportMem, Frame as _, Offscreen, Renderer as _, gles::{GlesRenderer, GlesTexture}},
+use smithay::backend::{
+    allocator::{
+        Fourcc, Modifier,
+        dmabuf::AsDmabuf,
+        gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
+        Buffer as _,
     },
-    utils::{Rectangle, Transform},
+    drm::{DrmDeviceFd, DrmNode},
+    renderer::gles::GlesRenderer,
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, delegate_noop,
@@ -105,38 +104,17 @@ pub enum BufferKind {
     Shm,
 }
 
-/// A host wl_buffer we own; destroyed with its swapchain slot.
-struct OwnedBuffer(WlBuffer);
-impl Drop for OwnedBuffer {
-    fn drop(&mut self) {
-        self.0.destroy();
-    }
-}
-
-enum Present {
-    Dmabuf {
-        swapchain: Swapchain<GbmAllocator<DrmDeviceFd>>,
-        /// Slots the host still reads from, until `wl_buffer.release`.
-        busy: Vec<smithay::backend::allocator::Slot<GbmBuffer>>,
-    },
-    Shm {
-        pool: SlotPool,
-        buffers: Vec<ShmBuffer>,
-        target: Option<GlesTexture>,
-    },
-}
-
 pub struct HostState {
     registry: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
-    compositor: CompositorState,
-    viewporter: Option<WpViewporter>,
+    pub(crate) compositor: CompositorState,
+    pub(crate) viewporter: Option<WpViewporter>,
     cursor_surface: Option<CursorSurface>,
-    _xdg: XdgShell,
+    pub(crate) xdg: XdgShell,
     shm: Shm,
     dmabuf: DmabufState,
-    window: Window,
+    pub(crate) window: Window,
     pub(crate) qh: QueueHandle<HostState>,
     pub(crate) clipboard: crate::clipboard::HostClipboard,
     /// Serial of the last keyboard enter, key or button press (setting the selection
@@ -152,13 +130,14 @@ pub struct HostState {
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
     touch: Option<wayland_client::protocol::wl_touch::WlTouch>,
-    /// Where each active touch point is (cancel ends them all there).
-    touches: Vec<(i32, egui::Pos2)>,
+    /// Each active touch point: where it is (cancel ends them all there) and its surface's
+    /// origin in egui's window space.
+    touches: Vec<(i32, egui::Pos2, egui::Vec2)>,
     /// Serial of the last pointer enter (`set_cursor` needs it).
     pointer_serial: u32,
     /// Serial of the last button press (interactive move/resize need it) and its seat.
     press_serial: u32,
-    seat: Option<WlSeat>,
+    pub(crate) seat: Option<WlSeat>,
     /// The host doesn't decorate the window (no xdg-decoration, or it chose client side;
     /// `GUILAB_VIEWER_CSD=1` forces it): the UI draws a title bar and resize borders.
     pub csd: bool,
@@ -166,7 +145,14 @@ pub struct HostState {
     pub maximized: bool,
     /// What the pointer should show (re-applied on enter).
     cursor: Option<HostCursor>,
-    present: Option<Present>,
+    /// How frames reach the host, once decided.
+    mode: Option<Mode>,
+    window_buffers: SurfaceBuffers,
+    /// Popup surfaces, parents before children (see `popups.rs`).
+    pub(crate) popups: Vec<crate::popups::HostPopup>,
+    pub(crate) xdg_base: wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase,
+    /// Popups the compositor dismissed, for the UI to close.
+    pub(crate) dismissed: Vec<egui::Id>,
     feedback: Option<DmabufFeedback>,
     /// From the host's `zwp_linux_dmabuf_feedback_v1`, once known: whether it can take our dmabufs.
     gbm: Option<GbmDevice<DrmDeviceFd>>,
@@ -259,7 +245,8 @@ impl HostState {
             compositor,
             viewporter,
             cursor_surface: None,
-            _xdg: xdg,
+            xdg_base: xdg.xdg_wm_base().clone(),
+            xdg,
             shm,
             dmabuf,
             window,
@@ -280,7 +267,10 @@ impl HostState {
             force_csd: std::env::var_os("GUILAB_VIEWER_CSD").is_some_and(|v| v == "1"),
             maximized: false,
             cursor: None,
-            present: None,
+            mode: None,
+            window_buffers: SurfaceBuffers::default(),
+            popups: Vec::new(),
+            dismissed: Vec::new(),
             feedback: None,
             gbm,
             node,
@@ -456,11 +446,10 @@ impl HostState {
 
     /// Picks dmabuf or shm once the host's dmabuf feedback is in (or can't come) and, for
     /// dmabuf, the host accepted a probe buffer. Ok(false): not decided yet.
-    fn ensure_present(&mut self, renderer: &GlesRenderer) -> anyhow::Result<bool> {
-        if self.present.is_some() {
+    fn ensure_mode(&mut self, renderer: &GlesRenderer) -> anyhow::Result<bool> {
+        if self.mode.is_some() {
             return Ok(true);
         }
-        let (w, h) = self.buffer_size();
         let mods = self.dmabuf_modifiers(renderer);
         // The host may reject a format/modifier it advertised; `create_immed` would then be
         // a protocol error that closes the connection. So first create one buffer the
@@ -489,13 +478,10 @@ impl HostState {
             _ => None,
         };
         if let Some(mods) = mods {
-            let gbm = self.gbm.clone().unwrap();
-            let alloc = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING);
-            self.present = Some(Present::Dmabuf { swapchain: Swapchain::new(alloc, w, h, Fourcc::Argb8888, mods), busy: Vec::new() });
+            self.mode = Some(Mode::Dmabuf { gbm: self.gbm.clone().unwrap(), mods });
             self.buffer_kind = Some(BufferKind::Dmabuf);
         } else {
-            let pool = SlotPool::new((w * h * 4) as usize, &self.shm).context("shm pool")?;
-            self.present = Some(Present::Shm { pool, buffers: Vec::new(), target: None });
+            self.mode = Some(Mode::Shm);
             self.buffer_kind = Some(BufferKind::Shm);
         }
         tracing::info!("viewer presents via {:?}", self.buffer_kind.unwrap());
@@ -546,7 +532,7 @@ impl HostState {
 
     /// Whether we still wait for dmabuf feedback before the first frame.
     fn awaiting_feedback(&self) -> bool {
-        self.present.is_none()
+        self.mode.is_none()
             && self.feedback.is_none()
             && !self.force_shm
             && self.gbm.is_some()
@@ -564,66 +550,16 @@ impl HostState {
             self.first_frame_wanted.get_or_insert_with(Instant::now);
             return Ok(false);
         }
-        if !self.ensure_present(renderer)? {
+        if !self.ensure_mode(renderer)? {
             return Ok(false);
         }
         let (w, h) = self.buffer_size();
-        let size = (w as i32, h as i32);
         let surface = self.window.wl_surface().clone();
-        let qh = self.qh.clone();
-        match self.present.as_mut().unwrap() {
-            Present::Dmabuf { swapchain, busy } => {
-                swapchain.resize(w, h);
-                let Some(slot) = swapchain.acquire().map_err(|e| anyhow!("allocating host buffer: {e}"))? else {
-                    return Ok(false); // all buffers still with the host
-                };
-                let mut dmabuf: Dmabuf = slot.export().map_err(|e| anyhow!("exporting dmabuf: {e}"))?;
-                render_into(renderer, &mut dmabuf, size, paint)?;
-                if slot.userdata().get::<OwnedBuffer>().is_none() {
-                    let params = self.dmabuf.create_params(&qh).map_err(|e| anyhow!("dmabuf params: {e}"))?;
-                    let modifier = u64::from(dmabuf.format().modifier);
-                    for (i, (fd, (offset, stride))) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())).enumerate() {
-                        params.add(fd.as_fd(), i as u32, offset, stride, modifier);
-                    }
-                    let (buf, params) = params.create_immed(w as i32, h as i32, Fourcc::Argb8888 as u32, zwp_linux_buffer_params_v1::Flags::empty(), &qh);
-                    params.destroy();
-                    slot.userdata().insert_if_missing(|| OwnedBuffer(buf));
-                }
-                let buf = &slot.userdata().get::<OwnedBuffer>().unwrap().0;
-                surface.attach(Some(buf), 0, 0);
-                swapchain.submitted(&slot);
-                busy.push(slot);
-            }
-            Present::Shm { pool, buffers, target } => {
-                if target.as_ref().is_none_or(|t| smithay::backend::renderer::Texture::size(t) != (size.0, size.1).into()) {
-                    *target = Some(renderer.create_buffer(Fourcc::Abgr8888, (size.0, size.1).into())?);
-                    buffers.clear();
-                }
-                let tex = target.as_mut().unwrap();
-                let pixels = {
-                    let mut fb = renderer.bind(tex)?;
-                    paint_target(renderer, &mut fb, size, paint)?;
-                    let map = renderer.copy_framebuffer(&fb, Rectangle::from_size((size.0, size.1).into()), Fourcc::Abgr8888)?;
-                    drop(fb);
-                    renderer.map_texture(&map)?.to_vec()
-                };
-                let stride = w as i32 * 4;
-                let idx = match buffers.iter().position(|b| b.canvas(pool).is_some()) {
-                    Some(i) => i,
-                    None if buffers.len() < 3 => {
-                        buffers.push(pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)?.0);
-                        buffers.len() - 1
-                    }
-                    None => return Ok(false),
-                };
-                let canvas = buffers[idx].canvas(pool).unwrap();
-                // RGBA -> little-endian ARGB (BGRA bytes).
-                for (d, s) in canvas.as_chunks_mut::<4>().0.iter_mut().zip(pixels.as_chunks::<4>().0) {
-                    d.copy_from_slice(&[s[2], s[1], s[0], 255]);
-                }
-                buffers[idx].attach_to(&surface)?;
-            }
+        let env = Env { mode: self.mode.as_ref().unwrap(), dmabuf: &self.dmabuf, shm: &self.shm, qh: &self.qh };
+        if !self.window_buffers.render(env, renderer, &surface, (w, h), [0.1, 0.1, 0.1, 1.0], paint)? {
+            return Ok(false); // all buffers still with the host
         }
+        let qh = self.qh.clone();
         if let Some(vp) = &self.viewport {
             let (lw, lh) = self.size.unwrap();
             vp.set_destination(lw as i32, lh as i32);
@@ -638,29 +574,16 @@ impl HostState {
 
     /// Drops the presentation buffers (they're re-made on the next frame).
     pub fn reset_buffers(&mut self) {
-        self.present = None;
+        self.window_buffers = SurfaceBuffers::default();
+        for p in &mut self.popups {
+            p.buffers = SurfaceBuffers::default();
+        }
     }
-}
 
-/// Binds `target`, clears it and paints into it.
-fn render_into(renderer: &mut GlesRenderer, target: &mut Dmabuf, size: (i32, i32), paint: impl FnOnce((u32, u32))) -> anyhow::Result<()> {
-    let mut fb = renderer.bind(target)?;
-    paint_target(renderer, &mut fb, size, paint)
-}
-
-/// Clears the bound target and runs `paint` inside a smithay frame (GL context current,
-/// target bound), then waits for the GPU.
-fn paint_target(
-    renderer: &mut GlesRenderer,
-    fb: &mut smithay::backend::renderer::gles::GlesTarget<'_>,
-    size: (i32, i32),
-    paint: impl FnOnce((u32, u32)),
-) -> anyhow::Result<()> {
-    let mut frame = renderer.render(fb, (size.0, size.1).into(), Transform::Normal)?;
-    frame.clear([0.1, 0.1, 0.1, 1.0].into(), &[Rectangle::from_size((size.0, size.1).into())])?;
-    frame.with_context(|_| paint((size.0 as u32, size.1 as u32)))?;
-    frame.finish()?.wait().ok();
-    Ok(())
+    /// The rendering environment, once the buffer mode is decided.
+    pub(crate) fn env(&self) -> Option<Env<'_>> {
+        Some(Env { mode: self.mode.as_ref()?, dmabuf: &self.dmabuf, shm: &self.shm, qh: &self.qh })
+    }
 }
 
 fn cursor_shape(icon: egui::CursorIcon) -> Option<Shape> {
@@ -833,7 +756,13 @@ impl KeyboardHandler for HostState {
         self.input_serial = Some(serial);
         self.flush_clipboard();
         self.focused = true;
-        self.events.push(HostInput::Egui(egui::Event::WindowFocused(true)));
+        // Focus moved between our surfaces (a grabbing popup opened or closed): no change.
+        if matches!(self.events.last(), Some(HostInput::Egui(egui::Event::WindowFocused(false)))) {
+            self.events.pop();
+            self.keyboard_left = false;
+        } else {
+            self.events.push(HostInput::Egui(egui::Event::WindowFocused(true)));
+        }
         self.dirty = true;
     }
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: &WlSurface, _: u32) {
@@ -917,9 +846,16 @@ impl PointerHandler for HostState {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlPointer, events: &[PointerEvent]) {
         for ev in events {
             self.dirty = true;
-            let pos = egui::pos2(ev.position.0 as f32, ev.position.1 as f32);
+            // Popup surfaces show part of egui's window space (see `popups.rs`).
+            let Some(origin) = self.surface_origin(&ev.surface) else { continue };
+            let pos = egui::pos2(ev.position.0 as f32, ev.position.1 as f32) + origin;
             match ev.kind {
                 PointerEventKind::Enter { serial } => {
+                    // From one of our surfaces to another (window ↔ popup): the pointer
+                    // never left egui.
+                    if matches!(self.events.last(), Some(HostInput::Egui(egui::Event::PointerGone))) {
+                        self.events.pop();
+                    }
                     self.pointer_serial = serial;
                     // The host forgets our cursor on enter; set it again.
                     self.apply_cursor();
@@ -974,27 +910,28 @@ impl HostState {
     }
 
     fn touch_cancel(&mut self) {
-        for (id, pos) in std::mem::take(&mut self.touches) {
+        for (id, pos, _) in std::mem::take(&mut self.touches) {
             self.touch_event(id, egui::TouchPhase::Cancel, pos);
         }
     }
 }
 
 impl sctk::seat::touch::TouchHandler for HostState {
-    fn down(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, _: u32, _: WlSurface, id: i32, p: (f64, f64)) {
-        let pos = egui::pos2(p.0 as f32, p.1 as f32);
-        self.touches.retain(|(i, _)| *i != id);
-        self.touches.push((id, pos));
+    fn down(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, _: u32, surface: WlSurface, id: i32, p: (f64, f64)) {
+        let Some(origin) = self.surface_origin(&surface) else { return };
+        let pos = egui::pos2(p.0 as f32, p.1 as f32) + origin;
+        self.touches.retain(|(i, _, _)| *i != id);
+        self.touches.push((id, pos, origin));
         self.touch_event(id, egui::TouchPhase::Start, pos);
     }
     fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, _: u32, id: i32) {
-        let Some(i) = self.touches.iter().position(|(t, _)| *t == id) else { return };
-        let (_, pos) = self.touches.remove(i);
+        let Some(i) = self.touches.iter().position(|(t, _, _)| *t == id) else { return };
+        let (_, pos, _) = self.touches.remove(i);
         self.touch_event(id, egui::TouchPhase::End, pos);
     }
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wayland_client::protocol::wl_touch::WlTouch, _: u32, id: i32, p: (f64, f64)) {
-        let pos = egui::pos2(p.0 as f32, p.1 as f32);
-        if let Some(t) = self.touches.iter_mut().find(|(t, _)| *t == id) {
+        if let Some(t) = self.touches.iter_mut().find(|(t, _, _)| *t == id) {
+            let pos = egui::pos2(p.0 as f32, p.1 as f32) + t.2;
             t.1 = pos;
             self.touch_event(id, egui::TouchPhase::Move, pos);
         }
@@ -1035,10 +972,12 @@ impl DmabufHandler for HostState {
         self.dirty = true;
     }
     fn released(&mut self, _: &Connection, _: &QueueHandle<Self>, buffer: &WlBuffer) {
-        if let Some(Present::Dmabuf { busy, .. }) = &mut self.present
-            && let Some(i) = busy.iter().position(|s| s.userdata().get::<OwnedBuffer>().is_some_and(|b| &b.0 == buffer))
-        {
-            busy.remove(i);
+        if !self.window_buffers.release(buffer) {
+            for p in &mut self.popups {
+                if p.buffers.release(buffer) {
+                    break;
+                }
+            }
         }
     }
 }

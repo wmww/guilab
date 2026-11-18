@@ -1,6 +1,7 @@
 //! The feed: messages (a header per run of one author, images above the text), compact
 //! activity lines, the status line, following the end, and a jump-to-latest button.
 
+use guilab_kit::Tip as _;
 use std::hash::Hash;
 
 use egui::{Label, RichText, Sense, Ui, pos2, vec2};
@@ -124,7 +125,7 @@ fn item<K: Clone + Eq + Hash>(
                 ui.spacing_mut().interact_size.y = 0.0;
                 let m = ui.label(RichText::new("›").font(font.clone()).color(c.weak)).rect.width() + t.space.sm;
                 let hover = if it.time.is_empty() { it.text.clone() } else { format!("{}  {}", it.time, it.text) };
-                ui.add(Label::new(RichText::new(&it.text).font(font).color(c.weak)).truncate()).on_hover_text(hover);
+                ui.add(Label::new(RichText::new(&it.text).font(font).color(c.weak)).truncate()).tip(&hover);
                 m
             });
             if !it.attachments.is_empty() {
@@ -162,7 +163,7 @@ fn item<K: Clone + Eq + Hash>(
                 }
                 let resp = ui.add(Label::new(RichText::new(&it.text).color(c.text)).selectable(true).wrap());
                 if !new_run && !it.time.is_empty() {
-                    resp.on_hover_text(&it.time);
+                    resp.tip(&it.time);
                 }
             }
         }
@@ -214,7 +215,7 @@ fn status(ui: &mut Ui, t: &Theme, st: &Status) {
             ui.painter().circle_filled(p, r, c.agent.gamma_multiply(0.35 + 0.65 * k));
         }
         ui.label(RichText::new(&st.text).color(c.agent));
-        ui.label(RichText::new(duration(st.elapsed)).font(t.font.small.clone()).color(c.weak)).on_hover_text("Time spent working");
+        ui.label(RichText::new(duration(st.elapsed)).font(t.font.small.clone()).color(c.weak)).tip("Time spent working");
         if let Some(note) = &st.note {
             ui.label(RichText::new(note).font(t.font.small.clone()).color(c.weak).italics());
         }
@@ -228,5 +229,5 @@ fn jump_button(ui: &mut Ui, t: &Theme, id: egui::Id, clip: egui::Rect, unseen: b
     let s = t.size.jump_button;
     let center = pos2(clip.right() - t.space.lg - s / 2.0 - t.space.md, clip.bottom() - t.space.md - s / 2.0);
     let rect = egui::Rect::from_center_size(center, vec2(s, s));
-    guilab_kit::round_button_at(ui, id.with("jump"), rect, guilab_kit::RoundIcon::Down, unseen, true).on_hover_text("Jump to the latest").clicked()
+    guilab_kit::round_button_at(ui, id.with("jump"), rect, guilab_kit::RoundIcon::Down, unseen, true).tip("Jump to the latest").clicked()
 }

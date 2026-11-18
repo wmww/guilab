@@ -1,6 +1,7 @@
 //! The composer: a rounded box with the pending attachments in a row above the text, and
 //! a send button. Pending slots grow in and shrink out; Enter sends, Shift+Enter is a newline.
 
+use guilab_kit::Tip as _;
 use std::hash::Hash;
 
 use egui::{Align, Key, Layout, Modifiers, Rect, Sense, TextureId, Ui, UiBuilder, pos2, vec2};
@@ -225,7 +226,7 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                         ui.add_space((text_h - button).max(0.0));
                         let b = guilab_kit::send_button(ui, can_send);
                         let tip = if can_send { &chat.send_hint } else { &chat.send_empty_hint };
-                        click = b.on_hover_text(tip.as_str()).clicked();
+                        click = b.tip(tip.as_str()).clicked();
                     });
                 });
             });

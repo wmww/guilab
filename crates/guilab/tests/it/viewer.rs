@@ -580,6 +580,31 @@ fn touch_through() {
     });
 }
 
+/// Menus and tooltips are real popups of the viewer window (and a tooltip in a menu a popup
+/// of the menu), so they can be larger than the window. Layout: View menu at 178,12, its
+/// "Zoom +" button at 327,21.
+#[test]
+fn menus_are_popups() {
+    let Some((h, sock, t)) = host() else { return };
+    let v = Lab::new();
+    v.run(&["new", "app", "-s", "400x300"]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    h.run(&["-t", &t, "output", "-s", "1200x260"]);
+    v.wait_window([1200, 260]);
+    h.input(&t, &["move", "178", "12", "sleep", "100", "click"]);
+    let tree = h.wait_tree("host", 10, |t| nodes(t).iter().any(|n| n["kind"] == "popup"));
+    let menu = nodes(&tree).into_iter().find(|n| n["kind"] == "popup").unwrap().clone();
+    let (_, y, _, hh) = rect(&menu);
+    // Taller than the window: the compositor slid it up to fit the screen.
+    assert!(hh > 260 && y <= 0, "{menu}");
+    // Hovering "+" shows its tooltip as the menu's child.
+    h.input(&t, &["move", "326", "22", "sleep", "100", "move", "327", "21"]);
+    h.wait_tree("host", 10, |t| nodes(t).iter().any(|n| n["kind"] == "popup" && nodes(&n["children"]).iter().any(|c| c["kind"] == "popup")));
+    h.input(&t, &["key", "Escape"]);
+    h.wait_tree("host", 10, |t| !nodes(t).iter().any(|n| n["kind"] == "popup"));
+}
+
 /// The viewer's own text fields (here the chat composer) paste from and copy to the host
 /// clipboard; their copies don't go to the session.
 #[test]

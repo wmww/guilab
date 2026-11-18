@@ -1,5 +1,6 @@
 //! One canvas frame: input (pointer events in order, keys), gestures, hover, cursor, paint.
 
+use guilab_kit::Tip as _;
 use egui::{CursorIcon, Event, Key, Modifiers, PointerButton, Pos2, Sense, Shape, Ui};
 use guilab_image::geom::{self, Mods};
 use guilab_image::{Body, Doc, Edit, EditError, ElemKey, Element, Fonts, IRect, Kind, Pt, Rect, element_prims, pt};
@@ -391,7 +392,7 @@ impl Editor {
             let has_crop = d.body().crop.is_some();
             guilab_kit::toast(ui, self.id.with("crop-bar"), toasts, clip, |ui| {
                 ui.label("Drag to crop");
-                show_all = ui.add_enabled(has_crop, egui::Button::new("Show all")).on_hover_text("Remove the crop").clicked();
+                show_all = ui.add_enabled(has_crop, egui::Button::new("Show all")).tip("Remove the crop").clicked();
             });
             if show_all {
                 let e = d.crop_edit(None);

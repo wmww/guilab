@@ -5,7 +5,7 @@
 
 use egui::{Align2, Color32, CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use crate::Theme;
+use crate::{Theme, Tip};
 
 /// Consumes a press of Enter with no modifiers. Unlike `consume_key`, which ignores Shift,
 /// this leaves Shift+Enter for text boxes to turn into a newline.
@@ -27,16 +27,6 @@ pub fn flat_fill(t: &Theme, resp: &Response, selected: bool) -> Color32 {
     } else {
         Color32::TRANSPARENT
     }
-}
-
-/// A tooltip beside the widget (right of it, else left), for widgets in a vertical strip,
-/// where egui's (below) would cover the next one.
-pub fn side_tooltip(resp: Response, text: &str) -> Response {
-    let t = Theme::get(&resp.ctx);
-    let mut tip = egui::Tooltip::for_enabled(&resp);
-    tip.popup = tip.popup.align(egui::RectAlign::RIGHT).align_alternatives(&[egui::RectAlign::LEFT]).gap(t.space.sm);
-    tip.show(|ui| ui.label(text));
-    resp
 }
 
 /// The focus ring around `rect` while `resp` has keyboard focus.
@@ -105,7 +95,7 @@ pub fn toast(ui: &Ui, id: Id, stack: Id, clip: Rect, add: impl FnOnce(&mut Ui)) 
 }
 
 /// A square toolbar button: flat, filled on hover, press and selection; `icon` paints into
-/// the inner rect with the given color. The tooltip shows beside it ([`side_tooltip`]).
+/// the inner rect with the given color. The tooltip shows beside it (`Tip::side_tip`).
 pub fn tool_button(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl FnOnce(&Painter, Rect, Color32)) -> Response {
     let t = Theme::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(t.size.tool_button), Sense::click());
@@ -114,7 +104,7 @@ pub fn tool_button(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl FnOnce
     focus_ring(p, &t, &resp, rect, t.radius.button);
     let fg = if selected || resp.hovered() { t.colors.strong } else { t.colors.text };
     icon(p, rect.shrink(t.size.tool_icon_pad), fg);
-    side_tooltip(resp, tooltip)
+    resp.side_tip(tooltip)
 }
 
 /// Relative luminance difference, 0..1.
@@ -141,7 +131,7 @@ pub fn swatch(ui: &mut Ui, color: Color32, selected: bool, name: &str) -> Respon
     } else if resp.has_focus() {
         p.circle_stroke(rect.center(), s.swatch_r + s.swatch_ring_gap, Stroke::new(s.focus_w, t.colors.focus));
     }
-    side_tooltip(resp, name)
+    resp.side_tip(name)
 }
 
 /// What a [`round_button`] shows.
@@ -218,7 +208,7 @@ pub fn close_badge_on(ui: &mut Ui, painter: &Painter, id: Id, center: Pos2, tool
     let rect = Rect::from_center_size(center, Vec2::splat(t.size.close_badge));
     let resp = ui.interact(rect, id, Sense::click());
     paint_close_badge(painter, &t, center, resp.hovered() || resp.has_focus(), 1.0);
-    resp.on_hover_text(tooltip)
+    resp.tip(tooltip)
 }
 
 /// A tab: rounded top corners, the selected one filled with `selected_fill` (the color of
@@ -313,7 +303,7 @@ pub fn window_button(ui: &mut Ui, id: Id, rect: Rect, kind: WindowButton) -> Res
         }
         WindowButton::Close => glyph::cross(p, center, h, stroke),
     }
-    resp.on_hover_text(kind.tooltip())
+    resp.tip(kind.tooltip())
 }
 
 /// A small label floating next to the pointer `at` (e.g. a size readout while dragging),

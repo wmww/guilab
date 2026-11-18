@@ -14,7 +14,9 @@ mod clipboard;
 pub mod gfx;
 pub mod host;
 pub mod portal;
+mod popups;
 pub mod source;
+mod surface;
 
 use std::{
     hash::{Hash, Hasher},
@@ -86,6 +88,7 @@ impl Viewer {
         let host = HostState::new(c, "guilab", "guilab", gbm, node, force_shm)?;
         let gfx = gfx::Gfx::new(renderer)?;
         guilab_kit::theme::install(&gfx.ctx);
+        guilab_kit::popup::enable_native(&gfx.ctx);
         Ok(Viewer {
             host,
             gfx,
@@ -144,7 +147,7 @@ impl Viewer {
         inputs
             .into_iter()
             .filter(|i| match i {
-                HostInput::Egui(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }) => match ui::window_edge(screen, border, *pos) {
+                HostInput::Egui(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }) if !self.host.over_popup(*pos) => match ui::window_edge(screen, border, *pos) {
                     Some((x, y)) => {
                         self.host.window_op(host::WindowOp::Resize(x, y));
                         false
@@ -266,14 +269,23 @@ impl Viewer {
             ..Default::default()
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
+        guilab_kit::popup::dismiss(&self.gfx.ctx, std::mem::take(&mut self.host.dismissed));
         let mut actions = Vec::new();
+        let mut popups = Vec::new();
         ui.gestures = self.host.has_gestures();
         ui.csd = self.host.csd;
         ui.maximized = self.host.maximized;
         let out = self.gfx.ctx.run_ui(raw, |egui_ui| {
             // Input is consumed in the first pass only (egui may run several).
             actions.extend(ui.show(egui_ui, &views, std::mem::take(&mut inputs), keyboard_left, store));
+            // Last: everything that shows popups has run.
+            popups = guilab_kit::popup::take_native(egui_ui.ctx());
         });
+        self.host.sync_popups(&popups);
+        for (id, delta) in self.host.popup_nudges() {
+            guilab_kit::popup::nudge(&self.gfx.ctx, id, delta);
+            self.host.dirty = true;
+        }
         if ui.current().map(str::to_string) != cur || ui.nearest() != nearest {
             self.host.dirty = true; // the mirror is stale (new tab, or its filter changed)
         }
@@ -294,13 +306,29 @@ impl Viewer {
         self.pending.append(out.textures_delta);
         let ppp = self.gfx.ctx.pixels_per_point();
         let prims = self.gfx.ctx.tessellate(out.shapes, ppp);
-        let gfx = &mut self.gfx;
-        let pending = &self.pending;
+        // The first surface painted applies the texture updates.
+        let empty = egui::TexturesDelta::default();
         let mut painted = false;
-        let drawn = self.host.present(renderer, |size| {
-            gfx.paint(size, ppp, &prims, pending);
-            painted = true;
-        })?;
+        let drawn = {
+            let (gfx, pending) = (&mut self.gfx, &self.pending);
+            self.host.present(renderer, |size| {
+                gfx.paint(size, ppp, &prims, pending);
+                painted = true;
+            })?
+        };
+        for p in popups {
+            let shapes = p.shapes.into_iter().map(|mut s| {
+                s.transform(egui::emath::TSTransform::from_translation(-p.rect.min.to_vec2()));
+                s
+            });
+            let prims = self.gfx.ctx.tessellate(shapes.collect(), ppp);
+            let (gfx, delta) = (&mut self.gfx, if painted { &empty } else { &self.pending });
+            if self.host.present_popup(p.req.id, renderer, |size| gfx.paint(size, ppp, &prims, delta))? {
+                painted = true;
+            } else {
+                self.host.dirty = true;
+            }
+        }
         if painted {
             self.pending = Default::default();
         }

@@ -12,7 +12,7 @@
 //! groups, headings, notes and custom rows. Flat: the popup is set off by its shadow, groups
 //! by space.
 
-use egui::{Align2, Color32, Id, Key, Modifiers, Order, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, Id, Key, Modifiers, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::Theme;
 
@@ -208,7 +208,7 @@ impl Bar<'_> {
         let width = self.state.width.max(min_w);
         let (hot, activate) = (self.state.hot, self.keys.activate);
         let mut out = None;
-        let area = egui::Area::new(self.id.with(("menu", title))).order(Order::Foreground).fixed_pos(rect.left_bottom()).constrain(true).show(&ctx, |ui| {
+        let popup = crate::Popup::menu(self.id.with(("menu", title)), rect).show(&ctx, |ui| {
             egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(0, t.space.sm as i8)).corner_radius(t.radius.menu).show(ui, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -217,7 +217,11 @@ impl Bar<'_> {
                 out = Some((m.close, m.natural, m.items, m.hovered));
             });
         });
-        self.inside.push(area.response.rect);
+        self.inside.push(popup.response.rect);
+        if popup.dismissed {
+            self.state.open = None;
+            return;
+        }
         let Some((close, natural, items, hovered)) = out else { return };
         if natural != self.state.width {
             self.state.width = natural;
