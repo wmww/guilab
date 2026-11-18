@@ -88,6 +88,17 @@ impl ViewerUi {
             z.fit = false;
             *img = image(z);
         };
+        // Where scrolling and touchpad gestures at the pointer go: the one rule for all of them.
+        // With "Use the app" they're the app's over it (held back, not redirected, while the
+        // agent has it) and nothing's elsewhere; with a tool or an open image they move the
+        // view. Ctrl+scroll always zooms the view.
+        let route = |p: Option<Pos2>, ctrl: bool, img: Rect| match p.filter(|p| ours(*p)) {
+            None => Route::Nothing,
+            Some(_) if editing || ctrl => Route::View,
+            Some(p) if !img.contains(p) => Route::Nothing,
+            Some(_) if blocked => Route::Blocked,
+            Some(_) => Route::App,
+        };
         let tool = ws.editor.tool;
         // A press in the view this frame (an image flying in lands at once).
         let mut pressed_view = false;
@@ -138,21 +149,24 @@ impl ViewerUi {
                     continue;
                 }
                 HostInput::Gesture(g) => {
-                    // Over the app with "Use the app": the whole gesture goes to it. Else
-                    // a pinch zooms the view (swipes do nothing).
+                    // The whole gesture goes where it began (`route`); in the view a pinch
+                    // zooms and a swipe does nothing.
                     let k = s.size.0 as f64 / img.width() as f64; // session px per point
                     match g {
                         Gesture::PinchBegin { fingers } | Gesture::SwipeBegin { fingers } => {
                             let pinch = matches!(g, Gesture::PinchBegin { .. });
-                            let over_img = self.pointer.is_some_and(|p| ours(p) && img.contains(p));
-                            tried |= blocked && !editing && over_img;
-                            let over_app = to_app && over_img;
-                            if over_app {
-                                self.gesture = Some((GestureTo::App { pinch }, s.name.to_string()));
-                                send(out, if pinch { Input::PinchBegin { fingers } } else { Input::SwipeBegin { fingers } });
-                            } else {
-                                self.gesture = pinch.then(|| (GestureTo::View { scale: 1.0 }, s.name.to_string()));
-                            }
+                            self.gesture = match route(self.pointer, false, img) {
+                                Route::App => {
+                                    send(out, if pinch { Input::PinchBegin { fingers } } else { Input::SwipeBegin { fingers } });
+                                    Some((GestureTo::App { pinch }, s.name.to_string()))
+                                }
+                                Route::View => pinch.then(|| (GestureTo::View { scale: 1.0 }, s.name.to_string())),
+                                Route::Blocked => {
+                                    tried = true;
+                                    None
+                                }
+                                Route::Nothing => None,
+                            };
                         }
                         Gesture::PinchUpdate { dx, dy, scale, rotation } => match &mut self.gesture {
                             Some((GestureTo::App { pinch: true }, _)) => send(out, Input::PinchUpdate { dx: dx * k, dy: dy * k, scale, rotation }),
@@ -299,10 +313,8 @@ impl ViewerUi {
                 }
                 Event::MouseWheel { unit, delta, phase, modifiers } => {
                     let Some(p) = self.pointer else { continue };
-                    if !ours(p) {
-                        continue;
-                    }
-                    if modifiers.ctrl || editing || !img.contains(p) {
+                    let r = route(Some(p), modifiers.ctrl, img);
+                    if r == Route::View {
                         let smooth = unit == egui::MouseWheelUnit::Point;
                         if !modifiers.ctrl && self.nav.resolve(smooth, self.gestures) == NavMode::ScrollPans {
                             let k = match unit {
@@ -327,8 +339,8 @@ impl ViewerUi {
                         }
                         continue;
                     }
-                    if blocked {
-                        tried = true;
+                    if r != Route::App {
+                        tried |= r == Route::Blocked;
                         continue;
                     }
                     let stop = phase == egui::TouchPhase::End;
@@ -507,4 +519,14 @@ fn live_rect(view: Rect, z: &Zoom, s: &SessionView, ppp: f32) -> Rect {
     let size = px * zoom;
     let min = view.center() + pan - size / 2.0;
     Rect::from_min_size(pos2((min.x * ppp).round() / ppp, (min.y * ppp).round() / ppp), size)
+}
+
+/// Where a scroll or touchpad gesture goes (see `route` in `view`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    App,
+    /// Over the app while the agent holds it: dropped (and the human told).
+    Blocked,
+    View,
+    Nothing,
 }
