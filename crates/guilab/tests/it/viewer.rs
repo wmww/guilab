@@ -427,11 +427,11 @@ impl Lab {
     }
 }
 
-/// View menu sizing: "Resize to window" sets the session's logical size to the view;
-/// "Lock size to window" keeps it there as the window resizes, except while an agent holds
+/// Session menu sizing: "Resize to window" sets the session's logical size to the view;
+/// "Lock to window" keeps it there as the window resizes, except while an agent holds
 /// the lock (the agent may still resize); unlocking fits it again.
-/// Layout (1200x800 host window, one session): View menu at 111,12, its "Resize to
-/// window" row at y=127, "Lock size to window" at y=153; the view is the window minus the
+/// Layout (1200x800 host window, one session): Session menu at 118,12, its "Resize to
+/// window" row at y=106, "Lock to window" at y=132; the view is the window minus the
 /// 40 px toolbar, 24 px menu bar and 240 px chat panel.
 #[test]
 fn size_to_window() {
@@ -443,15 +443,15 @@ fn size_to_window() {
     let step = |actions: &[&str]| {
         h.input(&t, actions);
     };
-    step(&["move", "111", "12", "click"]);
-    step(&["move", "150", "127", "click"]);
+    step(&["move", "118", "12", "click"]);
+    step(&["move", "150", "106", "click"]);
     // Logical size = the view (1160x536 points), at scale 1.5.
     v.wait_output(5, |w, hh| (w, hh) == (1740, 804));
     let log = v.run(&["log", "--kind", "output"]);
     assert!(log.contains("output is now 1740x804 scale 1.5 (the human resized it)"), "{log}");
 
-    step(&["move", "111", "12", "click"]);
-    step(&["move", "150", "153", "click"]);
+    step(&["move", "118", "12", "click"]);
+    step(&["move", "150", "132", "click"]);
     h.run(&["-t", &t, "output", "-s", "1000x700"]);
     v.wait_output(5, |w, hh| (w, hh) == (1440, 654));
     // An agent's lock freezes it; the agent can still resize.

@@ -148,7 +148,7 @@ pub enum Action {
     /// The human started typing a message: capture what they see now (the screen a message
     /// without images refers to), for the message they send.
     Typing { session: String },
-    /// Change the session's output (View menu, handles, "Lock size to window").
+    /// Change the session's output (Session menu, handles, "Lock to window").
     Resize { session: String, size: Option<(u32, u32)>, scale: Option<f64> },
     /// File > Save: ask where, then save `png` (the open image, rendered and marked), or a
     /// fresh screenshot of the session if None. Report back with [`ViewerUi::notices`].
@@ -169,14 +169,16 @@ struct PerSession {
     sizing: Sizing,
 }
 
-/// Session sizing state (View menu).
+/// Session sizing state (Session menu).
 #[derive(Default)]
 struct Sizing {
-    /// "Lock size to window": the session's logical size follows the view; no zoom/pan.
+    /// "Lock to window": the session's logical size follows the view; no zoom/pan.
     follow: bool,
+    /// The size before "Lock to window", shown (disabled) while locked and restored after.
+    before_follow: Option<(u32, u32)>,
     /// The last size "follow" asked for, and when (egui time).
     sent: Option<((u32, u32), f64)>,
-    /// The View menu's size and scale fields (synced to the session while it's closed).
+    /// The Session menu's size and scale fields (synced to the session while it's closed).
     edit_size: (u32, u32),
     edit_scale: f64,
 }
@@ -707,7 +709,7 @@ impl ViewerUi {
         std::mem::take(&mut self.window_ops)
     }
 
-    /// "Lock size to window": asks for the output size whose logical size fills the view,
+    /// "Lock to window": asks for the output size whose logical size fills the view,
     /// throttled. Not while an agent holds the lock (that freezes the size).
     fn follow_window(&self, s: &SessionView, sz: &mut Sizing, view: Rect, now: f64, out: &mut Vec<Action>, ctx: &egui::Context) {
         if !sz.follow || s.locked {
@@ -741,7 +743,7 @@ impl ViewerUi {
         let free = egui::Panel::top("menu").show_separator_line(false).frame(egui::Frame::new().fill(t.colors.panel)).show(ui, |ui| {
             MenuBar::new(MENU_BAR).show(ui, |bar| {
                 let Some(p) = p else {
-                    for m in ["File", "Edit", "View"] {
+                    for m in ["File", "Edit", "Session", "View"] {
                         bar.menu_enabled(m, false, |_| {});
                     }
                     return;
@@ -773,6 +775,9 @@ impl ViewerUi {
                         p.ws.redo(p.zoom);
                     }
                 });
+                if let Some(sv) = sv {
+                    bar.menu("Session", |m| session_menu(m, sv, &mut p.sizing, &mut p.zoom, last_view, menu_open, &name, out));
+                }
                 bar.menu("View", |m| {
                     let doc = p.ws.image_open();
                     let fixed = p.sizing.follow && !doc;
@@ -789,8 +794,11 @@ impl ViewerUi {
                                     z.zoom = (z.zoom * 1.25).min(MAX_ZOOM);
                                     z.fit = false;
                                 }
-                                if ui.add(egui::Button::new(format!("{:.0}%", z.zoom * 100.0)).min_size(vec2(step.x * 2.0, step.y))).on_hover_text("Actual size (100%)").clicked() {
-                                    *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                                let mut pct = z.zoom * 100.0;
+                                let r = ui.add_sized(vec2(step.x * 2.0, step.y), egui::DragValue::new(&mut pct).range(MIN_ZOOM * 100.0..=MAX_ZOOM * 100.0).max_decimals(0).suffix("%").speed(1.0).update_while_editing(false));
+                                if r.changed() {
+                                    z.zoom = pct / 100.0;
+                                    z.fit = false;
                                 }
                                 if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Zoom out").clicked() {
                                     z.zoom = (z.zoom / 1.25).max(MIN_ZOOM);
@@ -799,11 +807,11 @@ impl ViewerUi {
                             });
                         },
                     );
+                    if m.item("Zoom 1:1", None, !fixed && (z.fit || z.zoom != 1.0)) {
+                        *z = Zoom { fit: false, zoom: 1.0, pan: Vec2::ZERO };
+                    }
                     if m.item("Fit to window", None, !z.fit && !fixed) {
                         *z = Zoom::default();
-                    }
-                    if let Some(sv) = sv {
-                        session_size(m, sv, &mut p.sizing, &mut p.zoom, last_view, menu_open, &name, out);
                     }
                     m.gap();
                     m.heading("Chat");
@@ -813,7 +821,7 @@ impl ViewerUi {
                         }
                     }
                     m.gap();
-                    m.heading("Appearance");
+                    m.heading("Theme");
                     for (pref, label) in ThemePref::ALL {
                         if m.radio(theme == pref, label) {
                             theme = pref;
@@ -849,65 +857,43 @@ pub fn window_edge(screen: Rect, border: f32, p: Pos2) -> Option<(i8, i8)> {
     (e != (0, 0)).then_some(e)
 }
 
-/// Scale presets in the View menu.
-const SCALES: [f64; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
+/// Scale steps in the Session menu's − / + buttons.
+const SCALE_STEP: f64 = 0.25;
+const SCALE_RANGE: std::ops::RangeInclusive<f64> = 0.25..=8.0;
 
-/// The View menu's session size section: resize to / lock to the window, size and scale.
+/// The Session menu: scale, size, resize to / lock to the window.
 #[allow(clippy::too_many_arguments)]
-fn session_size(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizing, z: &mut Zoom, view: Option<Rect>, menu_open: bool, name: &str, out: &mut Vec<Action>) {
-    if !menu_open || sz.follow || s.locked {
-        // Opening (or not editable): show the session's current values.
-        sz.edit_size = s.size;
+fn session_menu(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizing, z: &mut Zoom, view: Option<Rect>, menu_open: bool, name: &str, out: &mut Vec<Action>) {
+    // Opening (or not editable): show the session's current values. Locked to the window, the
+    // size field keeps the size from before.
+    if !menu_open || s.locked {
         sz.edit_scale = s.scale;
+        sz.edit_size = sz.before_follow.filter(|_| sz.follow).unwrap_or(s.size);
     }
     let free = !s.locked;
     let resize = |out: &mut Vec<Action>, size: Option<(u32, u32)>, scale: Option<f64>| out.push(Action::Resize { session: name.to_string(), size, scale });
-    m.gap();
-    m.heading("Session size");
-    if m.item("Resize to window", None, free && view.is_some()) {
-        resize(out, view.map(|v| sizing::fit_pixels(v, s.scale)), None);
-        *z = Zoom::default();
-    }
-    if m.check(sz.follow, "Lock size to window", true) {
-        sz.follow = !sz.follow;
-        *z = Zoom::default();
-    }
-    let edit_size = free && !sz.follow;
-    m.custom(
-        |ui| {
-            ui.add_enabled(edit_size, egui::Label::new("Size"));
-        },
-        |ui| {
-            ui.add_enabled_ui(edit_size, |ui| {
-                let set = ui.button("Set").on_hover_text("Output size in pixels");
-                let range = sizing::MIN_PX..=sizing::MAX_PX;
-                let h = ui.add(egui::DragValue::new(&mut sz.edit_size.1).range(range.clone()).speed(4));
-                ui.label("×");
-                let w = ui.add(egui::DragValue::new(&mut sz.edit_size.0).range(range).speed(4));
-                let enter = (w.lost_focus() || h.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (set.clicked() || enter) && sz.edit_size != s.size {
-                    resize(out, Some(sz.edit_size), None);
-                }
-            });
-        },
-    );
+    let t = Theme::get(m.ui.ctx());
+    let step = vec2(t.size.menu_item_h, t.size.menu_item_h - t.space.sm);
     m.custom(
         |ui| {
             ui.add_enabled(free, egui::Label::new("Scale"));
         },
         |ui| {
             ui.add_enabled_ui(free, |ui| {
+                let cur = sz.edit_scale;
                 let mut pick = None;
-                let custom = ui.add(egui::DragValue::new(&mut sz.edit_scale).range(0.25..=8.0).speed(0.01).max_decimals(2)).on_hover_text("Other scale");
-                if (custom.drag_stopped() || custom.lost_focus()) && sz.edit_scale != s.scale {
+                // Right to left: + value −.
+                if ui.add(egui::Button::new("+").min_size(step)).on_hover_text("Larger").clicked() {
+                    pick = Some(((cur / SCALE_STEP).floor() + 1.0) * SCALE_STEP);
+                }
+                let r = ui.add_sized(vec2(step.x * 2.0, step.y), egui::DragValue::new(&mut sz.edit_scale).range(SCALE_RANGE).speed(0.01).max_decimals(2).update_while_editing(false));
+                if (r.changed() && !r.dragged()) || r.drag_stopped() {
                     pick = Some(sz.edit_scale);
                 }
-                for sc in SCALES.iter().rev() {
-                    if ui.selectable_label(s.scale == *sc, format!("{sc}")).clicked() && s.scale != *sc {
-                        pick = Some(*sc);
-                    }
+                if ui.add(egui::Button::new("−").min_size(step)).on_hover_text("Smaller").clicked() {
+                    pick = Some(((cur / SCALE_STEP).ceil() - 1.0) * SCALE_STEP);
                 }
-                if let Some(sc) = pick {
+                if let Some(sc) = pick.map(|sc| sc.clamp(*SCALE_RANGE.start(), *SCALE_RANGE.end())).filter(|sc| *sc != s.scale) {
                     sz.edit_scale = sc;
                     // Following the window keeps the logical size; otherwise the pixel size.
                     let size = sz.follow.then_some(view).flatten().map(|v| sizing::fit_pixels(v, sc));
@@ -916,6 +902,50 @@ fn session_size(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, sz: &mut Sizi
             });
         },
     );
+    let edit_size = free && !sz.follow;
+    m.custom(
+        |ui| {
+            ui.add_enabled(edit_size, egui::Label::new("Size"));
+        },
+        |ui| {
+            ui.add_enabled_ui(edit_size, |ui| {
+                // Right to left: W × H. Applied on Enter, leaving the field or ending a drag;
+                // Esc restores the old value.
+                let range = sizing::MIN_PX..=sizing::MAX_PX;
+                let field = |ui: &mut egui::Ui, v: &mut u32| {
+                    let r = ui.add(egui::DragValue::new(v).range(range.clone()).speed(4).update_while_editing(false)).on_hover_text("Output size in pixels");
+                    (r.changed() && !r.dragged()) || r.drag_stopped()
+                };
+                let h = field(ui, &mut sz.edit_size.1);
+                ui.label("×");
+                let w = field(ui, &mut sz.edit_size.0);
+                if (w || h) && sz.edit_size != s.size {
+                    resize(out, Some(sz.edit_size), None);
+                }
+            });
+        },
+    );
+    m.gap();
+    if m.item("Resize to window", None, free && !sz.follow && view.is_some()) {
+        let size = view.map(|v| sizing::fit_pixels(v, s.scale));
+        if let Some(size) = size {
+            sz.edit_size = size;
+        }
+        resize(out, size, None);
+        *z = Zoom::default();
+    }
+    if m.check(sz.follow, "Lock to window", true) {
+        sz.follow = !sz.follow;
+        if sz.follow {
+            sz.before_follow = Some(s.size);
+        } else if let Some(before) = sz.before_follow.take() {
+            sz.edit_size = before;
+            if free && before != s.size {
+                resize(out, Some(before), None);
+            }
+        }
+        *z = Zoom::default();
+    }
     if s.locked {
         m.note("The agent is using the app; its size is frozen");
     }

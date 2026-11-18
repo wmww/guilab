@@ -31,7 +31,7 @@ impl ViewerUi {
             None => (IRect::of_size([s.size.0, s.size.1]), s.scale as f32),
         };
         let mut z = if doc_view { ws.doc_zoom } else { p.zoom };
-        // "Lock size to window" (the live app only): always fit, no zoom or pan.
+        // "Lock to window" (the live app only): always fit, no zoom or pan.
         let fixed = p.sizing.follow && !doc_view;
         if fixed {
             z.fit = true;

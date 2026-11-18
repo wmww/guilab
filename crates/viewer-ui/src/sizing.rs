@@ -1,4 +1,4 @@
-//! Session sizing from the viewer: "Resize to window" / "Lock size to window" (the
+//! Session sizing from the viewer: "Resize to window" / "Lock to window" (the
 //! session's logical size follows the view) and resize handles around the session image.
 
 use egui::{CursorIcon, Pos2, Rect, Stroke, Vec2, pos2, vec2};
