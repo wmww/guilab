@@ -31,40 +31,65 @@ impl ViewerUi {
             None => (IRect::of_size([s.size.0, s.size.1]), s.scale as f32),
         };
         let mut z = if doc_view { ws.doc_zoom } else { p.zoom };
-        // "Resize to window" (the live app only): always fit, no zoom or pan.
-        let fixed = p.sizing.follow && !doc_view;
-        if fixed {
+        let now = ui.input(|i| i.time);
+        // "Resize to window" (the live app only): the app fills the view, so it fits.
+        let following = p.sizing.follow && !doc_view;
+        if following {
             z.mode = ZoomMode::Fit;
         }
-        if self.resizing.as_ref().is_some_and(|(n, _)| n != s.name) {
+        // Handles: on the live app with a free zoom (Other), not while the agent holds it.
+        let handles = !s.locked && live && s.texture.is_some() && z.mode == ZoomMode::Other;
+        if !handles || self.resizing.as_ref().is_some_and(|(n, _)| n != s.name) {
             self.resizing = None;
-        }
-        // Handles: on the live app only, not while the agent holds it or following the window.
-        let handles = !s.locked && !fixed && live && s.texture.is_some();
-        if !handles && let Some((_, r)) = self.resizing.take() {
-            z.mode = r.was;
         }
         let ppp = ui.ctx().pixels_per_point();
         // Image pixels in points at zoom 1.
         let px = vec2(region.w as f32, region.h as f32) / ppp;
-        if z.fit() {
-            let cap = (ppp / content_scale).max(1.0);
-            let fit = (view.width() / px.x).min(view.height() / px.y).min(cap);
-            z.zoom = fit.max(MIN_ZOOM);
-            z.pan = Vec2::ZERO;
-        }
+        let fit_zoom = (view.width() / px.x).min(view.height() / px.y).min((ppp / content_scale).max(1.0)).max(MIN_ZOOM);
+        // The target for the mode. Only 1:1 (on an axis where the image overflows the view)
+        // and Other leave the center; nothing the human drags can break that.
+        let settle = |z: &mut Zoom| match z.mode {
+            ZoomMode::Fit => {
+                z.zoom = fit_zoom;
+                z.pan = Vec2::ZERO;
+            }
+            ZoomMode::Actual => {
+                z.zoom = 1.0;
+                let over = ((px - view.size()) / 2.0).max(Vec2::ZERO);
+                z.pan = z.pan.clamp(-over, over);
+            }
+            ZoomMode::Other => {
+                let max = ((px * z.zoom + view.size()) / 2.0 - Vec2::splat(PAN_KEEP)).max(Vec2::ZERO);
+                z.pan = z.pan.clamp(-max, max);
+            }
+        };
         // While a handle drags, the image's opposite side stays put.
         if let Some((_, r)) = &self.resizing {
             z.pan = r.place(px * z.zoom).center() - view.center();
         }
+        settle(&mut z);
+        if self.resizing.is_some() {
+            z.snap();
+        }
+        // Automatic changes (a new mode, the window or app resizing) ease into view.
+        if z.ease(now, t.motion.view) {
+            ui.ctx().request_repaint();
+        }
         let image = |z: &Zoom| {
-            let size = px * z.zoom;
-            let min = view.center() + z.pan - size / 2.0;
+            let (zoom, pan) = z.shown();
+            let size = px * zoom;
+            let min = view.center() + pan - size / 2.0;
             // Snap to physical pixels so 100% stays sharp.
             let min = pos2((min.x * ppp).round() / ppp, (min.y * ppp).round() / ppp);
             Rect::from_min_size(min, size)
         };
         let mut img = image(&z);
+        // The human moved the view directly: settled for the mode, shown at once.
+        let direct = |z: &mut Zoom, img: &mut Rect| {
+            settle(z);
+            z.snap();
+            *img = image(z);
+        };
         let to_session = |img: Rect, p: Pos2| {
             let rel = (p - img.min) / img.size();
             (rel.x as f64 * s.size.0 as f64, rel.y as f64 * s.size.1 as f64)
@@ -72,20 +97,18 @@ impl ViewerUi {
         let send = |out: &mut Vec<Action>, input: Input| out.push(Action::Input { session: s.name.to_string(), input });
         let blocked = s.blocked();
         let to_app = !blocked && !editing;
-        let now = ui.input(|i| i.time);
         // The human tried to use the app while an agent holds it: say so (a toast).
         let mut tried = false;
         let layer = ui.layer_id();
         let ours = |p: Pos2| view.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer);
+        // Zooming (wheel, pinch) takes over from any mode: Other, from what's on screen.
         let zoom_at = |z: &mut Zoom, img: &mut Rect, p: Pos2, factor: f32| {
-            if fixed {
-                return;
-            }
+            z.take_over();
             let new = (z.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
             let c = view.center();
             z.pan = (p - c) - (p - c - z.pan) * (new / z.zoom);
-            z.set(new);
-            *img = image(z);
+            z.zoom = new;
+            direct(z, img);
         };
         // Where scrolling and touchpad gestures at the pointer go: the one rule for all of them.
         // With "Use the app" they're the app's over it (held back, not redirected, while the
@@ -212,21 +235,20 @@ impl ViewerUi {
                         continue;
                     }
                     if let Some(last) = self.panning {
+                        z.absorb();
                         z.pan += p - last;
-                        z.panned();
+                        direct(&mut z, &mut img);
                         self.panning = Some(p);
-                        img = image(&z);
                         continue;
                     }
                     if let Some((start, _)) = self.middle
                         && (p - start).length() > DRAG_SLOP
-                        && !fixed
                     {
                         self.middle = None;
+                        z.absorb();
                         z.pan += p - start;
-                        z.panned();
+                        direct(&mut z, &mut img);
                         self.panning = Some(p);
-                        img = image(&z);
                         continue;
                     }
                     let grabbed = !self.held_buttons.is_empty();
@@ -245,7 +267,6 @@ impl ViewerUi {
                             && let Some((_, r)) = self.resizing.take()
                         {
                             out.push(Action::Resize { session: s.name.to_string(), size: Some(r.size), scale: None });
-                            z.mode = r.was;
                             continue;
                         }
                         if self.panning.is_some() && (button == PointerButton::Middle || self.held_buttons.is_empty()) {
@@ -288,14 +309,14 @@ impl ViewerUi {
                         // Primary presses are the editor's. Drawing tools do nothing off the
                         // image, so a drag there pans.
                         let free = button != PointerButton::Primary || tool.draws();
-                        if !on_image && free && self.held_buttons.is_empty() && !fixed {
+                        if !on_image && free && self.held_buttons.is_empty() {
                             self.panning = Some(pos);
                         }
                         continue;
                     }
                     // Off the image: pan.
                     if !on_image {
-                        if self.held_buttons.is_empty() && !fixed {
+                        if self.held_buttons.is_empty() {
                             self.panning = Some(pos);
                         }
                         continue;
@@ -321,10 +342,11 @@ impl ViewerUi {
                                 egui::MouseWheelUnit::Line => 40.0,
                                 egui::MouseWheelUnit::Page => view.height(),
                             };
-                            if delta != Vec2::ZERO && !fixed {
+                            // Scroll-panning takes over from any mode, like zooming.
+                            if delta != Vec2::ZERO {
+                                z.take_over();
                                 z.pan += delta * k;
-                                z.panned();
-                                img = image(&z);
+                                direct(&mut z, &mut img);
                             }
                             continue;
                         }
@@ -371,14 +393,17 @@ impl ViewerUi {
             send(out, Input::Leave);
         }
 
-        // Clamp the pan so some of the image stays in view.
-        let keep = PAN_KEEP;
-        let max = (img.size() + view.size()) / 2.0 - Vec2::splat(keep);
-        let clamped = z.pan.clamp(-max.max(Vec2::ZERO), max.max(Vec2::ZERO));
-        if clamped != z.pan {
-            z.pan = clamped;
-            img = image(&z);
+        // Zooming or scroll-panning out of "Resize to window" keeps the app's current size.
+        if following && z.mode != ZoomMode::Fit {
+            p.sizing.follow = false;
+            p.sizing.before_follow = None;
         }
+        // The window or the app may have changed size: settle again (easing).
+        settle(&mut z);
+        if z.ease(now, t.motion.view) {
+            ui.ctx().request_repaint();
+        }
+        img = image(&z);
 
         // An image flying into the view isn't painted by the canvas until it lands; a press
         // in the view lands it now (input is never held up by an animation).
@@ -407,7 +432,7 @@ impl ViewerUi {
 
         // The editor over the image. Host zoom is physical px per image px; the canvas
         // counts points.
-        let zoom_pt = z.zoom / ppp;
+        let zoom_pt = z.shown().0 / ppp;
         let xf = Xf { zoom: zoom_pt, offset: img.min.to_vec2() - vec2(region.x as f32, region.y as f32) * zoom_pt };
         let session_zoom = if doc_view { p.zoom } else { z };
         let c = Canvas {
@@ -430,9 +455,11 @@ impl ViewerUi {
         if let Some(r) = cout.refused {
             ws.notes.push(r);
         }
-        if cout.pan != Vec2::ZERO && !fixed {
+        if cout.pan != Vec2::ZERO {
+            z.absorb();
             z.pan += cout.pan;
-            z.panned();
+            settle(&mut z);
+            z.snap();
         }
         ws.wants_keys = cout.wants_keys;
         ws.view_place = ws.doc().filter(|_| doc_view).map(|d| Place { canvas: xf.rect(IRect::of_size(d.body().canvas).to_rect()), clip: xf.rect(region.to_rect()).intersect(view), alpha: 1.0 });
@@ -449,9 +476,7 @@ impl ViewerUi {
                     && self.panning.is_none()
                     && let Some(start) = ui.input(|i| i.pointer.press_origin())
                 {
-                    // The zoom holds still while dragging (mode restored on release).
-                    self.resizing = Some((s.name.to_string(), Resizing::new(e, start, img, s.size, z.mode)));
-                    z.mode = ZoomMode::Other;
+                    self.resizing = Some((s.name.to_string(), Resizing::new(e, start, img, s.size)));
                 }
                 if hot_handle.is_none() && r.hovered() && hovered && self.panning.is_none() {
                     hot_handle = Some(e);
@@ -478,7 +503,7 @@ impl ViewerUi {
         }
         self.image_rect = Some(img);
         self.touch_area = (!editing).then_some(img.intersect(view));
-        self.pixel_ratio = z.zoom;
+        self.pixel_ratio = z.shown().0;
 
         // Cursor. Over the image: the app's when input goes to it, else the editor's tool
         // cursor, never the arrow (the app's own cursor is usually an arrow; it would look
@@ -514,8 +539,9 @@ const PAN_KEEP: f32 = 48.0;
 /// Where the live app shows in `view` at zoom `z` (while an open image has the view).
 fn live_rect(view: Rect, z: &Zoom, s: &SessionView, ppp: f32) -> Rect {
     let px = vec2(s.size.0 as f32, s.size.1 as f32) / ppp;
-    let zoom = if z.fit() { (view.width() / px.x).min(view.height() / px.y).min((ppp / s.scale as f32).max(1.0)).max(MIN_ZOOM) } else { z.zoom };
-    let pan = if z.fit() { Vec2::ZERO } else { z.pan };
+    let fit = z.mode == ZoomMode::Fit;
+    let zoom = if fit { (view.width() / px.x).min(view.height() / px.y).min((ppp / s.scale as f32).max(1.0)).max(MIN_ZOOM) } else { z.shown().0 };
+    let pan = if fit { Vec2::ZERO } else { z.shown().1 };
     let size = px * zoom;
     let min = view.center() + pan - size / 2.0;
     Rect::from_min_size(pos2((min.x * ppp).round() / ppp, (min.y * ppp).round() / ppp), size)

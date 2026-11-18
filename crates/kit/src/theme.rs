@@ -227,6 +227,8 @@ pub struct Motions {
     pub slot_grow: Motion,
     /// Fades: toasts appearing, cross-fades.
     pub fade: Motion,
+    /// A view's automatic zoom and pan changes (a new zoom mode, re-centering).
+    pub view: Motion,
     /// Thumbnails grow by `hover_grow` on hover, over `hover`.
     pub hover: Motion,
     /// egui's own animations: popups fading in, collapsing.
@@ -413,6 +415,7 @@ fn motion() -> Motions {
         whoosh: Motion { secs: 0.22, easing: Easing::OutCubic },
         slot_grow: Motion { secs: 0.16, easing: Easing::OutCubic },
         fade: Motion { secs: 0.2, easing: Easing::OutCubic },
+        view: Motion { secs: 0.16, easing: Easing::OutCubic },
         hover: Motion { secs: 0.1, easing: Easing::OutCubic },
         ui_secs: 1.0 / 12.0,
         double_click_secs: 0.3,

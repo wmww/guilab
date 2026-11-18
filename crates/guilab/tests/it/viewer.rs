@@ -489,7 +489,8 @@ fn screen_from_typing_start() {
     assert!(!v.info().viewer.unwrap().typing, "taken by the message");
 }
 
-/// Dragging the bottom-right resize handle resizes the output by the dragged distance.
+/// Resize handles show with the "Other" zoom only (App menu at 108,12, "Other" at y=139);
+/// dragging the bottom-right one resizes the output by the dragged distance.
 #[test]
 fn resize_handle() {
     let Some((h, sock, t)) = host() else { return };
@@ -498,6 +499,7 @@ fn resize_handle() {
     v.run(&["run", "--", "sleep", "600"]);
     let (ok, _, err) = v.show(&sock);
     assert!(ok, "{err}");
+    h.input(&t, &["move", "108", "12", "click", "move", "90", "139", "click", "key", "Escape"]);
     let m = mapping(&h, &t, &v);
     assert!((m.scale - 1.0).abs() < 0.01, "a 600x400 session shows 1:1 ({})", m.scale);
     let (x, y) = ((m.origin.0 + 600.0 + 5.0).round() as i64, (m.origin.1 + 400.0 + 5.0).round() as i64);

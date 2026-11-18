@@ -194,60 +194,118 @@ impl PerSession {
 /// How a view's zoom is chosen (App menu "Zoom").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZoomMode {
-    /// Fit the view, at most 100% (or the content's logical size); no pan.
+    /// Fit the view, at most 100% (or the content's logical size); centered.
     Fit,
-    /// 100%: one host pixel per image pixel.
+    /// 100%: one host pixel per image pixel; centered on each axis where it fits, else
+    /// panned within its edges.
     Actual,
-    /// Any zoom (wheel, pinch, typed); its value is kept while another mode is on.
+    /// Any zoom and pan (wheel, pinch, typed); both kept while another mode is on.
     Other,
 }
 
-/// Zoom and pan of a view (the live app, or an open image).
+/// Zoom and pan of a view (the live app, or an open image). `zoom`/`pan` are the target,
+/// settled for the mode each frame (`view.rs`); what's on screen eases toward them after
+/// automatic changes and follows at once after the human's direct ones.
 #[derive(Clone, Copy, Debug)]
 pub struct Zoom {
     mode: ZoomMode,
-    /// The effective zoom: host physical pixels per image pixel.
+    /// Host physical pixels per image pixel.
     zoom: f32,
-    /// The last "Other" zoom, restored when it's picked again (first time: the current zoom).
-    other: Option<f32>,
     /// Image center minus view center, in points.
     pan: Vec2,
+    /// Other's zoom and pan while another mode is on.
+    other: Option<(f32, Vec2)>,
+    /// On screen, and the animation toward the target.
+    shown: Option<(f32, Vec2)>,
+    anim: Option<ViewAnim>,
 }
+
+/// A view easing from one (zoom, pan) to another since a start time.
+type ViewAnim = ((f32, Vec2), (f32, Vec2), f64);
 
 impl Default for Zoom {
     fn default() -> Self {
-        Zoom { mode: ZoomMode::Fit, zoom: 1.0, other: None, pan: Vec2::ZERO }
+        Zoom { mode: ZoomMode::Fit, zoom: 1.0, pan: Vec2::ZERO, other: None, shown: None, anim: None }
     }
 }
 
 impl Zoom {
-    fn fit(&self) -> bool {
-        self.mode == ZoomMode::Fit
-    }
-
-    /// The human set the zoom (wheel, pinch, typed): Other at that zoom.
-    fn set(&mut self, zoom: f32) {
-        self.mode = ZoomMode::Other;
-        self.zoom = zoom;
-        self.other = Some(zoom);
-    }
-
-    /// The human panned: a fitted view becomes Other at its zoom (1:1 stays 1:1).
-    fn panned(&mut self) {
-        if self.fit() {
-            self.set(self.zoom);
-        }
-    }
-
-    /// Picks a mode from the menu (Other restores its last zoom); recenters.
+    /// Picks a mode from the menu. Leaving Other keeps its zoom and pan; picking it again
+    /// brings them back (first time: what's on screen).
     fn select(&mut self, mode: ZoomMode) {
+        if self.mode == mode {
+            return;
+        }
+        if self.mode == ZoomMode::Other {
+            self.other = Some((self.zoom, self.pan));
+        }
         self.mode = mode;
-        self.pan = Vec2::ZERO;
         match mode {
             ZoomMode::Fit => {}
-            ZoomMode::Actual => self.zoom = 1.0,
-            ZoomMode::Other => self.zoom = *self.other.get_or_insert(self.zoom),
+            ZoomMode::Actual => self.pan = Vec2::ZERO,
+            ZoomMode::Other => (self.zoom, self.pan) = self.other.unwrap_or_else(|| self.shown()),
         }
+    }
+
+    /// The human navigates (zooms, scroll-pans): from what's on screen, as Other.
+    fn take_over(&mut self) {
+        (self.zoom, self.pan) = self.shown();
+        self.anim = None;
+        self.mode = ZoomMode::Other;
+    }
+
+    /// The human grabbed the view mid-animation: it stays where it's shown.
+    fn absorb(&mut self) {
+        if self.anim.is_some() {
+            (self.zoom, self.pan) = self.shown();
+            self.anim = None;
+        }
+    }
+
+    /// The human set the zoom (typed, − / +): Other at that zoom.
+    fn set(&mut self, zoom: f32) {
+        if self.mode != ZoomMode::Other {
+            self.take_over();
+        }
+        self.zoom = zoom;
+    }
+
+    /// What's on screen.
+    fn shown(&self) -> (f32, Vec2) {
+        self.shown.unwrap_or((self.zoom, self.pan))
+    }
+
+    /// Shows the target at once (after direct input).
+    fn snap(&mut self) {
+        self.anim = None;
+        self.shown = Some((self.zoom, self.pan));
+    }
+
+    /// Eases what's on screen toward the target (restarting when it moves). Returns
+    /// whether it's still moving.
+    fn ease(&mut self, now: f64, m: guilab_kit::Motion) -> bool {
+        let to = (self.zoom, self.pan);
+        let Some(shown) = self.shown else {
+            self.shown = Some(to);
+            return false;
+        };
+        if self.anim.is_none_or(|(_, t, _)| t != to) {
+            if shown == to {
+                self.anim = None;
+                return false;
+            }
+            self.anim = Some((shown, to, now));
+        }
+        let (from, to, t0) = self.anim.unwrap();
+        let t = if m.secs <= 0.0 { 1.0 } else { ((now - t0) / m.secs as f64) as f32 };
+        if t >= 1.0 {
+            self.snap();
+            return false;
+        }
+        let k = m.easing.apply(t);
+        // Zoom eases geometrically, so it feels even in and out.
+        self.shown = Some((from.0 * (to.0 / from.0).powf(k), from.1 + (to.1 - from.1) * k));
+        true
     }
 }
 
