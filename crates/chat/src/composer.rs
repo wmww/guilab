@@ -201,7 +201,7 @@ pub(crate) fn show<K: Clone + Eq + Hash>(chat: &mut Chat<K>, ui: &mut Ui, t: &Th
                 // fill the panel's previous height, so the box could never shrink.)
                 ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                     let button = t.size.send_button;
-                    let w = ui.available_width() - button - md;
+                    let w = (ui.available_width() - button - md).max(0.0);
                     let line = ui.text_style_height(&egui::TextStyle::Body);
                     // One line sits centered on the send button.
                     let pad = ((button - line) / 2.0).max(0.0);
