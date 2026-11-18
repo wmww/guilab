@@ -580,6 +580,24 @@ fn touch_through() {
     });
 }
 
+/// The viewer's own text fields (here the chat composer) paste from and copy to the host
+/// clipboard; their copies don't go to the session.
+#[test]
+fn composer_clipboard() {
+    let Some((h, sock, t)) = host() else { return };
+    let (v, _) = viewed(&[]);
+    let (ok, _, err) = v.show(&sock);
+    assert!(ok, "{err}");
+    h.run(&["-t", &t, "clip", "set", "from host"]);
+    v.wait_clip("from host", 10); // bridged; also means the viewer has read it
+    h.input(&t, &["move", "600", "768", "click", "key", "ctrl+v", "type", " + typed", "key", "ctrl+a", "key", "ctrl+c"]);
+    h.wait_clip("from host + typed", 10);
+    h.input(&t, &["key", "Return"]);
+    let (_, out, err) = v.try_run(&["poll", "--timeout", "10"]);
+    assert!(out.contains("\"from host + typed\""), "{out}{err}");
+    assert_eq!(v.run(&["clip", "get"]).trim_end(), "from host", "the viewer's copy reached the session");
+}
+
 /// The host clipboard and the shown session's are bridged (text): host → session always,
 /// session → host while the viewer has focus.
 #[test]

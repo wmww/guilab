@@ -203,14 +203,23 @@ impl Viewer {
         // Keys go to egui only while it wants them (a focused text field); otherwise to the
         // session, and egui mustn't see them (Tab/Space would act on its buttons).
         let to_session = !self.gfx.ctx.egui_wants_keyboard_input() && !ui.keys_to_egui(&self.gfx.ctx);
-        let events: Vec<egui::Event> = inputs
-            .iter()
-            .filter_map(|i| match i {
-                HostInput::Egui(egui::Event::Key { .. } | egui::Event::Text(_)) if to_session => None,
-                HostInput::Egui(e) => Some(e.clone()),
-                HostInput::Key(_) | HostInput::Gesture(_) | HostInput::Touch(_) => None,
-            })
-            .collect();
+        let mut events = Vec::new();
+        for i in &inputs {
+            match i {
+                HostInput::Egui(egui::Event::Key { .. } | egui::Event::Text(_)) if to_session => {}
+                HostInput::Egui(e) => {
+                    // egui's text fields copy, cut and paste only on these events.
+                    match clipboard_command(e) {
+                        Some(Clip::Copy) => events.push(egui::Event::Copy),
+                        Some(Clip::Cut) => events.push(egui::Event::Cut),
+                        Some(Clip::Paste) => events.extend(self.host.clipboard_text().map(egui::Event::Paste)),
+                        None => {}
+                    }
+                    events.push(e.clone());
+                }
+                HostInput::Key(_) | HostInput::Gesture(_) | HostInput::Touch(_) => {}
+            }
+        }
         // The UI gets everything in order (pointer and keys interleaved), keys only if
         // they're the session's.
         let mut inputs: Vec<HostInput> = inputs.into_iter().filter(|i| to_session || !matches!(i, HostInput::Key(_))).collect();
@@ -271,6 +280,13 @@ impl Viewer {
         for op in ui.take_window_ops() {
             self.host.window_op(op);
         }
+        for cmd in &out.platform_output.commands {
+            if let egui::OutputCommand::CopyText(t) = cmd
+                && !t.is_empty()
+            {
+                self.host.set_clipboard(t.clone());
+            }
+        }
         let cursor = ui.host_cursor(out.platform_output.cursor_icon);
         self.host.set_cursor(cursor);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
@@ -296,5 +312,31 @@ impl Viewer {
             self.host.dirty = true;
         }
         Ok(actions)
+    }
+}
+
+enum Clip {
+    Copy,
+    Cut,
+    Paste,
+}
+
+/// The clipboard command a key press means: Ctrl+C/X/V, Ctrl+Insert, Shift+Insert/Delete.
+fn clipboard_command(e: &egui::Event) -> Option<Clip> {
+    use egui::Key;
+    let egui::Event::Key { key, pressed: true, modifiers: m, .. } = e else { return None };
+    let ctrl = m.ctrl && !m.alt && !m.shift;
+    let shift = m.shift && !m.ctrl && !m.alt;
+    match key {
+        Key::Copy => Some(Clip::Copy),
+        Key::Cut => Some(Clip::Cut),
+        Key::Paste => Some(Clip::Paste),
+        Key::C if ctrl => Some(Clip::Copy),
+        Key::X if ctrl => Some(Clip::Cut),
+        Key::V if ctrl => Some(Clip::Paste),
+        Key::Insert if ctrl => Some(Clip::Copy),
+        Key::Insert if shift => Some(Clip::Paste),
+        Key::Delete if shift => Some(Clip::Cut),
+        _ => None,
     }
 }

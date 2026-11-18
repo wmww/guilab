@@ -35,6 +35,9 @@ pub(crate) struct HostClipboard {
     pending: Option<String>,
     /// Text read from a new host selection, for the owner to take.
     incoming: Arc<Mutex<Option<String>>>,
+    /// The host clipboard's text as last known (ours or read from someone else's): what
+    /// pasting into the viewer's own text fields inserts.
+    known: Arc<Mutex<Option<Arc<str>>>>,
 }
 
 impl HostClipboard {
@@ -66,12 +69,21 @@ impl HostState {
         let Some(text) = c.pending.take() else { return };
         let source = m.create_copy_paste_source(&self.qh, TEXT_MIMES);
         source.set_selection(dev, serial);
-        c.source = Some((source, Arc::from(text)));
+        let text: Arc<str> = Arc::from(text);
+        if let Ok(mut k) = c.known.lock() {
+            *k = Some(text.clone());
+        }
+        c.source = Some((source, text));
     }
 
     /// Text the host clipboard got from someone else since the last call.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.incoming.lock().ok()?.take()
+    }
+
+    /// The host clipboard's text as last known.
+    pub(crate) fn clipboard_text(&self) -> Option<String> {
+        self.clipboard.known.lock().ok()?.as_deref().map(str::to_string)
     }
 }
 
@@ -83,21 +95,31 @@ impl DataDeviceHandler for HostState {
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
         let c = &self.clipboard;
-        let Some(offer) = c.device.as_ref().and_then(|d| d.data().selection_offer()) else { return };
         // Our own selection coming back.
         if c.source.is_some() {
             return;
         }
-        let Some(mime) = offer.with_mime_types(|m| TEXT_MIMES.iter().find(|t| m.iter().any(|x| x == *t)).map(|t| t.to_string())) else { return };
+        let forget = || {
+            if let Ok(mut k) = c.known.lock() {
+                *k = None;
+            }
+        };
+        let Some(offer) = c.device.as_ref().and_then(|d| d.data().selection_offer()) else { return forget() };
+        let Some(mime) = offer.with_mime_types(|m| TEXT_MIMES.iter().find(|t| m.iter().any(|x| x == *t)).map(|t| t.to_string())) else { return forget() };
+        forget();
         let Ok(pipe) = offer.receive(mime) else { return };
-        let incoming = c.incoming.clone();
+        let (incoming, known) = (c.incoming.clone(), c.known.clone());
         let spawned = std::thread::Builder::new().name("host-clipboard-read".into()).spawn(move || {
             let mut buf = Vec::new();
             if std::fs::File::from(std::os::fd::OwnedFd::from(pipe)).take(MAX_TEXT).read_to_end(&mut buf).is_ok()
                 && let Ok(text) = String::from_utf8(buf)
-                && let Ok(mut i) = incoming.lock()
             {
-                *i = Some(text);
+                if let Ok(mut k) = known.lock() {
+                    *k = Some(Arc::from(text.as_str()));
+                }
+                if let Ok(mut i) = incoming.lock() {
+                    *i = Some(text);
+                }
             }
         });
         if let Err(e) = spawned {

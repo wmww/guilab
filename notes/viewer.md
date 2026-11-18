@@ -41,6 +41,7 @@
 
 ## Clipboard (clipboard.rs, server viewer.rs)
 - `HostClipboard` (sctk data device, text mimes): `set_clipboard` takes the host selection with the last input serial (keyboard enter, key or button press; queued until there is one), `take_clipboard` returns text read (on a thread) from a new selection someone else made. Our own selection's echo is ignored while our source is alive (it's cancelled before someone else's selection arrives).
+- The viewer's own text fields: `draw` turns Ctrl+C/X/V (and Ctrl/Shift+Insert, Shift+Delete) into egui `Copy`/`Cut`/`Paste` while egui has the keys; paste inserts `clipboard_text()` (the host text as last known: our own selection or the last one read). egui's `OutputCommand::CopyText` → `set_clipboard`. Our own selections never come back through `take_clipboard`, so these copies don't reach the session. Test: `viewer::composer_clipboard`.
 - Server `ClipBridge` (per shown viewer, current session only): host text → `clip_set`; `Session::clip.seq()` changes → `clip_get` (pipe read on a thread) → host, only while the host window is focused; `last` stops ping-pong. Test: `viewer::clipboard_bridge`.
 
 ## Window decorations
