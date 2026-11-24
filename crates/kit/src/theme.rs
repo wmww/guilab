@@ -59,15 +59,17 @@ pub struct Colors {
     /// Chat authors: the human using the UI, and the agent.
     pub me: Color32,
     pub agent: Color32,
-    /// Editor and viewer: glow from a slot to the open image (phase 7), key points, hover outline.
+    /// Editor: glow under a hovered stroke; key points, hover outline.
     pub glow: Color32,
+    /// Viewer: the light from the open image's slot to the image (white on dark, black on light).
+    pub beam: Color32,
     pub key_point: Color32,
     pub key_point_hot: Color32,
     /// Thin ring around key points, so they read on light and dark images.
     pub key_point_ring: Color32,
     pub hover_outline: Color32,
-    /// Chat: an empty thumbnail slot (its image is open or in flight), hovered, and the
-    /// outline of the slot whose image is open.
+    /// Chat: an empty thumbnail slot (its image is in flight), hovered, and the wash over
+    /// the thumbnail of the slot whose image is open.
     pub slot_empty: Color32,
     pub slot_empty_hover: Color32,
     pub slot_open: Color32,
@@ -166,9 +168,8 @@ pub struct Sizes {
     /// a hovered text or picture.
     pub hover_halo: f32,
     pub hover_outline_w: f32,
-    /// Glow from a slot to the open image: halo width around the slot; the band along the
-    /// feed's edge for a slot scrolled out of view (depth, feathered ends).
-    pub glow_halo: f32,
+    /// The open image's light, for a slot scrolled out of view: the band along the feed's
+    /// edge (depth, feathered ends).
     pub glow_edge: f32,
     pub glow_feather: f32,
     /// Line widths: hairlines (crop outline, key point rings), icons, bold icons (arrows on
@@ -383,7 +384,6 @@ fn sizes() -> Sizes {
         key_point_grow: 1.0,
         hover_halo: 3.0,
         hover_outline_w: 2.0,
-        glow_halo: 10.0,
         glow_edge: 18.0,
         glow_feather: 24.0,
         line: 1.0,
@@ -465,13 +465,14 @@ impl Theme {
                 me: Color32::from_rgb(110, 170, 255),
                 agent: Color32::from_rgb(120, 210, 140),
                 glow: Color32::from_rgba_unmultiplied(110, 170, 255, 60),
+                beam: Color32::from_white_alpha(52),
                 key_point: gray(240),
                 key_point_hot: Color32::from_rgb(110, 170, 255),
                 key_point_ring: Color32::from_black_alpha(170),
                 hover_outline: Color32::from_rgba_unmultiplied(110, 170, 255, 140),
                 slot_empty: gray(24),
                 slot_empty_hover: gray(44),
-                slot_open: Color32::from_rgb(110, 170, 255),
+                slot_open: Color32::from_white_alpha(110),
                 crop_dim: Color32::from_black_alpha(150),
                 crop_line: gray(240),
                 missing: gray(128),
@@ -514,13 +515,14 @@ impl Theme {
                 me: Color32::from_rgb(30, 100, 210),
                 agent: Color32::from_rgb(25, 135, 60),
                 glow: Color32::from_rgba_unmultiplied(30, 100, 210, 50),
+                beam: Color32::from_black_alpha(36),
                 key_point: gray(255),
                 key_point_hot: Color32::from_rgb(30, 100, 210),
                 key_point_ring: Color32::from_black_alpha(150),
                 hover_outline: Color32::from_rgba_unmultiplied(30, 100, 210, 140),
                 slot_empty: gray(228),
                 slot_empty_hover: gray(216),
-                slot_open: Color32::from_rgb(30, 100, 210),
+                slot_open: Color32::from_black_alpha(80),
                 crop_dim: Color32::from_black_alpha(130),
                 crop_line: gray(255),
                 missing: gray(128),

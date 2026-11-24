@@ -203,9 +203,9 @@ fn hover_grows_click_opens() {
     t.run(vec![ev::moved(grown.right_center() - vec2(2.0, 0.0))]);
     t.run(vec![ev::press(grown.right_center() - vec2(2.0, 0.0)), ev::release(grown.right_center() - vec2(2.0, 0.0))]);
     assert_eq!(t.events(), vec![ChatEvent::Open { slot, key, rect: grown }]);
-    // Now it's away (empty, outlined): no grow; a click on it again is reported too.
+    // Now it's open (washed): no grow; a click on it again is reported too.
     t.settle();
-    assert_eq!(t.slot(slot, key), rest, "empty slots don't grow");
+    assert_eq!(t.slot(slot, key), rest, "open slots don't grow");
     t.click(rest.center());
     assert!(matches!(t.events().as_slice(), [ChatEvent::Open { .. }]));
     assert_eq!(t.host.thumbs.open, None);

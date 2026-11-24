@@ -152,7 +152,7 @@ fn scenarios(d: &mut Driver, filter: &str) {
         d.snap("07-composer-undone");
     }
     if want("open") {
-        // A past image open: its feed slot is empty and outlined.
+        // A past image open: its feed slot shows washed.
         let (s, k) = d.feed_slot(7, 0);
         d.run(vec![ev::moved(Pos2::new(200.0, 300.0))]);
         d.settle();

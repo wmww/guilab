@@ -33,7 +33,7 @@ impl Thumbs<u32> for DemoImages {
 
     fn state(&self, slot: SlotId, key: &u32) -> SlotState {
         match self.open {
-            Some((s, k)) if k == *key && s == slot => SlotState::Away { outlined: true },
+            Some((s, k)) if k == *key && s == slot => SlotState::Open,
             _ => SlotState::Shown,
         }
     }
@@ -140,7 +140,7 @@ impl DemoHost {
         }
     }
 
-    /// "Edits" the open past image: a pending copy appears (open, outlined), and the feed
+    /// "Edits" the open past image: a pending copy appears (open, washed), and the feed
     /// slot quietly shows its image again.
     pub fn edit_open(&mut self) {
         let Some((slot @ SlotId::Feed { .. }, key)) = self.thumbs.open else { return };

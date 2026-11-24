@@ -356,88 +356,99 @@ fn vtx(pos: Pos2, color: Color32) -> Vertex {
     Vertex { pos, uv: egui::epaint::WHITE_UV, color }
 }
 
-/// A feathered glow around `r`: `color` at its edge, fading out over `w`.
-pub fn halo(p: &Painter, r: Rect, w: f32, color: Color32) {
-    let mut m = Mesh::default();
-    let inner = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
-    let o = r.expand(w);
-    let outer = [o.left_top(), o.right_top(), o.right_bottom(), o.left_bottom()];
-    for i in 0..4 {
-        m.vertices.push(vtx(inner[i], color));
-        m.vertices.push(vtx(outer[i], Color32::TRANSPARENT));
-    }
-    for i in 0..4u32 {
-        let (a, b) = (i * 2, ((i + 1) % 4) * 2);
-        m.indices.extend([a, a + 1, b + 1, a, b + 1, b]);
-    }
-    p.add(Shape::mesh(m));
-}
-
-/// Light from `src` (a slot) toward `dst` (the image): a soft fan from the slot's side that
-/// faces the image to the image's facing side, brightest at the slot, with a few faint
-/// rays inside. Nothing when the rects overlap; it fades as they meet.
+/// Light from `src` (a slot) toward `dst` (the image): it fills the convex hull of both
+/// rects outside `src`, so its sides run corner to corner, and fades smoothly from `src`'s
+/// far side to nothing half way to `dst` (never reaching it). Nothing when they're close.
 pub fn beam(p: &Painter, src: Rect, dst: Rect, color: Color32) {
-    // The axis they're apart on, and the facing edges along it.
-    let gaps = [(dst.min.y - src.max.y, 1), (src.min.y - dst.max.y, 3), (dst.min.x - src.max.x, 0), (src.min.x - dst.max.x, 2)];
-    let Some(&(gap, side)) = gaps.iter().filter(|(g, _)| *g > 0.0).max_by(|a, b| a.0.total_cmp(&b.0)) else { return };
+    if !(src.is_positive() && dst.is_positive()) || src.intersects(dst) {
+        return;
+    }
+    let d = (dst.center() - src.center()).normalized();
+    let s = |q: Pos2| q.to_vec2().dot(d);
+    let s0 = corners(src).map(s).into_iter().fold(f32::MIN, f32::max);
+    let gap = corners(dst).map(s).into_iter().fold(f32::MAX, f32::min) - s0;
     let k = (gap / 24.0).min(1.0);
     if k <= 0.0 {
         return;
     }
-    // side: 0 = dst right of src, 1 = below, 2 = left, 3 = above. a = src edge, b = dst edge,
-    // each from one end to the other along the edge; `n` points sideways (along the edges).
-    let (a, b, n) = match side {
-        0 => ([src.right_top(), src.right_bottom()], [dst.left_top(), dst.left_bottom()], vec2(0.0, 1.0)),
-        1 => ([src.left_bottom(), src.right_bottom()], [dst.left_top(), dst.right_top()], vec2(1.0, 0.0)),
-        2 => ([src.left_top(), src.left_bottom()], [dst.right_top(), dst.right_bottom()], vec2(0.0, 1.0)),
-        _ => ([src.left_top(), src.right_top()], [dst.left_bottom(), dst.right_bottom()], vec2(1.0, 0.0)),
-    };
-    // The far end narrows toward the source's extent, so it reads as leading to the image
-    // rather than flooding its whole side.
-    let (b0, b1) = narrow(a, b, n);
-    let ca = color.gamma_multiply(k);
-    let cb = color.gamma_multiply(k * 0.12);
+    let s1 = s0 + gap / 2.0;
+    let hull = hull([corners(src), corners(dst)].concat());
+    // hull minus src, as four disjoint convex pieces: left, right, above, below it.
+    let (x, y) = (vec2(1.0, 0.0), vec2(0.0, 1.0));
+    let pieces = [
+        clip(&hull, x, src.min.x),
+        clip(&hull, -x, -src.max.x),
+        clip(&clip(&clip(&hull, -x, -src.min.x), x, src.max.x), y, src.min.y),
+        clip(&clip(&clip(&hull, -x, -src.min.x), x, src.max.x), -y, -src.max.y),
+    ];
+    // Slabs across the beam: full up to s0, then an eased fade (piecewise linear) to s1.
+    const N: usize = 8;
+    let alpha = |u: f32| k * (1.0 - u.clamp(0.0, 1.0)).powi(2);
     let mut m = Mesh::default();
-    let fa = 6.0;
-    let fb = ((b1 - b0).length() * 0.25).clamp(12.0, 80.0);
-    // Columns across the beam: feather, edge, edge, feather.
-    let cols = [(a[0] - n * fa, b0 - n * fb, 0.0), (a[0], b0, 1.0), (a[1], b1, 1.0), (a[1] + n * fa, b1 + n * fb, 0.0)];
-    for (pa, pb, w) in cols {
-        m.vertices.push(vtx(pa, ca.gamma_multiply(w)));
-        m.vertices.push(vtx(pb, cb.gamma_multiply(w)));
-    }
-    for i in 0..3u32 {
-        let (l, r) = (i * 2, i * 2 + 2);
-        m.indices.extend([l, l + 1, r + 1, l, r + 1, r]);
-    }
-    // Rays: thin streaks fanning out, a little brighter than the beam.
-    for (u, v, w) in [(0.22, 0.12, 0.05), (0.5, 0.48, 0.035), (0.74, 0.86, 0.045)] {
-        let (pa, pb) = (a[0].lerp(a[1], u), b0.lerp(b1, v));
-        let (wa, wb) = ((a[1] - a[0]).length() * w * 0.5, (b1 - b0).length() * w);
-        let base = m.vertices.len() as u32;
-        let (ra, rb) = (color.gamma_multiply(k * 0.6), color.gamma_multiply(0.0));
-        for (q, c) in [(pa - n * wa, Color32::TRANSPARENT), (pb - n * wb, Color32::TRANSPARENT), (pa, ra), (pb, rb), (pa + n * wa, Color32::TRANSPARENT), (pb + n * wb, Color32::TRANSPARENT)] {
-            m.vertices.push(vtx(q, c));
-        }
-        for i in 0..2u32 {
-            let (l, r) = (base + i * 2, base + i * 2 + 2);
-            m.indices.extend([l, l + 1, r + 1, l, r + 1, r]);
+    for piece in &pieces {
+        let piece = clip(piece, d, s1);
+        let near = clip(&piece, d, s0);
+        fan(&mut m, &near, |_| color.gamma_multiply(k));
+        for i in 0..N {
+            let (u0, u1) = (i as f32 / N as f32, (i + 1) as f32 / N as f32);
+            let (b0, b1) = (s0 + (s1 - s0) * u0, s0 + (s1 - s0) * u1);
+            let slab = clip(&clip(&piece, -d, -b0), d, b1);
+            let (a0, a1) = (alpha(u0), alpha(u1));
+            fan(&mut m, &slab, |q| color.gamma_multiply(a0 + (a1 - a0) * ((s(q) - b0) / (b1 - b0)).clamp(0.0, 1.0)));
         }
     }
     p.add(Shape::mesh(m));
 }
 
-/// The far edge, pulled in toward the near edge's span (half way), within the far edge.
-fn narrow(a: [Pos2; 2], b: [Pos2; 2], n: Vec2) -> (Pos2, Pos2) {
-    let along = |q: Pos2| q.to_vec2().dot(n);
-    let (a0, a1, b0, b1) = (along(a[0]), along(a[1]), along(b[0]), along(b[1]));
-    let mid = (a0 + a1) / 2.0;
-    let half = ((b1 - b0) / 2.0).min(((a1 - a0) / 2.0) * 3.0 + 120.0);
-    let center = ((b0 + b1) / 2.0 + mid) / 2.0;
-    let lo = (center - half).max(b0);
-    let hi = (center + half).min(b1);
-    let at = |v: f32| b[0] + n * (v - b0);
-    (at(lo), at(hi.max(lo)))
+fn corners(r: Rect) -> [Pos2; 4] {
+    [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+}
+
+/// The convex hull (monotone chain), in order around it.
+fn hull(mut pts: Vec<Pos2>) -> Vec<Pos2> {
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    let cross = |o: Pos2, a: Pos2, b: Pos2| (a - o).x * (b - o).y - (a - o).y * (b - o).x;
+    let mut h: Vec<Pos2> = Vec::new();
+    for pass in 0..2 {
+        let start = h.len();
+        let it: Box<dyn Iterator<Item = &Pos2>> = if pass == 0 { Box::new(pts.iter()) } else { Box::new(pts.iter().rev()) };
+        for &q in it {
+            while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+/// The part of convex polygon `poly` where `q · n <= c`.
+fn clip(poly: &[Pos2], n: Vec2, c: f32) -> Vec<Pos2> {
+    let mut out = Vec::new();
+    for (i, &a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let (da, db) = (a.to_vec2().dot(n) - c, b.to_vec2().dot(n) - c);
+        if da <= 0.0 {
+            out.push(a);
+        }
+        if (da < 0.0) != (db < 0.0) && da != db {
+            out.push(a.lerp(b, da / (da - db)));
+        }
+    }
+    out
+}
+
+/// Adds convex polygon `poly` as a triangle fan, colored per vertex.
+fn fan(m: &mut Mesh, poly: &[Pos2], color: impl Fn(Pos2) -> Color32) {
+    if poly.len() < 3 {
+        return;
+    }
+    let base = m.vertices.len() as u32;
+    m.vertices.extend(poly.iter().map(|&q| vtx(q, color(q))));
+    for i in 1..poly.len() as u32 - 1 {
+        m.indices.extend([base, base + i, base + i + 1]);
+    }
 }
 
 /// A slot scrolled out of `area`: a soft band of light along `area`'s edge, where it is.
@@ -499,7 +510,7 @@ impl Workspace {
         }
         // Above the chat's hovered (lifted) slots, which are on Foreground.
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, self.id.with("flights")));
-        let glow = t.colors.glow;
+        let glow = t.colors.beam;
         let open = self.open_key();
         let view = self.view_place;
         let ends: Vec<(Att, Option<Place>)> = self.flights.flights().iter().map(|f| (f.att, self.slot_place(f.slot, f.att, store))).collect();
@@ -517,7 +528,7 @@ impl Workspace {
             // (A slot growing in starts as a point.)
             let src = self.slot_rect(slot, att).filter(|r| self.slot_area(slot).contains(r.center()));
             match self.flights.glow_source(src.map(|r| ((slot, att), r))) {
-                Some((src, alpha)) => self.beam_from(&painter, t, src, view.clip, glow.gamma_multiply(alpha)),
+                Some((src, alpha)) => beam(&painter, src, view.clip, glow.gamma_multiply(alpha)),
                 None => {
                     if let Some(r) = self.slot_rect(slot, att) {
                         edge_glow(&painter, r, self.slot_area(slot), glow, t.size.glow_edge, t.size.glow_feather);
@@ -557,20 +568,14 @@ impl Workspace {
     }
 
     /// The beam from a slot (drawn at `slot_rect`) to an image showing at `dst`, and the
-    /// slot's halo; for a slot scrolled out of view, its edge of the feed glows instead.
+    /// for a slot scrolled out of view, its edge of the feed glows instead.
     fn light(&self, p: &Painter, t: &Theme, slot_rect: Rect, slot: SlotId, dst: Rect, color: Color32) {
         let area = self.slot_area(slot);
         if area.contains(slot_rect.center()) {
-            self.beam_from(p, t, slot_rect.intersect(area), dst, color);
+            beam(p, slot_rect.intersect(area), dst, color);
         } else {
             edge_glow(p, slot_rect, area, color, t.size.glow_edge, t.size.glow_feather);
         }
-    }
-
-    /// The beam from `src` (on screen) to `dst`, and a halo around `src` within the chat.
-    fn beam_from(&self, p: &Painter, t: &Theme, src: Rect, dst: Rect, color: Color32) {
-        beam(p, src, dst, color);
-        halo(&p.with_clip_rect(self.feed_clip.union(self.composer)), src, t.size.glow_halo, color.gamma_multiply(0.7));
     }
 }
 

@@ -5,7 +5,7 @@
 //! [`Thumbs`] source each frame, and gets [`ChatEvent`]s back (open, remove, send, undo).
 //! Attachments are opaque keys `K`; the widget knows nothing about images. Slot rects come
 //! back every frame ([`ChatOut::slots`]) so a host can animate images to and from them, and
-//! [`Thumbs::state`] lets it show a slot empty (its image is elsewhere) or outlined.
+//! [`Thumbs::state`] lets it show a slot washed (its image is open elsewhere) or empty (covered).
 //! [`demo::DemoHost`] is a complete host.
 
 mod composer;
@@ -82,12 +82,12 @@ pub enum SlotId {
 pub enum SlotState {
     #[default]
     Shown,
-    /// An empty slot: its image is elsewhere (open in an editor). `outlined` marks the
-    /// slot whose image is open.
-    Away { outlined: bool },
-    /// Like `Away`, and the host draws something over it (an image flying to or from it):
-    /// no remove badge, which fades back in after.
-    Covered { outlined: bool },
+    /// Its image is open elsewhere (in an editor): the thumbnail shows washed
+    /// (`colors.slot_open`) and doesn't grow on hover.
+    Open,
+    /// Empty: the host draws something over it (an image flying to or from it; `open` once
+    /// it lands). No remove badge, which fades back in after.
+    Covered { open: bool },
 }
 
 /// What the host supplies for attachments.
