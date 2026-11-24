@@ -5,7 +5,7 @@
 //! [`Thumbs`] source each frame, and gets [`ChatEvent`]s back (open, remove, send, undo).
 //! Attachments are opaque keys `K`; the widget knows nothing about images. Slot rects come
 //! back every frame ([`ChatOut::slots`]) so a host can animate images to and from them, and
-//! [`Thumbs::state`] lets it show a slot washed (its image is open elsewhere) or empty (covered).
+//! [`Thumbs::state`] lets it show a slot washed (its image is open elsewhere) or covered.
 //! [`demo::DemoHost`] is a complete host.
 
 mod composer;
@@ -85,8 +85,8 @@ pub enum SlotState {
     /// Its image is open elsewhere (in an editor): the thumbnail shows washed
     /// (`colors.slot_open`) and doesn't grow on hover.
     Open,
-    /// Empty: the host draws something over it (an image flying to or from it; `open` once
-    /// it lands). No remove badge, which fades back in after.
+    /// The host draws something over it (an image flying to or from it; `open`: washed as
+    /// for `Open`). No remove badge, which fades back in after.
     Covered { open: bool },
 }
 
@@ -243,12 +243,6 @@ impl<K: Clone + Eq + Hash> Chat<K> {
     /// The text box's id (e.g. to give it focus).
     pub fn text_id(&self) -> Id {
         self.id.with("text")
-    }
-
-    /// Cross-fades the next change of this slot's [`SlotState`] instead of switching at once
-    /// (e.g. a slot quietly showing its image again, with nothing flying to it).
-    pub fn cross_fade(&mut self, slot: SlotId, key: K) {
-        self.slots.fades.insert((slot, key));
     }
 
     /// Scrolls the feed to the end next frame.

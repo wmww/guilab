@@ -68,10 +68,9 @@ pub struct Colors {
     /// Thin ring around key points, so they read on light and dark images.
     pub key_point_ring: Color32,
     pub hover_outline: Color32,
-    /// Chat: an empty thumbnail slot (its image is in flight), hovered, and the wash over
-    /// the thumbnail of the slot whose image is open.
+    /// Chat: a thumbnail slot without a texture, and the wash over the thumbnail of the slot
+    /// whose image is open.
     pub slot_empty: Color32,
-    pub slot_empty_hover: Color32,
     pub slot_open: Color32,
     /// Crop tool: shade over the canvas outside the crop, and the crop's outline.
     pub crop_dim: Color32,
@@ -465,13 +464,12 @@ impl Theme {
                 me: Color32::from_rgb(110, 170, 255),
                 agent: Color32::from_rgb(120, 210, 140),
                 glow: Color32::from_rgba_unmultiplied(110, 170, 255, 60),
-                beam: Color32::from_white_alpha(52),
+                beam: Color32::from_white_alpha(38),
                 key_point: gray(240),
                 key_point_hot: Color32::from_rgb(110, 170, 255),
                 key_point_ring: Color32::from_black_alpha(170),
                 hover_outline: Color32::from_rgba_unmultiplied(110, 170, 255, 140),
                 slot_empty: gray(24),
-                slot_empty_hover: gray(44),
                 slot_open: Color32::from_white_alpha(110),
                 crop_dim: Color32::from_black_alpha(150),
                 crop_line: gray(240),
@@ -515,13 +513,12 @@ impl Theme {
                 me: Color32::from_rgb(30, 100, 210),
                 agent: Color32::from_rgb(25, 135, 60),
                 glow: Color32::from_rgba_unmultiplied(30, 100, 210, 50),
-                beam: Color32::from_black_alpha(36),
+                beam: Color32::from_black_alpha(26),
                 key_point: gray(255),
                 key_point_hot: Color32::from_rgb(30, 100, 210),
                 key_point_ring: Color32::from_black_alpha(150),
                 hover_outline: Color32::from_rgba_unmultiplied(30, 100, 210, 140),
                 slot_empty: gray(228),
-                slot_empty_hover: gray(216),
                 slot_open: Color32::from_black_alpha(80),
                 crop_dim: Color32::from_black_alpha(130),
                 crop_line: gray(255),

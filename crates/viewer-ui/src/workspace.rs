@@ -315,8 +315,7 @@ impl Workspace {
                 let key = self.new_key();
                 self.pending.push(Draft { key, doc, parent: Some(image) });
                 self.history.push(Op::Copy { from: image, slot, key });
-                // The feed slot quietly shows its image again; the copy grows into the composer.
-                self.chat.cross_fade(slot, Att::Image(image));
+                // The feed slot's wash fades; the copy grows into the composer.
                 self.open = Open::Draft(key);
                 key
             }

@@ -1,21 +1,19 @@
 //! One thumbnail slot, shared by the feed and the composer: hover grow (lifted onto a
-//! foreground layer, no relayout), open (washed) and empty states with optional cross-fades,
+//! foreground layer, no relayout), the open state (washed),
 //! center-cropped extreme aspects, the remove badge, click to open.
 
 use guilab_kit::Tip as _;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::Hash;
 
 use egui::{Color32, Context, CursorIcon, Id, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, TextureId, Ui, pos2, vec2};
 use guilab_kit::paint_close_badge;
-use guilab_kit::anim::{Fader, INSTANT};
+use guilab_kit::anim::Fader;
 use guilab_kit::Theme;
 
 use crate::{ChatEvent, ChatOut, SlotId, SlotState};
 
 struct Anim {
-    /// 1 = the image shows, 0 = the empty slot.
-    shown: Fader,
     /// 1 = washed (its image is open).
     wash: Fader,
     hover: Fader,
@@ -26,20 +24,19 @@ struct Anim {
 
 impl Anim {
     fn moving(&self, now: f64) -> bool {
-        self.shown.moving(now) || self.wash.moving(now) || self.hover.moving(now) || self.badge.moving(now)
+        self.wash.moving(now) || self.hover.moving(now) || self.badge.moving(now)
     }
 }
 
 pub(crate) struct Slots<K> {
     anims: HashMap<(SlotId, K), Anim>,
-    pub fades: HashSet<(SlotId, K)>,
     frame: u64,
     now: f64,
 }
 
 impl<K> Default for Slots<K> {
     fn default() -> Self {
-        Slots { anims: HashMap::new(), fades: HashSet::new(), frame: 0, now: 0.0 }
+        Slots { anims: HashMap::new(), frame: 0, now: 0.0 }
     }
 }
 
@@ -99,18 +96,11 @@ impl<K: Clone + Eq + Hash> Slots<K> {
         let ctx = ui.ctx().clone();
         let a = self.anims.entry((slot, key.clone())).or_insert_with(|| {
             let st = state.unwrap_or_default();
-            let (shown, wash) = split(st);
-            Anim { shown: Fader::at(shown), wash: Fader::at(wash), hover: Fader::at(0.0), badge: Fader::at(badge_on(st)), seen: 0 }
+            Anim { wash: Fader::at(washed(st)), hover: Fader::at(0.0), badge: Fader::at(badge_on(st)), seen: 0 }
         });
         a.seen = self.frame;
         if let Some(st) = state {
-            let (shown, wash) = split(st);
-            if a.shown.to != shown {
-                // A landed image's slot fades back in washed.
-                let fade = self.fades.remove(&(slot, key.clone())) || wash > 0.0;
-                a.shown.set(shown, now, if fade { t.motion.fade } else { INSTANT });
-            }
-            a.wash.set(wash, now, t.motion.fade);
+            a.wash.set(washed(st), now, t.motion.fade);
             // Gone at once when covered, fading in after (no pop at a landing).
             if badge_on(st) == 0.0 {
                 a.badge = Fader::at(0.0);
@@ -143,7 +133,7 @@ impl<K: Clone + Eq + Hash> Slots<K> {
                 }
                 b.hovered()
             };
-            let hovered = (resp.hovered() || badge_hover) && a.shown.to > 0.5 && a.wash.to < 0.5;
+            let hovered = (resp.hovered() || badge_hover) && a.wash.to < 0.5;
             if resp.hovered() {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
             }
@@ -169,34 +159,24 @@ impl<K: Clone + Eq + Hash> Slots<K> {
         let c = &t.colors;
         let radius = t.radius.thumb;
         let opacity = look.appear.min(1.0) * if look.faint { lerp(t.size.faint_opacity, 1.0, h) } else { 1.0 };
-        let shown = a.shown.value(now);
         let wash = a.wash.value(now);
         if lifted {
             let mut shadow = t.shadow.lifted;
             shadow.color = shadow.color.gamma_multiply(h);
             painter.add(shadow.as_shape(drawn, radius));
         }
-        let mut used = None;
-        if shown < 1.0 {
-            let k = (1.0 - shown) * opacity;
-            let hot = ui.rect_contains_pointer(drawn) && !look.dying;
-            painter.rect_filled(drawn, radius, if hot { c.slot_empty_hover } else { c.slot_empty }.gamma_multiply(k));
-        }
-        if shown > 0.0 {
-            let k = shown * opacity;
-            let height_px = look.rest.height() * grow * ctx.pixels_per_point();
-            used = texture(height_px);
-            match used {
-                Some(tex) => {
-                    let uv = crop_uv(look.aspect, drawn.width() / drawn.height());
-                    painter.add(egui::epaint::RectShape::filled(drawn, radius, Color32::WHITE.gamma_multiply(k)).with_texture(tex, uv));
-                }
-                None => placeholder(&painter, t, drawn, k),
+        let height_px = look.rest.height() * grow * ctx.pixels_per_point();
+        let used = texture(height_px);
+        match used {
+            Some(tex) => {
+                let uv = crop_uv(look.aspect, drawn.width() / drawn.height());
+                painter.add(egui::epaint::RectShape::filled(drawn, radius, Color32::WHITE.gamma_multiply(opacity)).with_texture(tex, uv));
             }
+            None => placeholder(&painter, t, drawn, opacity),
         }
-        if wash > 0.0 && shown > 0.0 {
+        if wash > 0.0 {
             let hot = ui.rect_contains_pointer(drawn) && !look.dying;
-            painter.rect_filled(drawn, radius, c.slot_open.gamma_multiply(wash * shown * opacity * if hot { 1.3 } else { 1.0 }));
+            painter.rect_filled(drawn, radius, c.slot_open.gamma_multiply(wash * opacity * if hot { 1.3 } else { 1.0 }));
         }
         let badge = a.badge.value(now);
         if look.removable && !look.dying && look.appear > 0.5 && badge > 0.0 {
@@ -213,11 +193,10 @@ fn hash(k: &impl Hash) -> u64 {
     BuildHasherDefault::<DefaultHasher>::default().hash_one(k)
 }
 
-fn split(s: SlotState) -> (f32, f32) {
+fn washed(s: SlotState) -> f32 {
     match s {
-        SlotState::Shown => (1.0, 0.0),
-        SlotState::Open => (1.0, 1.0),
-        SlotState::Covered { open } => (0.0, open as u8 as f32),
+        SlotState::Shown | SlotState::Covered { open: false } => 0.0,
+        SlotState::Open | SlotState::Covered { open: true } => 1.0,
     }
 }
 

@@ -357,8 +357,9 @@ fn vtx(pos: Pos2, color: Color32) -> Vertex {
 }
 
 /// Light from `src` (a slot) toward `dst` (the image): it fills the convex hull of both
-/// rects outside `src`, so its sides run corner to corner, and fades smoothly from `src`'s
-/// far side to nothing half way to `dst` (never reaching it). Nothing when they're close.
+/// rects outside `src`, so its sides run corner to corner, and fades from `src`'s far side
+/// to nothing at `dst`'s nearest point: quickly at first, then a long dim tail. Weaker when
+/// they're close.
 pub fn beam(p: &Painter, src: Rect, dst: Rect, color: Color32) {
     if !(src.is_positive() && dst.is_positive()) || src.intersects(dst) {
         return;
@@ -371,7 +372,7 @@ pub fn beam(p: &Painter, src: Rect, dst: Rect, color: Color32) {
     if k <= 0.0 {
         return;
     }
-    let s1 = s0 + gap / 2.0;
+    let s1 = s0 + gap;
     let hull = hull([corners(src), corners(dst)].concat());
     // hull minus src, as four disjoint convex pieces: left, right, above, below it.
     let (x, y) = (vec2(1.0, 0.0), vec2(0.0, 1.0));
@@ -381,16 +382,17 @@ pub fn beam(p: &Painter, src: Rect, dst: Rect, color: Color32) {
         clip(&clip(&clip(&hull, -x, -src.min.x), x, src.max.x), y, src.min.y),
         clip(&clip(&clip(&hull, -x, -src.min.x), x, src.max.x), -y, -src.max.y),
     ];
-    // Slabs across the beam: full up to s0, then an eased fade (piecewise linear) to s1.
-    const N: usize = 8;
-    let alpha = |u: f32| k * (1.0 - u.clamp(0.0, 1.0)).powi(2);
+    // Slabs across the beam: full up to s0, then a fast-then-slow fade (piecewise linear,
+    // slabs finer near the slot where it changes most) to s1.
+    const N: usize = 12;
+    let alpha = |u: f32| k * ((-5.0 * u).exp() - (-5.0f32).exp() * u);
     let mut m = Mesh::default();
     for piece in &pieces {
         let piece = clip(piece, d, s1);
         let near = clip(&piece, d, s0);
         fan(&mut m, &near, |_| color.gamma_multiply(k));
         for i in 0..N {
-            let (u0, u1) = (i as f32 / N as f32, (i + 1) as f32 / N as f32);
+            let (u0, u1) = ((i as f32 / N as f32).powi(2), ((i + 1) as f32 / N as f32).powi(2));
             let (b0, b1) = (s0 + (s1 - s0) * u0, s0 + (s1 - s0) * u1);
             let slab = clip(&clip(&piece, -d, -b0), d, b1);
             let (a0, a1) = (alpha(u0), alpha(u1));

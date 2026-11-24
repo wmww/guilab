@@ -280,8 +280,7 @@ impl MenuUi<'_> {
         self.row(label, None, Some(Mark::Radio(selected)), enabled)
     }
 
-    /// A radio item with its own controls on the right (laid out right to left, e.g. a
-    /// value with − / + buttons), dimmed while it isn't selected. Choosing it keeps the menu
+    /// A radio item with its own controls on the right (e.g. a value with − / + buttons), dimmed while it isn't selected. Choosing it keeps the menu
     /// open (its controls are next). Returns whether it was chosen.
     pub fn radio_with(&mut self, selected: bool, label: &str, enabled: bool, right: impl FnOnce(&mut Ui)) -> bool {
         let close = self.close;
@@ -292,11 +291,8 @@ impl MenuUi<'_> {
         let s = &t.size;
         let rect = Rect::from_min_size(rect_before, vec2(self.width, s.menu_item_h));
         let inner = rect.shrink2(vec2(s.menu_item_pad, 0.0));
-        let mut child = self.ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        child.spacing_mut().item_spacing = vec2(t.space.sm, 0.0);
-        child.add_enabled_ui(enabled && selected, right);
+        let right_w = right_aligned(self.ui, inner, t.space.sm, enabled && selected, right);
         let label_w = self.ui.painter().layout_no_wrap(label.to_string(), t.font.body.clone(), t.colors.text).size().x;
-        let right_w = child.min_rect().width();
         self.natural = self.natural.max(2.0 * s.menu_item_pad + s.menu_mark_w + label_w + right_w + 2.0 * t.space.lg);
         chosen
     }
@@ -388,8 +384,8 @@ impl MenuUi<'_> {
         ui.painter().text(pos2(rect.min.x + t.size.menu_item_pad, rect.center().y), Align2::LEFT_CENTER, text, t.font.small.clone(), t.colors.weak);
     }
 
-    /// A custom row: `left` (e.g. a label) and `right` (e.g. buttons, laid out right to
-    /// left), padded like items. Its widgets don't close the menu and aren't reached by the
+    /// A custom row: `left` (e.g. a label) and `right` (e.g. buttons, right-aligned), padded
+    /// like items. Its widgets don't close the menu and aren't reached by the
     /// arrow keys (Tab focuses them).
     pub fn custom(&mut self, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
         let t = self.theme.clone();
@@ -401,7 +397,30 @@ impl MenuUi<'_> {
         child.spacing_mut().item_spacing = vec2(t.space.sm, 0.0);
         left(&mut child);
         let used = child.min_rect().width();
-        let right_w = child.with_layout(egui::Layout::right_to_left(egui::Align::Center), right).response.rect.width();
+        let right_w = right_aligned(ui, inner, t.space.sm, true, right);
         self.natural = self.natural.max(2.0 * s.menu_item_pad + used + right_w + 2.0 * t.space.lg);
     }
+}
+
+/// Lays `add` out left to right, ending at `rect`'s right edge, so Tab goes in reading order
+/// (a right-to-left layout reverses it). Uses last pass's width; without one (or when it
+/// changed) it asks egui to redo the pass, the first time measuring invisibly. Returns the
+/// width.
+fn right_aligned(ui: &mut Ui, rect: Rect, spacing: f32, enabled: bool, add: impl FnOnce(&mut Ui)) -> f32 {
+    let key = ui.next_auto_id().with("right_w");
+    let known = ui.data(|d| d.get_temp::<f32>(key));
+    let x = known.map_or(rect.min.x, |w| rect.max.x - w);
+    let mut b = egui::UiBuilder::new().id_salt(key).max_rect(Rect::from_min_max(pos2(x, rect.min.y), rect.max)).layout(egui::Layout::left_to_right(egui::Align::Center));
+    if known.is_none() {
+        b = b.sizing_pass().invisible();
+    }
+    let mut child = ui.new_child(b);
+    child.spacing_mut().item_spacing = vec2(spacing, 0.0);
+    child.add_enabled_ui(enabled, add);
+    let w = child.min_rect().width();
+    if known.is_none_or(|k| (k - w).abs() > 0.5) {
+        ui.data_mut(|d| d.insert_temp(key, w));
+        ui.ctx().request_discard("menu row width");
+    }
+    w
 }

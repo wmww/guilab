@@ -937,15 +937,15 @@ fn stepper<T: egui::emath::Numeric>(ui: &mut egui::Ui, value: &mut T, field: imp
     let step = vec2(t.size.menu_item_h, t.size.menu_item_h - t.space.sm);
     let mut pick = None;
     let cur = *value;
-    if ui.add(egui::Button::new("+").min_size(step)).tip(tips[1]).clicked() {
-        pick = Some(up(cur));
+    if ui.add(egui::Button::new("−").min_size(step)).tip(tips[0]).clicked() {
+        pick = Some(down(cur));
     }
     let r = ui.add_sized(vec2(step.x * 2.0, step.y), field(egui::DragValue::new(value)).update_while_editing(false));
     if (r.changed() && !r.dragged()) || r.drag_stopped() {
         pick = Some(*value);
     }
-    if ui.add(egui::Button::new("−").min_size(step)).tip(tips[0]).clicked() {
-        pick = Some(down(cur));
+    if ui.add(egui::Button::new("+").min_size(step)).tip(tips[1]).clicked() {
+        pick = Some(up(cur));
     }
     pick
 }
@@ -1015,16 +1015,16 @@ fn app_menu(m: &mut guilab_kit::menu::MenuUi, s: &SessionView, p: &mut PerSessio
         },
         |ui| {
             ui.add_enabled_ui(edit_size, |ui| {
-                // Right to left: W × H. Applied on Enter, leaving the field or ending a drag;
+                // W × H. Applied on Enter, leaving the field or ending a drag;
                 // Esc restores the old value.
                 let range = sizing::MIN_PX..=sizing::MAX_PX;
                 let field = |ui: &mut egui::Ui, v: &mut u32| {
                     let r = ui.add(egui::DragValue::new(v).range(range.clone()).speed(4).update_while_editing(false)).tip("App size in pixels");
                     (r.changed() && !r.dragged()) || r.drag_stopped()
                 };
-                let h = field(ui, &mut sz.edit_size.1);
-                ui.label("×");
                 let w = field(ui, &mut sz.edit_size.0);
+                ui.label("×");
+                let h = field(ui, &mut sz.edit_size.1);
                 if (w || h) && sz.edit_size != s.size {
                     resize(out, Some(sz.edit_size), None);
                 }

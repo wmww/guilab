@@ -143,13 +143,12 @@ impl DemoHost {
     /// "Edits" the open past image: a pending copy appears (open, washed), and the feed
     /// slot quietly shows its image again.
     pub fn edit_open(&mut self) {
-        let Some((slot @ SlotId::Feed { .. }, key)) = self.thumbs.open else { return };
+        let Some((SlotId::Feed { .. }, key)) = self.thumbs.open else { return };
         let img = self.thumbs.images[&key].clone();
         let k = self.next;
         self.next += 1;
         self.thumbs.images.insert(k, img);
         self.pending.push(k);
-        self.chat.cross_fade(slot, key);
         self.thumbs.open = Some((SlotId::Composer, k));
     }
 
