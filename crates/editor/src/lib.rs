@@ -40,7 +40,7 @@ impl Tool {
     pub fn name(self) -> &'static str {
         match self {
             Tool::Interact => "Interact",
-            Tool::Move => "Move, resize, or drag to pan",
+            Tool::Move => "Select and move (Shift adds), or drag to pan",
             Tool::Pen => "Pen",
             Tool::Box => "Box",
             Tool::Ellipse => "Ellipse",
@@ -181,7 +181,8 @@ enum CropMode {
 enum Gesture {
     Idle,
     Draw { el: Element, start: Pt },
-    Move { key: ElemKey, orig: Element, cur: Element, start: Pt },
+    /// Moves every selected element together: (key, original, current).
+    Move { items: Vec<(ElemKey, Element, Element)>, start: Pt },
     Reshape { key: ElemKey, k: guilab_image::geom::Key, orig: Element, cur: Element, grab: Pt },
     Pan { last: Pos2 },
     Crop { mode: CropMode, orig: IRect, cur: IRect, start: Pt },
@@ -206,6 +207,9 @@ pub struct Editor {
     /// `begin` was reported and nothing has been committed or abandoned since.
     began: bool,
     hover: Hit,
+    /// The selected elements (move tool), in selection order. Only they show key points;
+    /// drags move them all, Delete removes them.
+    selection: Vec<ElemKey>,
     /// Last pointer position over the canvas.
     pointer: Option<Pos2>,
     last_press: Option<(f64, Pos2)>,
@@ -244,6 +248,7 @@ impl Editor {
             pending: Vec::new(),
             began: false,
             hover: Hit::None,
+            selection: Vec::new(),
             pointer: None,
             last_press: None,
             textures: Default::default(),
@@ -278,6 +283,11 @@ impl Editor {
         self.hover
     }
 
+    /// The selected elements (move tool).
+    pub fn selection(&self) -> &[ElemKey] {
+        &self.selection
+    }
+
     /// Drops all interaction state without committing (e.g. the host decided not to make the
     /// doc `begin` asked for). Switching docs needs no call: the editor notices by
     /// [`Doc::id`].
@@ -287,6 +297,7 @@ impl Editor {
         self.pending.clear();
         self.began = false;
         self.hover = Hit::None;
+        self.selection.clear();
         self.doc_id = None;
     }
 
@@ -303,6 +314,7 @@ impl Editor {
             self.gesture = Gesture::Idle;
             self.typing = None;
             self.hover = Hit::None;
+            self.selection.clear();
         }
         self.doc_id = id;
     }
@@ -341,20 +353,21 @@ impl Editor {
         Ok(e)
     }
 
-    /// Removes the element a move-tool press would grab (Delete / Backspace).
-    pub fn delete_hovered(&mut self, doc: &mut Doc) -> Option<Edit> {
+    /// Removes the selected elements (Delete / Backspace). Returns the edits, applied.
+    pub fn delete_selected(&mut self, doc: &mut Doc) -> Vec<Edit> {
         self.sync_doc(Some(doc.id()));
-        let key = match self.hover {
-            Hit::Key(k, _) | Hit::Item(k) => k,
-            Hit::None => return None,
-        };
         if self.busy() {
-            return None;
+            return Vec::new();
         }
-        let e = doc.remove_edit(key)?;
-        doc.apply(&e);
+        let mut edits = Vec::new();
+        for key in std::mem::take(&mut self.selection) {
+            if let Some(e) = doc.remove_edit(key) {
+                doc.apply(&e);
+                edits.push(e);
+            }
+        }
         self.hover = Hit::None;
-        Some(e)
+        edits
     }
 
     /// Picks a color; with no drawing tool selected, also picks the pen.

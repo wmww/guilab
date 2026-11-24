@@ -62,6 +62,13 @@ impl T {
         self.run(vec![ev::moved(p), ev::press(p), ev::release(p)]);
     }
 
+    fn shift_click(&mut self, x: f32, y: f32) {
+        let p = self.at(x, y);
+        self.h.modifiers = Modifiers::SHIFT;
+        self.run(vec![ev::moved(p), ev::button(p, true, Modifiers::SHIFT), ev::button(p, false, Modifiers::SHIFT)]);
+        self.h.modifiers = Modifiers::NONE;
+    }
+
     fn key(&mut self, k: Key, m: Modifiers) {
         self.run(vec![ev::key(k, m)]);
     }
@@ -140,12 +147,17 @@ fn hit_priorities() {
     assert_eq!(t.host.editor.hovered(), Hit::Item(k[1]), "within the slop");
     t.mv(200.0, 100.0 - 1.5 - 7.0);
     assert_eq!(t.host.editor.hovered(), Hit::None, "past the slop");
-    // A key point wins over its item.
+    // Key points only on the selection: not yet, then (after a click) winning over its item.
+    t.mv(301.0, 201.0);
+    assert_eq!(t.host.editor.hovered(), Hit::Item(k[1]), "unselected: no key points");
+    t.click(200.0, 101.0);
+    assert_eq!(t.host.editor.selection(), &[k[1]]);
     t.mv(301.0, 201.0);
     assert_eq!(t.host.editor.hovered(), Hit::Key(k[1], KeyPt::Corner(2)));
     assert_eq!(t.cursor, CursorIcon::ResizeNwSe);
     t.mv(299.0, 99.0);
     assert_eq!(t.cursor, CursorIcon::ResizeNeSw);
+    t.click(200.0, 300.0);
     t.mv(100.0, 300.0);
     assert_eq!(t.host.editor.hovered(), Hit::Key(k[2], KeyPt::End(0)));
     // Topmost wins: a second box on top of the first's edge.
@@ -171,15 +183,18 @@ fn move_reshape_pan_and_undo() {
     assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(300.0, 350.0)));
     assert_eq!(t.host.log.len(), 1);
     assert!(matches!(t.host.log[0].op(), Op::Replace { .. }));
-    // Reshape: the box's bottom-right corner, grabbed slightly off the point.
+    // Reshape: select the box, then its bottom-right corner, grabbed slightly off the point.
+    t.click(200.0, 101.0);
     t.drag((302.0, 202.0), (352.0, 252.0));
     assert_eq!(t.elements()[1].kind, Kind::Box(Rect::new(100.0, 100.0, 250.0, 150.0)), "no jump by the grab offset");
     // A line end.
+    t.click(200.0, 350.0);
     t.drag((300.0, 350.0), (320.0, 380.0));
     assert_eq!(t.elements()[2].kind, Kind::Line(pt(100.0, 350.0), pt(320.0, 380.0)));
     // Text corner: scales the font.
     let Kind::Text { size: s0, .. } = t.elements()[3].kind else { panic!() };
     let f = t.elements()[3].frame(1.0, t.host.editor.fonts());
+    t.click(410.0, 110.0);
     t.drag((f.max().x, f.max().y), (f.max().x + 40.0, f.max().y + f.size.h));
     let Kind::Text { size: s1, at, .. } = t.elements()[3].kind else { panic!() };
     assert!(s1 > s0 * 1.8, "{s0} -> {s1}");
@@ -228,20 +243,57 @@ fn escape_and_undo_mid_drag() {
 }
 
 #[test]
-fn delete_hovered() {
+fn delete_selected() {
     let mut t = T::new();
     t.with_marks();
     t.host.editor.tool = Tool::Move;
+    // Hovering alone doesn't make a target.
     t.mv(200.0, 300.0);
     t.key(Key::Delete, Modifiers::NONE);
-    assert_eq!(t.elements().len(), 3);
+    assert_eq!(t.elements().len(), 4);
+    t.click(200.0, 300.0);
+    t.mv(600.0, 50.0);
+    t.key(Key::Delete, Modifiers::NONE);
+    assert_eq!(t.elements().len(), 3, "the selection, wherever the pointer is");
     assert!(matches!(t.host.log[0].op(), Op::Remove { at: 2, .. }));
-    // The base can't be deleted.
-    t.mv(500.0, 350.0);
+    // A press on empty space (or the base) clears the selection.
+    t.click(200.0, 101.0);
+    t.click(500.0, 350.0);
     t.key(Key::Backspace, Modifiers::NONE);
     assert_eq!(t.elements().len(), 3);
     t.key(Key::Z, Modifiers::COMMAND);
     assert_eq!(t.elements().len(), 4, "undo brings it back");
+}
+
+#[test]
+fn multi_select_moves_and_deletes_together() {
+    let mut t = T::new();
+    t.with_marks();
+    t.host.editor.tool = Tool::Move;
+    let k = t.host.doc.as_ref().unwrap().keys().to_vec();
+    let before = t.elements();
+    t.click(200.0, 101.0);
+    t.shift_click(200.0, 300.0);
+    assert_eq!(t.host.editor.selection(), &[k[1], k[2]]);
+    // Dragging either moves both, as one undo step.
+    t.drag((200.0, 300.0), (230.0, 320.0));
+    assert_eq!(t.elements()[1].kind, Kind::Box(Rect::new(130.0, 120.0, 200.0, 100.0)));
+    assert_eq!(t.elements()[2].kind, Kind::Line(pt(130.0, 320.0), pt(330.0, 320.0)));
+    assert_eq!(t.elements()[3], before[3], "unselected stays");
+    t.key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(t.elements(), before);
+    // Shift-click toggles one off; Esc clears.
+    t.shift_click(200.0, 101.0);
+    assert_eq!(t.host.editor.selection(), &[k[2]]);
+    t.key(Key::Escape, Modifiers::NONE);
+    assert!(t.host.editor.selection().is_empty());
+    // Delete removes every selected element at once.
+    t.click(200.0, 101.0);
+    t.shift_click(410.0, 110.0);
+    t.key(Key::Delete, Modifiers::NONE);
+    assert_eq!(t.elements().len(), 2);
+    t.key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(t.elements(), before, "one undo step");
 }
 
 #[test]

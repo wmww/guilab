@@ -159,11 +159,17 @@ fn scenarios(d: &mut Driver, filter: &str) {
         d.snap("03-move-empty");
         d.mv(d.at(700.0, 183.0));
         d.snap("04-move-hover-box");
+        // Selected: the box (clicked) and the line (shift-clicked) show their key points.
+        let (bx, ln) = (d.at(700.0, 183.0), d.at(700.0, 400.0));
+        d.run(vec![ev::press(bx), ev::release(bx)]);
+        d.run(vec![ev::moved(ln), ev::button(ln, true, Modifiers::SHIFT), ev::button(ln, false, Modifiers::SHIFT)]);
         d.mv(d.at(900.0, 300.0));
         d.snap("05-move-hover-key");
         d.drag(d.at(700.0, 403.0), d.at(760.0, 470.0), false);
         d.snap("06-move-dragging-line");
         d.run(vec![ev::release(d.at(760.0, 470.0))]);
+        let el = d.at(1150.0, 600.0);
+        d.run(vec![ev::moved(el), ev::press(el), ev::release(el)]);
         d.drag(d.at(1300.0, 760.0), d.at(1400.0, 860.0), false);
         d.snap("07-move-reshape-ellipse");
         d.run(vec![ev::release(d.at(1400.0, 860.0))]);

@@ -10,15 +10,15 @@ use crate::paint::{self, Ctx};
 use crate::text::Typing;
 use crate::{Canvas, CanvasOut, CropMode, Editor, Gesture, Hit, MIN_MARK, PEN_STEP, PEN_TOLERANCE, REACH, Tool, Xf};
 
-/// Element under `p` by the move tool's priority: key points (topmost element first), then
-/// elements within `hit_slop` (topmost first). The locked base never hits.
+/// Element under `p` by the move tool's priority: key points of `selected` elements (topmost
+/// first), then elements within `hit_slop` (topmost first). The locked base never hits.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn hit_test(body: &Body, keys: &[ElemKey], p: Pt, zoom: f32, t: &Theme, fonts: &Fonts, region: IRect, key_points: bool, skip: Option<ElemKey>) -> Hit {
+pub(crate) fn hit_test(body: &Body, keys: &[ElemKey], p: Pt, zoom: f32, t: &Theme, fonts: &Fonts, region: IRect, selected: &[ElemKey], skip: Option<ElemKey>) -> Hit {
     let r = region.to_rect();
     let kr = t.size.key_point_hit_r / zoom;
     let live = |i: usize| !body.is_base(i) && Some(keys[i]) != skip;
-    if key_points && r.expand(kr).contains(p) {
-        for i in (0..body.elements.len()).rev().filter(|&i| live(i)) {
+    if r.expand(kr).contains(p) {
+        for i in (0..body.elements.len()).rev().filter(|&i| live(i) && selected.contains(&keys[i])) {
             let e = &body.elements[i];
             let best = e
                 .key_points(body.scale, fonts)
@@ -230,7 +230,8 @@ impl Editor {
         if let Some(d) = &doc {
             let gone = |k: ElemKey| d.index_of(k).is_none();
             match &self.gesture {
-                Gesture::Move { key, .. } | Gesture::Reshape { key, .. } if gone(*key) => self.gesture = Gesture::Idle,
+                Gesture::Reshape { key, .. } if gone(*key) => self.gesture = Gesture::Idle,
+                Gesture::Move { items, .. } if items.iter().any(|(k, ..)| gone(*k)) => self.gesture = Gesture::Idle,
                 _ => {}
             }
             if self.typing.as_ref().is_some_and(|ty| ty.key.is_some_and(gone)) {
@@ -241,6 +242,11 @@ impl Editor {
             {
                 self.hover = Hit::None;
             }
+            self.selection.retain(|k| !gone(*k));
+        }
+        // Selection is the move tool's.
+        if self.tool != Tool::Move {
+            self.selection.clear();
         }
         // A tool change ends typing; Interact ends everything.
         if self.typing.as_ref().is_some_and(|ty| ty.tool != self.tool) {
@@ -287,14 +293,15 @@ impl Editor {
             // otherwise (e.g. Esc to close).
             if self.busy() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.cancel_gesture(&mut out);
+            } else if !self.selection.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.selection.clear();
             }
-            let deletable = self.tool == Tool::Move && !self.busy() && !matches!(self.hover, Hit::None);
+            let deletable = self.tool == Tool::Move && !self.busy() && !self.selection.is_empty();
             if deletable
                 && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace))
                 && let Some(d) = doc.as_deref_mut()
-                && let Some(e) = self.delete_hovered(d)
             {
-                out.edits.push(e);
+                out.edits.extend(self.delete_selected(d));
             }
             if doc.is_some() && matches!(self.gesture, Gesture::Idle) {
                 for tool in self.tools.clone() {
@@ -314,12 +321,12 @@ impl Editor {
                         self.pointer = Some(*p);
                         self.drag_to(*p, mods, canvas, scale, xf, region, &mut out);
                     }
-                    Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => {
+                    Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers } => {
                         self.pointer = Some(*pos);
                         if owns(*pos) {
                             let double = self.last_press.is_some_and(|(t0, p0)| now - t0 < double_secs && (p0 - *pos).length() < double_dist);
                             self.last_press = if double { None } else { Some((now, *pos)) };
-                            self.press(*pos, double, doc.as_deref_mut(), canvas, scale, xf, region, &t, &mut out);
+                            self.press(*pos, double, modifiers.shift, doc.as_deref_mut(), canvas, scale, xf, region, &t, &mut out);
                         }
                     }
                     Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers } => {
@@ -352,7 +359,7 @@ impl Editor {
                 (Gesture::Idle, Tool::Move) => {
                     if let Some(d) = &doc {
                         let skip = self.typing.as_ref().and_then(|ty| ty.key);
-                        self.hover = hit_test(d.body(), d.keys(), q, xf.zoom, &t, &self.fonts, region, true, skip);
+                        self.hover = hit_test(d.body(), d.keys(), q, xf.zoom, &t, &self.fonts, region, &self.selection, skip);
                     }
                     match self.hover {
                         Hit::Key(k, kp) => {
@@ -412,7 +419,7 @@ impl Editor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn press(&mut self, p: Pos2, double: bool, mut doc: Option<&mut Doc>, canvas: [u32; 2], scale: f32, xf: Xf, region: IRect, t: &Theme, out: &mut CanvasOut) {
+    fn press(&mut self, p: Pos2, double: bool, shift: bool, mut doc: Option<&mut Doc>, canvas: [u32; 2], scale: f32, xf: Xf, region: IRect, t: &Theme, out: &mut CanvasOut) {
         let q = xf.invert(p);
         // Marks start on whole canvas pixels (`q` stays exact for hit tests and grabs).
         let qs = pt(q.x.round(), q.y.round());
@@ -443,7 +450,7 @@ impl Editor {
             Tool::Interact => {}
             Tool::Move => {
                 let hit = match doc.as_deref() {
-                    Some(d) => hit_test(d.body(), d.keys(), q, xf.zoom, t, &self.fonts, region, true, None),
+                    Some(d) => hit_test(d.body(), d.keys(), q, xf.zoom, t, &self.fonts, region, &self.selection, None),
                     None => Hit::None,
                 };
                 self.gesture = match (hit, doc.as_deref()) {
@@ -453,10 +460,29 @@ impl Editor {
                         Gesture::Reshape { key, k, cur: el.clone(), orig: el, grab: q - at }
                     }
                     (Hit::Item(key), Some(d)) => {
-                        let el = d.element(key).unwrap().clone();
-                        Gesture::Move { key, cur: el.clone(), orig: el, start: q }
+                        // Shift toggles the item in the selection; a plain press on an
+                        // unselected item selects just it. Then the selection moves.
+                        let selected = self.selection.contains(&key);
+                        if shift && selected {
+                            self.selection.retain(|k| *k != key);
+                        } else if shift {
+                            self.selection.push(key);
+                        } else if !selected {
+                            self.selection = vec![key];
+                        }
+                        if self.selection.contains(&key) {
+                            let items = self.selection.iter().filter_map(|&k| d.element(k).map(|el| (k, el.clone(), el.clone()))).collect();
+                            Gesture::Move { items, start: q }
+                        } else {
+                            Gesture::Idle
+                        }
                     }
-                    _ => Gesture::Pan { last: p },
+                    _ => {
+                        if !shift {
+                            self.selection.clear();
+                        }
+                        Gesture::Pan { last: p }
+                    }
                 };
             }
             Tool::Text => {
@@ -530,19 +556,21 @@ impl Editor {
                     }
                 }
             }
-            Gesture::Move { orig, cur, start, .. } => {
+            Gesture::Move { items, start } => {
                 let mut d = q - *start;
                 if mods.shift {
                     if d.x.abs() > d.y.abs() { d.y = 0.0 } else { d.x = 0.0 }
                 }
-                // Whole pixels (an element with exact values keeps them), and the element
-                // keeps overlapping the region so it can be grabbed again.
-                let b = orig.bounds(scale, &self.fonts);
+                // Whole pixels (an element with exact values keeps them), and the elements
+                // keep overlapping the region so they can be grabbed again.
+                let Some(b) = items.iter().map(|(_, orig, _)| orig.bounds(scale, &self.fonts)).reduce(|a, b| a.union(&b)) else { return };
                 let m = (REACH / xf.zoom).min(r.size.w / 2.0).min(r.size.h / 2.0);
                 let keep = |d: f32, lo: f32, hi: f32| if lo <= hi { d.clamp(lo, hi) } else { d };
                 d.x = keep(d.x, (r.min.x + m - b.max().x).ceil(), (r.max().x - m - b.min.x).floor()).round();
                 d.y = keep(d.y, (r.min.y + m - b.max().y).ceil(), (r.max().y - m - b.min.y).floor()).round();
-                *cur = orig.translated(d);
+                for (_, orig, cur) in items {
+                    *cur = orig.translated(d);
+                }
             }
             Gesture::Reshape { k, orig, cur, grab, .. } => {
                 // The dragged key point stays in the region (so it can be grabbed again).
@@ -584,7 +612,16 @@ impl Editor {
                     None => self.pending.push(el),
                 }
             }
-            Gesture::Move { key, orig, cur, .. } | Gesture::Reshape { key, orig, cur, .. } => {
+            Gesture::Move { items, .. } => {
+                let Some(d) = doc else { return };
+                for (key, orig, cur) in items {
+                    if cur != orig {
+                        let e = d.replace_edit(key, cur);
+                        apply(d, e, out);
+                    }
+                }
+            }
+            Gesture::Reshape { key, orig, cur, .. } => {
                 if cur != orig
                     && let Some(d) = doc
                 {
@@ -650,11 +687,18 @@ impl Editor {
         let fonts = self.fonts.clone();
         let mut prims = Vec::new();
         let halo = Some((t.colors.hover_outline, t.size.hover_halo));
-        // The element a drag would move, or is moving, gets a glow.
-        let lit = match (&self.gesture, self.hover) {
-            (Gesture::Move { key, .. } | Gesture::Reshape { key, .. }, _) => Some(*key),
+        // Selected elements glow, and so does the one a press would grab.
+        let hovered = match (&self.gesture, self.hover) {
             (Gesture::Idle, Hit::Key(k, _) | Hit::Item(k)) => Some(k),
             _ => None,
+        };
+        let lit = |key: ElemKey| self.tool == Tool::Move && (self.selection.contains(&key) || hovered == Some(key));
+        let moved = |key: ElemKey| -> Option<&Element> {
+            match &self.gesture {
+                Gesture::Move { items, .. } => items.iter().find(|(k, ..)| *k == key).map(|(.., cur)| cur),
+                Gesture::Reshape { key: k, cur, .. } if *k == key => Some(cur),
+                _ => None,
+            }
         };
         let editing = self.typing.as_ref().and_then(|ty| ty.key);
         let mut outlines = Vec::new();
@@ -668,12 +712,9 @@ impl Editor {
                 if Some(key) == editing {
                     continue;
                 }
-                let el = match &self.gesture {
-                    Gesture::Move { key: k, cur, .. } | Gesture::Reshape { key: k, cur, .. } if *k == key => cur,
-                    _ => el,
-                };
+                let el = moved(key).unwrap_or(el);
                 element_prims(el, scale, &fonts, &mut prims);
-                if lit == Some(key) {
+                if lit(key) {
                     if el.is_picture() || matches!(el.kind, Kind::Text { .. }) {
                         outlines.push(xf.rect(el.bounds(scale, &fonts)));
                     } else {
@@ -716,26 +757,20 @@ impl Editor {
             let mut lit_points = Vec::new();
             for (i, el) in body.elements.iter().enumerate() {
                 let key = d.keys()[i];
-                if body.is_base(i) || Some(key) == editing {
+                if body.is_base(i) || Some(key) == editing || !self.selection.contains(&key) {
                     continue;
                 }
-                let el = match &self.gesture {
-                    Gesture::Move { key: k, cur, .. } | Gesture::Reshape { key: k, cur, .. } if *k == key => cur,
-                    _ => el,
-                };
+                let el = moved(key).unwrap_or(el);
                 for kp in el.key_points(scale, &fonts) {
                     if !r.expand(0.5).contains(kp.at) {
                         continue;
                     }
                     let is_hot = hot == Some((key, kp.key));
-                    if lit == Some(key) {
-                        lit_points.push((xf.apply(kp.at), is_hot));
-                    } else {
-                        paint::key_point(&mut over, xf.apply(kp.at), is_hot, t);
-                    }
+                    lit_points.push((xf.apply(kp.at), is_hot));
                 }
             }
-            // The lit element's points go on top.
+            // The hot point goes on top.
+            lit_points.sort_by_key(|(_, hot)| *hot);
             for (p, hot) in lit_points {
                 paint::key_point(&mut over, p, hot, t);
             }

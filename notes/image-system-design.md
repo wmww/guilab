@@ -262,15 +262,15 @@ impl Editor {
 - `insert` places a picture at natural size (shrunk to 90% of `fit`), centered, cascading 20×scale px off a picture already at that spot.
 - Host contract: none for switching docs. The editor remembers the `DocId` its gesture/typing/hover belong to and drops them when another doc shows up (a doc arriving where there was none keeps the pending marks). It also checks every frame that the elements they refer to still exist (host undo mid-drag just ends the drag).
 
-### Move tool (the user's spec, as built)
-On press, the first match wins (`hit_test`):
-1. **Key point** within `key_point_hit_r` (4 pt; drawn at `key_point_r` 5 pt), topmost element first, nearest point of that element → reshape (`Element::drag_key`): pictures keep aspect unless Shift, marks keep it only with Shift; text scales its size; pen scales points; line/arrow move that end. The grab offset is kept, so nothing jumps.
-2. **Item or near it** (`hit_slop` 6 pt + half stroke; topmost first) → move; Shift locks to an axis. The locked base never hits.
+### Move tool (selection-based, the user's spec, as built)
+`Editor.selection: Vec<ElemKey>` (`selection()`). Only selected elements show key points. On press, the first match wins (`hit_test`):
+1. **Key point of a selected element** within `key_point_hit_r` (4 pt; drawn at `key_point_r` 5 pt), topmost first, nearest point → reshape (`Element::drag_key`): pictures keep aspect unless Shift, marks keep it only with Shift; text scales its size; pen scales points; line/arrow move that end. The grab offset is kept, so nothing jumps.
+2. **Item or near it** (`hit_slop` 6 pt + half stroke; topmost first): plain press on an unselected item selects just it; Shift toggles it in the selection (the press's own modifiers). If the item ends up selected, the whole selection moves (one `Replace` per element at release, one undo step); Shift during the drag locks to an axis. The locked base never hits.
+3. **Otherwise** → clear the selection (not with Shift) and `pan`.
 
-Hit tests only look inside the view region, so nothing can be dragged out of reach: a move keeps the element's bounds overlapping the region by `REACH` (12 pt), and a reshape keeps the dragged key point inside it.
-3. **Otherwise** → `pan`.
+Hit tests only look inside the view region, so nothing can be dragged out of reach: a move keeps the selection's union bounds overlapping the region by `REACH` (12 pt), and a reshape keeps the dragged key point inside it.
 
-Key points show on every element (not the base or a text being edited) while Move is selected; the hovered one lights up (`key_point_hot`). The element a drag would move (or is moving) glows: strokes get a wider `hover_outline` stroke underneath, text and pictures an outline around their bounds; its key points draw on top. Cursors: `AllScroll` over/moving an item (Adwaita draws `Move` as the arrow), `ResizeNwSe`/`ResizeNeSw` on corners by direction, `Crosshair` on line ends, `Grab`/`Grabbing` for pan; drawing tools `Crosshair`, Text `Text`, Crop by handle. Outside the view region (not panning) the host's cursor.
+Delete/Backspace removes the selection (`delete_selected`), wherever the pointer is; Esc clears it (both consumed only when there is one, so the host keeps Esc otherwise). The selection is cleared on leaving the move tool, on another doc, and loses elements that go away (undo). Selected elements and the hovered one glow: strokes get a wider `hover_outline` stroke underneath, text and pictures an outline around their bounds; the hovered key point lights up (`key_point_hot`). Cursors: `AllScroll` over/moving an item (Adwaita draws `Move` as the arrow), `ResizeNwSe`/`ResizeNeSw` on corners by direction, `Crosshair` on line ends, `Grab`/`Grabbing` for pan; drawing tools `Crosshair`, Text `Text`, Crop by handle. Outside the view region (not panning) the host's cursor.
 
 ### Demo host and screenshots
 - `guilab_editor::demo::DemoHost`: a complete host (doc, a `Store` only to issue asset ids, `History<Edit>`, fit/wheel zoom/middle-drag pan, Ctrl+Z / Ctrl+Shift+Z, live view → doc on `begin`, dropped on `abandon`). Tests (`src/tests.rs`) drive it through `guilab_kit::headless::Headless` with synthetic events.
